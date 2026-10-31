@@ -1,0 +1,150 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "dns": {
+    "tag": "DNS_WARP",
+    "servers": [
+      {
+        "address": "https://1.1.1.1/dns-query",
+        "queryStrategy": "UseIPv4",
+        "skipFallback": true,
+        "finalQuery": true
+      }
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableCache": false,
+    "disableFallback": true,
+    "disableFallbackIfMatch": true,
+    "useSystemHosts": false
+  },
+  "inbounds": [
+    {
+      "tag": "WARP_EGRESS_NL_IN",
+      "listen": "__WARP_EGRESS_NETNS_LISTEN__",
+      "port": 24443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "__WARP_EGRESS_NL_CLIENT_ID__"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "routeOnly": false,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "tag": "WARP_EGRESS_BRIDGE_IN",
+      "listen": "__WARP_EGRESS_NETNS_LISTEN__",
+      "port": 24444,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "__WARP_EGRESS_BRIDGE_CLIENT_ID__"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "routeOnly": false,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "WARP_CF",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "ForceIPv4"
+      }
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPOnDemand",
+    "rules": [
+      {
+        "inboundTag": [
+          "WARP_EGRESS_NL_IN",
+          "WARP_EGRESS_BRIDGE_IN"
+        ],
+        "ip": [
+          "geoip:private",
+          "__PHYSICAL_IPV4__/32"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "inboundTag": [
+          "WARP_EGRESS_NL_IN",
+          "WARP_EGRESS_BRIDGE_IN"
+        ],
+        "domain": [
+          "geosite:private"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "inboundTag": [
+          "WARP_EGRESS_NL_IN",
+          "WARP_EGRESS_BRIDGE_IN"
+        ],
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "inboundTag": [
+          "WARP_EGRESS_NL_IN",
+          "WARP_EGRESS_BRIDGE_IN"
+        ],
+        "ip": [
+          "::/0"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "inboundTag": [
+          "DNS_WARP"
+        ],
+        "outboundTag": "WARP_CF"
+      },
+      {
+        "inboundTag": [
+          "WARP_EGRESS_NL_IN",
+          "WARP_EGRESS_BRIDGE_IN"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "WARP_CF"
+      }
+    ]
+  }
+}

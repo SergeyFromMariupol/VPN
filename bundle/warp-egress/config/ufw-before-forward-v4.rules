@@ -1,0 +1,7 @@
+# BEGIN KRYSYUK WARP NETNS FORWARD
+-A ufw-before-forward -i kw-host -s 169.254.254.2/32 -o @TARGET_INTERFACE@ -m dscp --dscp 46 -j MARK --set-xmark 0x57525001/0xffffffff
+-A ufw-before-forward -i kw-host -s 169.254.254.2/32 -o @TARGET_INTERFACE@ -m mark --mark 0x57525001/0xffffffff -j ACCEPT
+-A ufw-before-forward -i @TARGET_INTERFACE@ -o kw-host -d 169.254.254.2/32 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-forward -i kw-host -j DROP
+-A ufw-before-forward -o kw-host -j DROP
+# END KRYSYUK WARP NETNS FORWARD

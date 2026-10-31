@@ -1,0 +1,20 @@
+# Only source belongs in this repository.
+.codex/
+private/
+runtime/
+tmp/
+__pycache__/
+*.pyc
+*.env
+!VERSION.env
+*.key
+*.pem
+*.p12
+*.pfx
+*.token
+*.credentials
+*.secret
+*.db*
+*.log
+access.env
+server.env

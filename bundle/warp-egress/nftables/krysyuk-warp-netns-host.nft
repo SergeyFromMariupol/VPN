@@ -1,0 +1,18 @@
+table inet krysyuk_warp_netns_host_guard {
+  chain forward {
+    type filter hook forward priority -200; policy accept;
+
+    iifname "kw-host" ip saddr 169.254.254.2 oifname "@TARGET_INTERFACE@" ip dscp 46 meta mark set 0x57525001 counter accept
+    iifname "@TARGET_INTERFACE@" oifname "kw-host" ip daddr 169.254.254.2 ct state established,related counter accept
+    iifname "kw-host" counter drop
+    oifname "kw-host" counter drop
+  }
+}
+
+table ip krysyuk_warp_netns_nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+
+    ip saddr 169.254.254.2 oifname "@TARGET_INTERFACE@" meta mark 0x57525001 counter masquerade
+  }
+}

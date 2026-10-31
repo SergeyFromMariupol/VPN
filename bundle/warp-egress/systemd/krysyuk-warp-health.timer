@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the isolated WARP payload watchdog every 15 seconds
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+RandomizedDelaySec=2s
+Unit=krysyuk-warp-health.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,33 @@
+[Unit]
+Description=Official Cloudflare WARP daemon isolated in krysyuk-warp netns
+Requires=krysyuk-warp-netns.service
+After=krysyuk-warp-netns.service
+Before=krysyuk-warp-netns-configure.service
+Conflicts=warp-svc.service
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=/bin/warp-svc
+NetworkNamespacePath=/run/netns/krysyuk-warp
+Environment=RUNTIME_DIRECTORY=/run/krysyuk-warp-egress-warp
+Environment=STATE_DIRECTORY=/var/lib/krysyuk-warp-egress-warp
+Environment=LOGS_DIRECTORY=/var/log/krysyuk-warp-egress-warp
+RuntimeDirectory=krysyuk-warp-egress-warp
+RuntimeDirectoryMode=0700
+StateDirectory=krysyuk-warp-egress-warp
+StateDirectoryMode=0700
+LogsDirectory=krysyuk-warp-egress-warp
+LogsDirectoryMode=0700
+BindReadOnlyPaths=/etc/netns/krysyuk-warp/resolv.conf:/etc/resolv.conf
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_NET_RAW CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_NET_RAW CAP_SETUID CAP_SETGID
+Restart=always
+RestartSec=3s
+TimeoutStopSec=30s
+KillMode=mixed
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target

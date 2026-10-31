@@ -1,0 +1,16 @@
+[Unit]
+Description=Persistent isolated network namespace and narrow outer NAT for WARP
+Wants=network-online.target ufw.service
+After=network-online.target ufw.service
+Before=krysyuk-warp-netns-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/krysyuk-warp-egress/setup-netns.sh
+ExecStopPost=/usr/local/libexec/krysyuk-warp-egress/teardown-netns.sh
+RemainAfterExit=yes
+TimeoutStartSec=45s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

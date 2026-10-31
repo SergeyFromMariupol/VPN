@@ -1,0 +1,4 @@
+# BEGIN KRYSYUK WARP NETNS FORWARD V6
+-A ufw6-before-forward -i kw-host -j DROP
+-A ufw6-before-forward -o kw-host -j DROP
+# END KRYSYUK WARP NETNS FORWARD V6

@@ -1,0 +1,50 @@
+[Unit]
+Description=Standalone loopback VLESS connector with WARP-only egress
+Wants=krysyuk-warp-netns-configure.service
+Requires=krysyuk-warp-egress-guard.service
+After=krysyuk-warp-netns-configure.service krysyuk-warp-egress-guard.service
+
+[Service]
+Type=simple
+User=xraywarp
+Group=xraywarp
+Environment=XRAY_LOCATION_ASSET=/opt/krysyuk-warp-egress/share
+NetworkNamespacePath=/run/netns/krysyuk-warp
+RuntimeDirectory=krysyuk-warp-egress
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStartPre=+/usr/local/libexec/krysyuk-warp-egress/configure-ufw.sh --check-files
+ExecStartPre=+/usr/local/libexec/krysyuk-warp-egress/apply-guard.sh
+ExecStartPre=+/usr/local/libexec/krysyuk-warp-egress/render-config.sh
+ExecStart=/opt/krysyuk-warp-egress/bin/xray run -config /run/krysyuk-warp-egress/xray.json
+ExecStopPost=+/usr/bin/rm -f /run/krysyuk-warp-egress/xray.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target

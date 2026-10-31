@@ -1,0 +1,11 @@
+[Unit]
+Description=Host-loopback entrance to the isolated WARP egress connector
+Wants=krysyuk-xray-warp-egress.service
+
+[Socket]
+ListenStream=127.0.0.1:24443
+NoDelay=true
+ReusePort=false
+
+[Install]
+WantedBy=multi-user.target

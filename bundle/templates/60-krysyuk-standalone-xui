@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -eu
+umask 077
+[[ -f /etc/germanyvpn-target.env && ! -L /etc/germanyvpn-target.env && $(stat -c '%U:%G:%a' /etc/germanyvpn-target.env) == root:root:600 ]] || exit 1
+# shellcheck disable=SC1091
+source /etc/germanyvpn-target.env
+fqdn=$TARGET_FQDN
+lineage="/etc/letsencrypt/live/$fqdn"
+[ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
+root=/etc/krysyuk-standalone
+[ -L "$root/tls" ] || { printf 'ERROR: runtime TLS pointer is not a symlink\n' >&2; exit 1; }
+previous=$(readlink "$root/tls")
+case "$previous" in tls-gen.*) ;; *) exit 1;; esac
+new=$(mktemp -d "$root/tls-gen.XXXXXXXX")
+link="$root/.tls-next-$$"
+switched=0
+committed=0
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM HUP
+  rm -f -- "$link"
+  if [ "$committed" = 0 ]; then
+    if [ "$switched" = 1 ]; then
+      ln -s -- "$previous" "$link"
+      mv -Tf -- "$link" "$root/tls"
+      systemctl try-restart x-ui.service >/dev/null 2>&1 || true
+      if systemctl is-active --quiet nginx.service; then nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || true; fi
+    fi
+    rm -f -- "$new/fullchain.pem" "$new/privkey.pem"
+    rmdir -- "$new" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost "$fqdn" >/dev/null
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400 >/dev/null
+cert_pub=$(openssl x509 -in "$lineage/fullchain.pem" -pubkey -noout | openssl sha256)
+key_pub=$(openssl pkey -in "$lineage/privkey.pem" -pubout | openssl sha256)
+[ "$cert_pub" = "$key_pub" ] || exit 1
+chown root:xui-secrets "$new"
+chmod 0750 "$new"
+install -o root -g xui-secrets -m 0640 "$lineage/fullchain.pem" "$new/fullchain.pem"
+install -o root -g xui-secrets -m 0640 "$lineage/privkey.pem" "$new/privkey.pem"
+ln -s -- "$(basename "$new")" "$link"
+mv -Tf -- "$link" "$root/tls"
+switched=1
+systemctl try-restart x-ui.service >/dev/null
+if systemctl is-active --quiet nginx.service; then
+  nginx -t >/dev/null
+  systemctl reload nginx.service >/dev/null
+fi
+committed=1
+# Keep the previous root-owned generation available for certificate rollback.

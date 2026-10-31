@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify real isolated WARP payload and recover a stale tunnel
+Wants=network-online.target
+After=network-online.target krysyuk-warp-netns-configure.service krysyuk-xray-warp-egress.service
+ConditionPathExists=/etc/krysyuk-warp-egress/warp-egress.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/krysyuk-warp-egress/warp-health-watchdog.sh
+StateDirectory=krysyuk-warp-health
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=300s
+Nice=10
+IOSchedulingClass=idle

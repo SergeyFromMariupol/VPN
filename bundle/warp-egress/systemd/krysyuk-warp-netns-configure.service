@@ -1,0 +1,14 @@
+[Unit]
+Description=Idempotently register and connect isolated traffic-only WARP
+Requires=krysyuk-warp-netns-daemon.service
+After=krysyuk-warp-netns-daemon.service
+Before=krysyuk-warp-egress-guard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/krysyuk-warp-egress/configure-warp.sh
+RemainAfterExit=yes
+TimeoutStartSec=150s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+table inet krysyuk_warp_egress_guard {
+  chain output {
+    type filter hook output priority -50; policy accept;
+
+    meta skuid 0 oifname "kw-warp" ip saddr 169.254.254.2 ip dscp set 46 meta mark set 0x57525001 counter accept
+    meta skuid xraywarp oifname "lo" counter accept
+    meta skuid xraywarp oifname "kw-warp" ip saddr 169.254.254.2 ip daddr 169.254.254.1 tcp sport { 24443, 24444 } ct state established counter accept
+    meta skuid xraywarp oifname "CloudflareWARP" counter accept
+    meta skuid xraywarp counter drop
+  }
+}

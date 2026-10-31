@@ -1,0 +1,15 @@
+[Unit]
+Description=Fail-closed netns owner/interface guard for the NL WARP egress connector
+Requires=krysyuk-warp-netns.service
+Wants=krysyuk-warp-netns-configure.service
+After=krysyuk-warp-netns.service krysyuk-warp-netns-configure.service
+Before=krysyuk-xray-warp-egress.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/local/libexec/krysyuk-warp-egress/configure-ufw.sh --check
+ExecStart=/usr/local/libexec/krysyuk-warp-egress/apply-guard.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

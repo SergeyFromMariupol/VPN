@@ -1,0 +1,22 @@
+[Unit]
+Description=TCP stream proxy from host loopback into the WARP netns connector
+Requires=krysyuk-xray-warp-egress.service
+After=krysyuk-xray-warp-egress.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 169.254.254.2:24443
+DynamicUser=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
