@@ -40,7 +40,13 @@ contact=(--email "$ACME_EMAIL")
 lineage="/etc/letsencrypt/live/$TARGET_FQDN"
 [[ ! -e $lineage && ! -L $lineage ]] || { printf 'ERROR: existing certificate requires reviewed renewal\n' >&2; exit 1; }
 ! ss -H -lnt | grep -Eq '(:|\])80[[:space:]]' || exit 1
-exec 9>/run/lock/vpn-acme-bootstrap.lock
+readonly acme_lock_root=/run/vpn-acme-bootstrap
+if [[ ! -e $acme_lock_root && ! -L $acme_lock_root ]]; then mkdir -m 0700 "$acme_lock_root"; fi
+[[ -d $acme_lock_root && ! -L $acme_lock_root && $(stat -c '%u:%g:%a' "$acme_lock_root") == 0:0:700 ]] || exit 1
+if [[ -e $acme_lock_root/bootstrap.lock || -L $acme_lock_root/bootstrap.lock ]]; then
+  [[ -f $acme_lock_root/bootstrap.lock && ! -L $acme_lock_root/bootstrap.lock && $(stat -c '%u:%g:%a:%h' "$acme_lock_root/bootstrap.lock") == 0:0:600:1 ]] || exit 1
+fi
+exec 9>"$acme_lock_root/bootstrap.lock"
 flock -n 9 || { printf 'ERROR: another certificate bootstrap is active\n' >&2; exit 1; }
 systemctl is-enabled --quiet certbot.timer
 systemctl is-active --quiet certbot.timer
@@ -82,16 +88,7 @@ snapshot_ready=1
 /opt/vpn-certbot/bin/certbot certonly --standalone --non-interactive --agree-tos "${contact[@]}" \
   --server https://acme-v02.api.letsencrypt.org/directory \
   --preferred-challenges http --http-01-address "$TARGET_IPV4" "${acme_identifiers[@]}"
-if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then
-  openssl x509 -in "$lineage/cert.pem" -noout -checkip "$TARGET_IPV4" >/dev/null
-  openssl x509 -in "$lineage/cert.pem" -noout -checkend 86400 >/dev/null
-  openssl verify -CApath /etc/ssl/certs -untrusted "$lineage/chain.pem" -verify_ip "$TARGET_IPV4" "$lineage/cert.pem" >/dev/null
-else
-  openssl x509 -in "$lineage/cert.pem" -noout -checkhost "$TARGET_FQDN" >/dev/null
-  openssl x509 -in "$lineage/cert.pem" -noout -checkend 2592000 >/dev/null
-  openssl verify -CApath /etc/ssl/certs -untrusted "$lineage/chain.pem" -verify_hostname "$TARGET_FQDN" "$lineage/cert.pem" >/dev/null
-fi
-cmp -s <(openssl x509 -in "$lineage/cert.pem" -noout -pubkey) <(openssl pkey -in "$lineage/privkey.pem" -pubout)
+acme_verify_issued_certificate "$lineage"
 systemctl enable --now certbot.timer >/dev/null
 systemctl is-enabled --quiet certbot.timer
 systemctl is-active --quiet certbot.timer

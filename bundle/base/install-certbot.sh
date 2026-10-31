@@ -26,7 +26,13 @@ for path in "$lock" "$validator"; do
 done
 lock_hash=$(sha256sum "$lock"); lock_hash=${lock_hash%% *}
 readonly lock_hash
-exec 9>/run/lock/vpn-certbot-install.lock
+readonly certbot_lock_root=/run/vpn-certbot-install
+if [[ ! -e $certbot_lock_root && ! -L $certbot_lock_root ]]; then mkdir -m 0700 "$certbot_lock_root"; fi
+[[ -d $certbot_lock_root && ! -L $certbot_lock_root && $(stat -c '%u:%g:%a' "$certbot_lock_root") == 0:0:700 ]] || die 'unsafe Certbot lock directory'
+if [[ -e $certbot_lock_root/install.lock || -L $certbot_lock_root/install.lock ]]; then
+  [[ -f $certbot_lock_root/install.lock && ! -L $certbot_lock_root/install.lock && $(stat -c '%u:%g:%a:%h' "$certbot_lock_root/install.lock") == 0:0:600:1 ]] || die 'unsafe Certbot lock file'
+fi
+exec 9>"$certbot_lock_root/install.lock"
 flock -n 9 || die 'another Certbot installation is in progress'
 
 service_dropin() {

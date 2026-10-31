@@ -184,9 +184,9 @@ class EndpointCertificateGate(unittest.TestCase):
         cls.root = Path(cls.tmp.name)
         cls.bash = shutil.which('bash') or shutil.which('sh')
         # Synthetic local certificates only: no ACME or network request.
-        for name, san in [('ip', 'IP:45.67.89.10'), ('dns', 'DNS:vpn.example.org'),
-                          ('ip_as_dns', 'DNS:45.67.89.10')]:
-            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '6',
+        for name, san, days in [('ip', 'IP:45.67.89.10', '6'), ('dns', 'DNS:vpn.example.org', '6'),
+                                ('ip_as_dns', 'DNS:45.67.89.10', '6'), ('expiring', 'IP:45.67.89.10', '1')]:
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', days,
                             '-subj', '/CN=fixture', '-addext', 'subjectAltName=' + san,
                             '-keyout', str(cls.root / (name + '.key')),
                             '-out', str(cls.root / (name + '.pem'))],
@@ -196,13 +196,25 @@ class EndpointCertificateGate(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def check(self, mode, name, success):
+    def check(self, mode, name, success, trusted=True):
         env = dict(os.environ, TARGET_ADDRESS_MODE=mode, TARGET_IPV4='45.67.89.10',
                    TARGET_FQDN='45.67.89.10' if mode == 'ip' else 'vpn.example.org')
-        result = subprocess.run([self.bash, '-c', CERTIFICATE_FUNCTION + '\nverify_target_certificate "$1"',
+        # Trust synthetic fixtures only inside this subprocess. Production still
+        # requires the host's public CA store and performs actual OpenSSL checks.
+        env['TEST_CA_FILE'] = str(self.root / (name + '.pem')) if trusted else ''
+        wrapper = '''openssl() {
+  if [[ $1 == verify && -n $TEST_CA_FILE ]]; then
+    shift
+    command openssl verify -CAfile "$TEST_CA_FILE" "$@"
+  else
+    command openssl "$@"
+  fi
+}
+'''
+        result = subprocess.run([self.bash, '-c', wrapper + CERTIFICATE_FUNCTION + '\nverify_target_certificate "$1"',
                                  'fixture', str(self.root / (name + '.pem'))],
                                 env=env, capture_output=True)
-        self.assertEqual(result.returncode == 0, success)
+        self.assertEqual(result.returncode == 0, success, result.stderr.decode(errors='replace'))
 
     def test_six_day_ip_certificate_is_accepted(self):
         self.check('ip', 'ip', True)
@@ -218,6 +230,12 @@ class EndpointCertificateGate(unittest.TestCase):
 
     def test_domain_mode_rejects_ip_certificate(self):
         self.check('domain', 'ip', False)
+
+    def test_rejects_untrusted_certificate(self):
+        self.check('ip', 'ip', False, trusted=False)
+
+    def test_rejects_certificate_expiring_within_one_day(self):
+        self.check('ip', 'expiring', False)
 
 
 if __name__ == '__main__':

@@ -49,6 +49,81 @@ class IdentifierArguments(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class IssuedCertificateIdentity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = os.environ.get("VPN_TEST_BASH") or shutil.which("bash")
+        cls.openssl = shutil.which("openssl")
+        if not cls.bash or not cls.openssl:
+            raise unittest.SkipTest("Bash and OpenSSL are required for local CA fixtures")
+        cls.temp = tempfile.TemporaryDirectory(prefix="acme-certificate-")
+        cls.addClassCleanup(cls.temp.cleanup)
+        cls.root = Path(cls.temp.name)
+        cls.lineage = cls.root / "lineage"
+        cls.trust = cls.root / "trust"
+        cls.empty_trust = cls.root / "untrusted"
+        for path in (cls.lineage, cls.trust, cls.empty_trust):
+            path.mkdir()
+        config = cls.root / "fixture.cnf"
+        config.write_text("""[req]
+distinguished_name=dn
+[dn]
+CN=VPN offline fixture
+[root]
+basicConstraints=critical,CA:true
+keyUsage=critical,keyCertSign,cRLSign
+[leaf]
+basicConstraints=critical,CA:false
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=IP:198.51.100.55,DNS:vpn.example.invalid
+""", encoding="utf-8")
+
+        def openssl(*args):
+            subprocess.run([cls.openssl, *map(str, args)], check=True, capture_output=True)
+
+        ca = cls.trust / "fixture-ca.pem"
+        ca_key = cls.root / "ca.key"
+        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "60",
+                "-keyout", ca_key, "-out", ca, "-subj", "/CN=VPN offline fixture CA",
+                "-config", config, "-extensions", "root")
+        openssl("rehash", cls.trust)
+        csr = cls.root / "leaf.csr"
+        openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout",
+                cls.lineage / "privkey.pem", "-out", csr, "-subj", "/CN=vpn.example.invalid",
+                "-config", config)
+        openssl("x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key,
+                "-CAcreateserial", "-days", "45", "-out", cls.lineage / "cert.pem",
+                "-extfile", config, "-extensions", "leaf")
+        shutil.copyfile(ca, cls.lineage / "chain.pem")
+
+    def verify(self, mode, endpoint="vpn.example.invalid", ip="198.51.100.55", trust=None):
+        return subprocess.run(
+            [self.bash, "-c", 'source "$1"; TARGET_ADDRESS_MODE=$2; TARGET_FQDN=$3; TARGET_IPV4=$4; '
+             'acme_verify_issued_certificate "$5" "$6"', "--",
+             (BASE / "acme-identifiers.sh").as_posix(), mode, endpoint, ip,
+             self.lineage.as_posix(), (trust or self.trust).as_posix()],
+            check=False, capture_output=True,
+        )
+
+    def test_matching_ip_and_trusted_chain_pass(self):
+        result = self.verify("ip", "198.51.100.55")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mismatched_ip_is_rejected(self):
+        self.assertNotEqual(self.verify("ip", "198.51.100.56", "198.51.100.56").returncode, 0)
+
+    def test_matching_domain_and_trusted_chain_pass(self):
+        result = self.verify("domain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mismatched_domain_is_rejected(self):
+        self.assertNotEqual(self.verify("domain", "wrong.example.invalid").returncode, 0)
+
+    def test_untrusted_chain_is_rejected(self):
+        self.assertNotEqual(self.verify("ip", "198.51.100.55", trust=self.empty_trust).returncode, 0)
+
+
 class FakeDistribution:
     def __init__(self, root, name, version="5.9.0"):
         self.root = root

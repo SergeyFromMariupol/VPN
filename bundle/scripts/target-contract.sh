@@ -62,10 +62,14 @@ fi
 verify_target_certificate() {
   local certificate=$1
   openssl x509 -in "$certificate" -noout -checkend 86400 >/dev/null || return 1
+  # x509 -checkip/-checkhost can report a mismatch while returning success.
+  # verify fails on either an identity mismatch or an untrusted certificate.
   if [[ $TARGET_ADDRESS_MODE == ip ]]; then
-    openssl x509 -in "$certificate" -noout -checkip "$TARGET_IPV4" >/dev/null
+    openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$certificate" \
+      -verify_ip "$TARGET_IPV4" "$certificate" >/dev/null
   else
-    openssl x509 -in "$certificate" -noout -checkhost "$TARGET_FQDN" >/dev/null
+    openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$certificate" \
+      -verify_hostname "$TARGET_FQDN" "$certificate" >/dev/null
   fi
 }
 
