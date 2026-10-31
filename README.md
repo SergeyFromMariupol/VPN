@@ -21,10 +21,14 @@ IP и сетевой интерфейс установщик определяе�
 Подключитесь к VPS по SSH и выполните:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.1.2/install.sh -o /root/vpn-install.sh && bash /root/vpn-install.sh
+(command -v curl >/dev/null || (apt-get update && apt-get install -y curl)) && curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.1.2/install.sh -o /root/vpn-install.sh && bash /root/vpn-install.sh
 ```
 
-Если `curl` отсутствует, сначала выполните `apt-get update && apt-get install -y curl`.
+На минимальном образе команда сначала установит `curl`. Скрипт работает от
+`root`: после read-only проверки он выполнит `apt-get update` и
+`apt-get upgrade -y --no-remove`, затем установит VPN. Завершённые обновления
+системных пакетов сохраняются, даже если последующий этап VPN потребует повтора;
+план и версии пакетов записываются в закрытый снимок.
 Установщик запросит необязательный домен, email, **произвольное начало названий
 профилей**, REALITY SNI и лимит IP на профиль. Перед изменениями он проверяет
 чистоту сервера, DNS домена (если указан) и TLS 1.3/H2 выбранного REALITY target.

@@ -103,6 +103,7 @@ else
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
   printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nFirewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$TARGET_SSH_PORT"
   printf 'Если в панели провайдера включён отдельный firewall, разрешите эти же порты там.\n'
+  printf 'После подтверждения обновятся пакеты Ubuntu (apt-get update/upgrade), затем установится VPN.\n'
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
   install -d -m 0700 "$state" "$destination"
