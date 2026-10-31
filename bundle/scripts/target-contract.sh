@@ -10,8 +10,9 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
   source /etc/germanyvpn-target.env
 fi
 TARGET_FQDN=${TARGET_FQDN:?TARGET_FQDN is required}
+TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 [[ $TARGET_FQDN =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && $TARGET_FQDN == *.* && $TARGET_FQDN != *..* ]] || {
-  printf 'ERROR: TARGET_FQDN must be a lowercase public DNS name\n' >&2; return 1;
+  printf 'ERROR: TARGET_FQDN must be a lowercase DNS name or public IPv4\n' >&2; return 1;
 }
 TARGET_IPV4=${TARGET_IPV4:?TARGET_IPV4 is required}
 TARGET_INTERFACE=${TARGET_INTERFACE:?TARGET_INTERFACE is required}
@@ -22,24 +23,51 @@ TARGET_LABEL=${TARGET_LABEL:?TARGET_LABEL is required}
 [[ $TARGET_INTERFACE =~ ^[a-zA-Z0-9_.:-]+$ && $TARGET_SSH_PORT =~ ^[0-9]+$ && $TARGET_DEVICE_LIMIT =~ ^[0-9]+$ ]] || return 1
 ((TARGET_SSH_PORT >= 1 && TARGET_SSH_PORT <= 65535 && TARGET_DEVICE_LIMIT <= 10000)) || return 1
 [[ $TARGET_REALITY_SNI =~ ^[a-z0-9.-]+$ && $TARGET_REALITY_SNI != *cloudflare* ]] || return 1
-export TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_LABEL
-python3 - <<'PY'
+export TARGET_IPV4 TARGET_FQDN TARGET_ADDRESS_MODE TARGET_INTERFACE TARGET_SSH_PORT TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_LABEL
+if ! python3 - <<'PY'
 import ipaddress
 import os
 import re
+import unicodedata
 address = ipaddress.IPv4Address(os.environ['TARGET_IPV4'])
 if not address.is_global:
     raise SystemExit('TARGET_IPV4 must be public IPv4')
-for field in ('TARGET_FQDN', 'TARGET_REALITY_SNI'):
+mode = os.environ['TARGET_ADDRESS_MODE']
+if mode not in ('domain', 'ip'):
+    raise SystemExit('TARGET_ADDRESS_MODE must be domain or ip')
+if mode == 'ip' and os.environ['TARGET_FQDN'] != str(address):
+    raise SystemExit('IP endpoint must equal TARGET_IPV4')
+for field in (('TARGET_FQDN', 'TARGET_REALITY_SNI') if mode == 'domain' else ('TARGET_REALITY_SNI',)):
     name = os.environ[field]
     if len(name) > 253 or len(name.split('.')) < 2 or any(
         not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
         for label in name.split('.')):
         raise SystemExit(field + ' must be a lowercase DNS hostname')
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(field + ' must be a DNS hostname, not an IP literal')
 label = os.environ['TARGET_LABEL']
-if not 1 <= len(label) <= 80 or any(ord(c) < 32 or ord(c) == 127 for c in label):
+if not 1 <= len(label) <= 80 or any(unicodedata.category(c) in {'Cc', 'Zl', 'Zp'} for c in label):
     raise SystemExit('invalid TARGET_LABEL')
 PY
+then
+  return 1
+fi
+
+# The same verification covers long-lived domain and short-lived IP certificates.
+# Keep the public endpoint distinct from the independent REALITY disguise SNI.
+verify_target_certificate() {
+  local certificate=$1
+  openssl x509 -in "$certificate" -noout -checkend 86400 >/dev/null || return 1
+  if [[ $TARGET_ADDRESS_MODE == ip ]]; then
+    openssl x509 -in "$certificate" -noout -checkip "$TARGET_IPV4" >/dev/null
+  else
+    openssl x509 -in "$certificate" -noout -checkhost "$TARGET_FQDN" >/dev/null
+  fi
+}
 
 # Keep every jq string argument out of the native process command line.
 # Shell function arguments stay in shell memory; rawfiles have identical string

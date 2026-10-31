@@ -14,6 +14,7 @@ jobs:
           python3 -m compileall -q tools bundle tests
           python3 -m unittest discover -s tests -v
           python3 bundle/tests/test-core.py
+          python3 -m unittest discover -s bundle/base -p test_certbot_contract.py -v
       - name: Verify source manifest
         run: sha256sum --check --strict SHA256SUMS
       - name: WARP transaction and watchdog tests
@@ -21,3 +22,13 @@ jobs:
           bash bundle/warp-egress/tests/test-bootstrap-plan-safety.sh
           bash bundle/warp-egress/tests/test-health-watchdog-semantics.sh
           sudo bash bundle/warp-egress/tests/test-phase-checkpoints.sh
+      - name: Install and check pinned Certbot with IP support
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"
+          "$RUNNER_TEMP/vpn-certbot/bin/python" -m pip --isolated install --require-hashes --only-binary=:all: --index-url https://pypi.org/simple -r bundle/base/certbot-requirements.txt
+          "$RUNNER_TEMP/vpn-certbot/bin/python" -m pip check
+          "$RUNNER_TEMP/vpn-certbot/bin/python" -I bundle/base/verify-certbot.py bundle/base/certbot-requirements.txt "$RUNNER_TEMP/vpn-certbot"
+          "$RUNNER_TEMP/vpn-certbot/bin/certbot" --version
+          "$RUNNER_TEMP/vpn-certbot/bin/certbot" --help all > "$RUNNER_TEMP/certbot-help.txt"
+          grep -F -- '--ip-address' "$RUNNER_TEMP/certbot-help.txt"
+          grep -F -- '--required-profile' "$RUNNER_TEMP/certbot-help.txt"

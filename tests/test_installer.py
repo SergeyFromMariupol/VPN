@@ -2,6 +2,8 @@
 import importlib.util
 import os
 from pathlib import Path
+import shlex
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,7 +20,8 @@ def module(name, path):
 
 preflight = module('preflight', ROOT / 'tools/preflight.py')
 renderer = module('renderer', ROOT / 'tools/render.py')
-GOOD = dict(TARGET_IPV4='8.8.4.4', TARGET_FQDN='vpn.example.com',
+writer = module('writer', ROOT / 'tools/write-target.py')
+GOOD = dict(TARGET_ADDRESS_MODE='domain', TARGET_IPV4='8.8.4.4', TARGET_FQDN='vpn.example.com',
             TARGET_INTERFACE='enp1s0', TARGET_SSH_PORT='2222',
             TARGET_DEVICE_LIMIT='0', TARGET_REALITY_SNI='example.org',
             TARGET_LABEL='🇩🇪 Германия', ACME_EMAIL='admin@example.com')
@@ -28,6 +31,32 @@ class Inputs(unittest.TestCase):
     def test_valid(self):
         preflight.validate_inputs(GOOD)
 
+    def test_ip_and_custom_prefix(self):
+        for label in ('🇳🇱 Нидерланды', 'Мой VPN', 'Сервер друга', 'My "VPN" $HOME `literal` \\ 🇫🇷'):
+            preflight.validate_inputs({**GOOD, 'TARGET_LABEL': label})
+            preflight.validate_inputs({**GOOD, 'TARGET_LABEL': label,
+                                       'TARGET_ADDRESS_MODE': 'ip', 'TARGET_FQDN': GOOD['TARGET_IPV4']})
+
+    def test_mode_rejects_unrelated_ip(self):
+        for mode, endpoint in (('ip', '8.8.8.8'), ('ip', 'vpn.example.com'), ('domain', '8.8.4.4'),
+                               ('unexpected', 'vpn.example.com')):
+            with self.subTest(mode=mode, endpoint=endpoint), self.assertRaises(ValueError):
+                preflight.validate_inputs({**GOOD, 'TARGET_ADDRESS_MODE': mode, 'TARGET_FQDN': endpoint})
+
+    def test_ip_mode_does_not_query_endpoint_dns(self):
+        with patch.object(preflight, 'dns', side_effect=AssertionError('IP DNS queried')):
+            preflight.check_endpoint_dns({**GOOD, 'TARGET_ADDRESS_MODE': 'ip', 'TARGET_FQDN': GOOD['TARGET_IPV4']})
+
+    def test_domain_checks_both_resolvers_and_aaaa(self):
+        with patch.object(preflight, 'dns', side_effect=lambda name, kind, resolver: [GOOD['TARGET_IPV4']] if kind == 1 else []) as query:
+            preflight.check_endpoint_dns(GOOD)
+            self.assertEqual(query.call_count, 4)
+        for bad in ([GOOD['TARGET_IPV4'], '8.8.8.8'], ['8.8.8.8'], []):
+            with self.subTest(records=bad), patch.object(preflight, 'dns', return_value=bad), self.assertRaises(ValueError):
+                preflight.check_endpoint_dns(GOOD)
+        with patch.object(preflight, 'dns', side_effect=lambda name, kind, resolver: [GOOD['TARGET_IPV4']] if kind == 1 else ['2001:4860:4860::8888']), self.assertRaises(ValueError):
+            preflight.check_endpoint_dns(GOOD)
+
     def test_bad_values_rejected(self):
         for field, values in {
             'TARGET_IPV4': ['127.0.0.1', '192.168.0.4', '::1', '999.1.1.1'],
@@ -35,13 +64,54 @@ class Inputs(unittest.TestCase):
             'TARGET_INTERFACE': ['eth0\nid', 'eth0;id', ''],
             'TARGET_SSH_PORT': ['0', '65536', '8444', '443', '-1', '22;id'],
             'TARGET_DEVICE_LIMIT': ['-1', '10001', '0;id'],
-            'TARGET_REALITY_SNI': ['cloudflare.com', 'a\nb.com'],
-            'TARGET_LABEL': ['x\ny', '$(id)', '`id`', '"label"'],
+            'TARGET_REALITY_SNI': ['cloudflare.com', 'a\nb.com', '8.8.8.8'],
+            'TARGET_LABEL': ['x\ny', 'x\ry', '\x7f', 'x\u0085y', 'x\u2028y', 'x\u2029y'],
             'ACME_EMAIL': ['not-email', 'a@example.com\nx'],
         }.items():
             for value in values:
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                     preflight.validate_inputs({**GOOD, field: value})
+
+
+class TargetPersistence(unittest.TestCase):
+    def test_arbitrary_prefix_roundtrip(self):
+        label = 'Сервер друга: "VPN" \'east\' $HOME `literal` \\ 🇫🇷'
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / 'target.env'
+            writer.write_target(destination, {**GOOD, 'TARGET_LABEL': label})
+            values = {}
+            for line in destination.read_text(encoding='utf-8').splitlines():
+                key, raw = line.split('=', 1)
+                values[key] = shlex.split(raw)[0]
+            self.assertEqual(values['TARGET_LABEL'], label)
+            self.assertEqual(values['ACME_EMAIL'], GOOD['ACME_EMAIL'])
+            self.assertEqual(values['TARGET_ADDRESS_MODE'], 'domain')
+            with self.assertRaises(FileExistsError):
+                writer.write_target(destination, GOOD)
+
+    @unittest.skipIf(os.name == 'nt', 'Actual Bash environment fixture runs in Ubuntu CI')
+    def test_prefix_is_literal_when_shell_sources_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / 'must-not-exist'
+            label = f'Мой "VPN" $(touch {marker}) `touch {marker}` \'quote\' $HOME \\ 🇫🇷'
+            destination = Path(temp) / 'target.env'
+            writer.write_target(destination, {**GOOD, 'TARGET_LABEL': label})
+            output = subprocess.check_output(['bash', '-c', 'source "$1"; printf "%s" "$TARGET_LABEL"', '_', str(destination)], text=True)
+            self.assertEqual(output, label)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == 'nt', 'Actual OpenSSL/Bash generators run in Ubuntu CI')
+    def test_fresh_installs_generate_distinct_access_secrets(self):
+        source = (ROOT / 'bundle/scripts/configure-standalone.sh').read_text(encoding='utf-8')
+        start = source.index('random_hex() {')
+        end = source.index('vless_uuid=', start)
+        generators = source[start:end]
+        script = generators + '\nprintf "%s\\n" "$panel_username" "$panel_password" "$panel_base_path" "$subscription_path" "$subscription_id"\n'
+        first = subprocess.check_output(['bash', '-c', script], text=True).splitlines()
+        second = subprocess.check_output(['bash', '-c', script], text=True).splitlines()
+        self.assertEqual(len(first), 5)
+        self.assertTrue(all(a != b for a, b in zip(first, second)))
+        self.assertEqual([len(v) for v in first[2:]], [64, 40, 64])
 
 
 class Rendering(unittest.TestCase):

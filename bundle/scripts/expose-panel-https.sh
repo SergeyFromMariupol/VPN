@@ -64,10 +64,8 @@ source "$runtime_env"
 [[ -f "$tls_private_key" && ! -L "$tls_private_key" ]] || die 'TLS private key is missing or unsafe'
 [[ "$(stat -c '%U:%G:%a' "$tls_private_key")" == 'root:xui-secrets:640' ]] ||
   die 'unexpected TLS private-key ownership or mode'
-openssl x509 -in "$tls_fullchain" -noout -checkend 86400 >/dev/null ||
-  die 'TLS certificate expires within 24 hours or is invalid'
-openssl x509 -in "$tls_fullchain" -noout -checkhost "$PUBLIC_FQDN" >/dev/null ||
-  die 'TLS certificate does not cover the public FQDN'
+verify_target_certificate "$tls_fullchain" ||
+  die 'TLS certificate is invalid, expires within 24 hours or does not cover the public endpoint'
 cert_pub=$(openssl x509 -in "$tls_fullchain" -pubkey -noout | openssl sha256)
 key_pub=$(openssl pkey -in "$tls_private_key" -pubout | openssl sha256)
 [[ "$cert_pub" == "$key_pub" ]] || die 'TLS certificate/private-key mismatch'

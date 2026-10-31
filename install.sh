@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.0.0'
+readonly release='v1.1.0'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -68,16 +68,8 @@ if [[ $mode == --resume ]]; then
   (cd -- "$destination"; sha256sum --check --strict SHA256SUMS >/dev/null)
 else
   [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
-  [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для домена и email'
+  [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
   printf '\nVPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
-  read -r -p 'Домен VPN (A-запись уже указывает на этот VPS, без AAAA/proxy): ' TARGET_FQDN </dev/tty
-  read -r -p 'Email для Let’s Encrypt: ' ACME_EMAIL </dev/tty
-  read -r -p 'Название страны с флагом [🇩🇪 Германия]: ' TARGET_LABEL </dev/tty
-  TARGET_LABEL=${TARGET_LABEL:-🇩🇪 Германия}
-  read -r -p 'REALITY SNI [max.ru]: ' TARGET_REALITY_SNI </dev/tty
-  TARGET_REALITY_SNI=${TARGET_REALITY_SNI:-max.ru}
-  read -r -p 'Лимит IP на профиль, 0 = без лимита [0]: ' TARGET_DEVICE_LIMIT </dev/tty
-  TARGET_DEVICE_LIMIT=${TARGET_DEVICE_LIMIT:-0}
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
   else
@@ -85,11 +77,27 @@ else
     read -r -p 'SSH порт [22]: ' TARGET_SSH_PORT </dev/tty
     TARGET_SSH_PORT=${TARGET_SSH_PORT:-22}
   fi
-  TARGET_INTERFACE=$(ip -o -4 address show | awk -v addr="$TARGET_IPV4" '$4 ~ ("^" addr "/") {print $2}')
-  export TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
-  printf 'Проверка чистого сервера, DNS и TLS…\n'
+  TARGET_INTERFACE=$(ip -o -4 address show | awk -v addr="$TARGET_IPV4" '{split($4,a,"/"); if(a[1]==addr) print $2}')
+  printf 'Определён IPv4 сервера: %s\n' "$TARGET_IPV4"
+  read -r -p 'Домен VPN (Enter = без домена, по IP сервера): ' TARGET_FQDN </dev/tty
+  if [[ -z $TARGET_FQDN ]]; then
+    TARGET_ADDRESS_MODE=ip
+    TARGET_FQDN=$TARGET_IPV4
+  else
+    TARGET_ADDRESS_MODE=domain
+    printf 'Для домена нужна одна A-запись на %s, без AAAA и Cloudflare Proxy.\n' "$TARGET_IPV4"
+  fi
+  read -r -p 'Ваш email для Let’s Encrypt (обязательно): ' ACME_EMAIL </dev/tty
+  read -r -p 'Начало названий профилей — страна или любое имя [🇩🇪 Германия]: ' TARGET_LABEL </dev/tty
+  TARGET_LABEL=${TARGET_LABEL:-🇩🇪 Германия}
+  read -r -p 'REALITY SNI [max.ru]: ' TARGET_REALITY_SNI </dev/tty
+  TARGET_REALITY_SNI=${TARGET_REALITY_SNI:-max.ru}
+  read -r -p 'Лимит IP на профиль, 0 = без лимита [0]: ' TARGET_DEVICE_LIMIT </dev/tty
+  TARGET_DEVICE_LIMIT=${TARGET_DEVICE_LIMIT:-0}
+  export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
+  printf 'Проверка чистого сервера, адреса и TLS…\n'
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
-  printf '\nСервер: %s; домен: %s. Откроются TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN"
+  printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nОткроются TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE"
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
   install -d -m 0700 "$state" "$destination"
@@ -99,7 +107,8 @@ else
   python3 "$destination/tools/write-target.py" "$target_file"
   cat /proc/sys/kernel/random/boot_id >"$state/install-boot-id"
 fi
-export TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
+TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
+export TARGET_ADDRESS_MODE TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
@@ -125,6 +134,8 @@ phase() {
   fi
 }
 phase base bash "$runtime/base/install-pinned-base.sh" --apply
+phase certbot bash "$runtime/base/install-certbot.sh" --apply
+bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log" 2>&1
 phase tls bash "$runtime/base/acme.sh" --apply
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
 phase panel bash "$runtime/scripts/expose-panel-https.sh" --apply

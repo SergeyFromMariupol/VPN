@@ -149,6 +149,7 @@ for warp_test in test-smoke.sh test-main-route-isolation.sh test-e2e-local.sh te
   "$warp_tests/$warp_test" >/dev/null
 done
 
+if [[ $TARGET_ADDRESS_MODE == domain ]]; then
 for resolver in 1.1.1.1 9.9.9.9; do
   mapfile -t public_a < <(dig +time=5 +tries=2 +short "@$resolver" "$PUBLIC_FQDN" A \
     | sed '/^[[:space:]]*$/d' | sort -u)
@@ -157,6 +158,7 @@ for resolver in 1.1.1.1 9.9.9.9; do
     | sed '/^[[:space:]]*$/d' | sort -u)
   [[ "${#public_aaaa[@]}" -eq 0 ]]
 done
+fi
 unset resolver public_a public_aaaa
 
 for unit in nginx.service x-ui.service certbot.timer krysyuk-warp-health.timer; do
@@ -277,9 +279,7 @@ jq --exit-status --rawfile connector "$stage/connector.uuid" '
       and .streamSettings.xhttpSettings.mode=="packet-up") end)
 ' /usr/local/x-ui/bin/config.json >/dev/null
 
-openssl x509 -in "$runtime_root/tls/fullchain.pem" -noout -checkend 2592000 >/dev/null
-openssl x509 -in "$runtime_root/tls/fullchain.pem" -noout -ext subjectAltName \
-  | grep_drain -F "DNS:${PUBLIC_FQDN}"
+verify_target_certificate "$runtime_root/tls/fullchain.pem"
 nginx -t >/dev/null
 [[ "$(stat -c '%U:%G:%a' /etc/nginx/conf.d/3x-ui-public.conf)" == 'root:root:600' ]]
 [[ "$(stat -c '%U:%G:%a' /etc/letsencrypt/renewal-hooks/deploy/70-krysyuk-standalone-nginx)" == 'root:root:755' ]]
@@ -350,6 +350,10 @@ jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
   and ($rs[0].streamSettings.network=="grpc"
     and $rs[0].streamSettings.grpcSettings.serviceName=="reality-grpc"
     and ([ $rs[0].settings.clients[].flow ]|all(.=="" or .==null)))
+  and ($hs[0].streamSettings.tlsSettings.serverName==$fqdn
+    and $hs[0].streamSettings.tlsSettings.rejectUnknownSni==(env.TARGET_ADDRESS_MODE!="ip"))
+  and ($xs[0].streamSettings.tlsSettings.serverName==$fqdn
+    and $xs[0].streamSettings.tlsSettings.rejectUnknownSni==(env.TARGET_ADDRESS_MODE!="ip"))
   and ($rs[0].settings.clients[0].id==($warp_reality|clean)
     and $rs[0].settings.clients[0].email=="germany-warp-reality"
     and $rs[0].settings.clients[0].subId==($public_sub|clean)

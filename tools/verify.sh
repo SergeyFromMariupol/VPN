@@ -3,6 +3,7 @@ set -Eeuo pipefail
 umask 077
 [[ $EUID == 0 ]] || exit 1
 readonly bundle='/var/lib/vpn-installer/bundle'
+bash "$bundle/base/install-certbot.sh" --check-only
 for unit in x-ui nginx certbot.timer krysyuk-warp-netns.service \
   krysyuk-warp-netns-daemon.service krysyuk-warp-netns-configure.service \
   krysyuk-warp-egress-guard.service krysyuk-xray-warp-egress.service \
@@ -14,10 +15,12 @@ done
 [[ $(ps -p "$(systemctl show x-ui -p MainPID --value)" -o user= | xargs) == xui ]]
 nginx -t >/dev/null 2>&1
 source "$bundle/scripts/target-contract.sh"
-for resolver in 1.1.1.1 9.9.9.9; do
-  [[ $(dig +short "@$resolver" "$TARGET_FQDN" A) == "$TARGET_IPV4" ]]
-  [[ -z $(dig +short "@$resolver" "$TARGET_FQDN" AAAA) ]]
-done
+if [[ $TARGET_ADDRESS_MODE == domain ]]; then
+  for resolver in 1.1.1.1 9.9.9.9; do
+    [[ $(dig +short "@$resolver" "$TARGET_FQDN" A) == "$TARGET_IPV4" ]]
+    [[ -z $(dig +short "@$resolver" "$TARGET_FQDN" AAAA) ]]
+  done
+fi
 openssl x509 -in "/etc/letsencrypt/live/$TARGET_FQDN/fullchain.pem" -noout -checkend 86400 >/dev/null
 current_boot=$(cat /proc/sys/kernel/random/boot_id)
 if [[ $current_boot != "$(cat /var/lib/vpn-installer/install-boot-id)" ]]; then

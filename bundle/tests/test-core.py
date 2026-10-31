@@ -5,6 +5,7 @@ import base64
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'tests/postboot-verify.sh'
 CODE = next(code for code in re.findall(r"<<'PY'\n(.*?)\nPY", SCRIPT.read_text(encoding='utf-8'), re.S)
             if 'Reality public parameter mismatch' in code)
+CONTRACT_CODE = re.findall(r"<<'PY'\n(.*?)\nPY", (ROOT / 'scripts/target-contract.sh').read_text(encoding='utf-8'), re.S)[0]
+CERTIFICATE_FUNCTION = re.search(r'^verify_target_certificate\(\) \{\n.*?^\}',
+                                 (ROOT / 'scripts/target-contract.sh').read_text(encoding='utf-8'),
+                                 re.M | re.S).group(0)
 
 
 class BaselineSubscriptionGate(unittest.TestCase):
@@ -23,6 +28,7 @@ class BaselineSubscriptionGate(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.label = '🇳🇱 Нидерланды'
+        self.endpoint = 'vpn.example.org'
         self.secrets = {
             'warp-reality.uuid': '11d3f6ca-d1bb-40b7-aa23-8c638dc985ac',
             'warp-xhttp.uuid': '22d3f6ca-d1bb-40b7-aa23-8c638dc985ac',
@@ -62,7 +68,7 @@ class BaselineSubscriptionGate(unittest.TestCase):
         body = self.root / 'body'
         body.write_bytes(base64.b64encode(('\n'.join(links) + '\n').encode()))
         env = dict(os.environ, SECRET_DIR=str(self.root), SUB_BODY=str(body),
-                   CHECK_FQDN='vpn.example.org', CHECK_TARGET='max.ru', TARGET_LABEL=self.label)
+                   CHECK_FQDN=self.endpoint, CHECK_TARGET='max.ru', TARGET_LABEL=self.label)
         result = subprocess.run([sys.executable, '-c', CODE], env=env, capture_output=True)
         self.assertEqual(result.returncode == 0, success, 'gate returned unexpected status')
 
@@ -73,6 +79,17 @@ class BaselineSubscriptionGate(unittest.TestCase):
         self.links[index] = urlunsplit(parts._replace(query=urlencode(query, doseq=True)))
 
     def test_accepts_non_german_label_and_six_profiles(self):
+        self.check(self.links, True)
+
+    def test_accepts_ip_endpoint_with_certificate_verification(self):
+        self.endpoint = '45.67.89.10'
+        self.links = [link.replace('vpn.example.org', self.endpoint) for link in self.links]
+        self.check(self.links, True)
+
+    def test_accepts_literal_shell_characters_in_display_prefix(self):
+        previous = self.label
+        self.label = "Мой VPN \" ' `echo $HOME` ${value} / 😀"
+        self.links = [link.replace(quote(previous), quote(self.label)) for link in self.links]
         self.check(self.links, True)
 
     def test_rejects_missing_profile(self):
@@ -122,6 +139,85 @@ class BaselineSubscriptionGate(unittest.TestCase):
         for file in [*ROOT.glob('scripts/*.sh'), *ROOT.glob('tests/*.sh')]:
             for code in re.findall(r"<<'PY'\n(.*?)\nPY", file.read_text(encoding='utf-8'), re.S):
                 ast.parse(code, filename=str(file))
+
+
+class TargetAddressContract(unittest.TestCase):
+    def check(self, success, **changes):
+        env = dict(os.environ, TARGET_IPV4='45.67.89.10', TARGET_FQDN='vpn.example.org',
+                   TARGET_REALITY_SNI='max.ru', TARGET_ADDRESS_MODE='domain', TARGET_LABEL='Мой VPN')
+        env.update(changes)
+        result = subprocess.run([sys.executable, '-c', CONTRACT_CODE], env=env, capture_output=True)
+        self.assertEqual(result.returncode == 0, success, 'target contract returned unexpected status')
+
+    def test_domain(self):
+        self.check(True)
+
+    def test_ip(self):
+        self.check(True, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='45.67.89.10')
+
+    def test_ip_must_equal_public_ipv4(self):
+        self.check(False, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='45.67.89.11')
+
+    def test_domain_mode_does_not_accept_ip_literal(self):
+        self.check(False, TARGET_FQDN='45.67.89.10')
+
+    def test_reality_sni_remains_domain(self):
+        self.check(False, TARGET_REALITY_SNI='45.67.89.10')
+
+    def test_label_accepts_shell_characters_as_plain_text(self):
+        self.check(True, TARGET_LABEL="Мой VPN \" ' `echo $HOME` ${value} / 😀")
+
+    def test_label_rejects_line_separators_and_controls(self):
+        for control in ('\x00', '\x0a', '\x7f', '\x85', '\u2028', '\u2029'):
+            if control == '\x00':
+                continue  # Process environments cannot represent a NUL byte.
+            with self.subTest(control=ord(control)):
+                self.check(False, TARGET_LABEL='Мой' + control + 'VPN')
+
+
+@unittest.skipUnless(shutil.which('openssl') and (shutil.which('bash') or shutil.which('sh')),
+                     'OpenSSL and Bash are required for certificate fixtures')
+class EndpointCertificateGate(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.bash = shutil.which('bash') or shutil.which('sh')
+        # Synthetic local certificates only: no ACME or network request.
+        for name, san in [('ip', 'IP:45.67.89.10'), ('dns', 'DNS:vpn.example.org'),
+                          ('ip_as_dns', 'DNS:45.67.89.10')]:
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '6',
+                            '-subj', '/CN=fixture', '-addext', 'subjectAltName=' + san,
+                            '-keyout', str(cls.root / (name + '.key')),
+                            '-out', str(cls.root / (name + '.pem'))],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def check(self, mode, name, success):
+        env = dict(os.environ, TARGET_ADDRESS_MODE=mode, TARGET_IPV4='45.67.89.10',
+                   TARGET_FQDN='45.67.89.10' if mode == 'ip' else 'vpn.example.org')
+        result = subprocess.run([self.bash, '-c', CERTIFICATE_FUNCTION + '\nverify_target_certificate "$1"',
+                                 'fixture', str(self.root / (name + '.pem'))],
+                                env=env, capture_output=True)
+        self.assertEqual(result.returncode == 0, success)
+
+    def test_six_day_ip_certificate_is_accepted(self):
+        self.check('ip', 'ip', True)
+
+    def test_dns_certificate_is_accepted_for_domain(self):
+        self.check('domain', 'dns', True)
+
+    def test_ip_mode_rejects_dns_san_with_ip_text(self):
+        self.check('ip', 'ip_as_dns', False)
+
+    def test_ip_mode_rejects_other_domain_certificate(self):
+        self.check('ip', 'dns', False)
+
+    def test_domain_mode_rejects_ip_certificate(self):
+        self.check('domain', 'ip', False)
 
 
 if __name__ == '__main__':

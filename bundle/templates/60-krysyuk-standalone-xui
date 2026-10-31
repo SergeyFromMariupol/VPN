@@ -33,7 +33,12 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost "$fqdn" >/dev/null
+if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then
+  [[ $fqdn == "$TARGET_IPV4" ]] || exit 1
+  openssl x509 -in "$lineage/fullchain.pem" -noout -checkip "$TARGET_IPV4" >/dev/null
+else
+  openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost "$fqdn" >/dev/null
+fi
 openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400 >/dev/null
 cert_pub=$(openssl x509 -in "$lineage/fullchain.pem" -pubkey -noout | openssl sha256)
 key_pub=$(openssl pkey -in "$lineage/privkey.pem" -pubout | openssl sha256)

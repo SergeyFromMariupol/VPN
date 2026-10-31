@@ -9,6 +9,7 @@ import socket
 import struct
 import subprocess
 import sys
+import unicodedata
 
 
 def run(*args: str) -> str:
@@ -68,9 +69,29 @@ def validate_inputs(env: dict) -> None:
     address = ipaddress.IPv4Address(env['TARGET_IPV4'])
     if not address.is_global:
         raise ValueError('A directly assigned public IPv4 is required (NAT VPS unsupported)')
-    for key in ('TARGET_FQDN', 'TARGET_REALITY_SNI'):
-        if not domain(env[key]):
-            raise ValueError(f'Invalid {key}')
+    mode = env.get('TARGET_ADDRESS_MODE', 'domain')
+    if mode not in ('domain', 'ip'):
+        raise ValueError('Invalid address mode')
+    if mode == 'ip':
+        if env['TARGET_FQDN'] != str(address):
+            raise ValueError('IP endpoint must equal the server public IPv4')
+    elif not domain(env['TARGET_FQDN']):
+        raise ValueError('Invalid TARGET_FQDN')
+    else:
+        try:
+            ipaddress.ip_address(env['TARGET_FQDN'])
+        except ValueError:
+            pass
+        else:
+            raise ValueError('Use IP mode for an IPv4 endpoint')
+    if not domain(env['TARGET_REALITY_SNI']):
+        raise ValueError('Invalid TARGET_REALITY_SNI')
+    try:
+        ipaddress.ip_address(env['TARGET_REALITY_SNI'])
+    except ValueError:
+        pass
+    else:
+        raise ValueError('REALITY SNI must be a DNS hostname')
     if 'cloudflare' in env['TARGET_REALITY_SNI']:
         raise ValueError('Cloudflare cannot be used as REALITY SNI')
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', env['TARGET_INTERFACE']):
@@ -84,8 +105,18 @@ def validate_inputs(env: dict) -> None:
     if not re.fullmatch(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', env['ACME_EMAIL']):
         raise ValueError('Invalid ACME email')
     label = env['TARGET_LABEL']
-    if not 1 <= len(label) <= 80 or any(ord(c) < 32 for c in label) or any(c in label for c in '\\"\'`$<>'):
-        raise ValueError('Invalid country label')
+    if not 1 <= len(label) <= 80 or any(unicodedata.category(c) == 'Cc' or c in '\u2028\u2029' for c in label):
+        raise ValueError('Invalid profile prefix')
+
+
+def check_endpoint_dns(env: dict) -> None:
+    if env.get('TARGET_ADDRESS_MODE', 'domain') == 'ip':
+        return
+    for resolver in ('1.1.1.1', '9.9.9.9'):
+        if dns(env['TARGET_FQDN'], 1, resolver) != [env['TARGET_IPV4']]:
+            raise ValueError(f'DNS A mismatch via {resolver}; use DNS only')
+        if dns(env['TARGET_FQDN'], 28, resolver):
+            raise ValueError('Remove AAAA before IPv4-only installation')
 
 
 def main() -> None:
@@ -94,7 +125,9 @@ def main() -> None:
     for name in ('/usr/local/x-ui', '/etc/x-ui', '/etc/nginx', '/etc/letsencrypt',
                  '/etc/krysyuk-standalone', '/etc/wireguard', '/etc/openvpn',
                  '/var/lib/docker', '/usr/sbin/policy-rc.d', '/etc/germanyvpn-xhttp-test',
-                 '/etc/germanyvpn-xhttp-warp', '/var/lib/cloudflare-warp'):
+                 '/etc/germanyvpn-xhttp-warp', '/var/lib/cloudflare-warp',
+                 '/opt/vpn-certbot', '/usr/local/bin/certbot',
+                 '/etc/systemd/system/certbot.service.d', '/etc/systemd/system/certbot.timer.d'):
         path = Path(name)
         if path.exists() or path.is_symlink():
             conflicts.append(name)
@@ -135,11 +168,7 @@ def main() -> None:
         raise ValueError('IPv4 is not assigned to the selected interface')
     if run('timedatectl', 'show', '-p', 'NTPSynchronized', '--value') != 'yes':
         raise ValueError('Wait for NTP synchronization before installing')
-    for resolver in ('1.1.1.1', '9.9.9.9'):
-        if dns(os.environ['TARGET_FQDN'], 1, resolver) != [os.environ['TARGET_IPV4']]:
-            raise ValueError(f'DNS A mismatch via {resolver}; use DNS only')
-        if dns(os.environ['TARGET_FQDN'], 28, resolver):
-            raise ValueError('Remove AAAA before IPv4-only installation')
+    check_endpoint_dns(os.environ)
     sni = os.environ['TARGET_REALITY_SNI']
     probe = subprocess.run(['timeout', '20', 'openssl', 's_client', '-connect', f'{sni}:443',
                             '-servername', sni, '-alpn', 'h2', '-tls1_3', '-verify_return_error',
@@ -147,7 +176,8 @@ def main() -> None:
     output = probe.stdout + probe.stderr
     if probe.returncode or 'ALPN protocol: h2' not in output or 'Verification: OK' not in output:
         raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
-    print('CLEAN_HOST=PASS DNS=PASS REALITY_TARGET_TLS=PASS')
+    dns_status = 'NOT_REQUIRED_IP_MODE' if os.environ.get('TARGET_ADDRESS_MODE') == 'ip' else 'PASS'
+    print(f'CLEAN_HOST=PASS DNS={dns_status} REALITY_TARGET_TLS=PASS')
     for args in (('uname', '-a'), ('systemd-detect-virt',), ('free', '-m'), ('df', '-h', '/'),
                  ('ip', '-4', 'route'), ('ip', '-4', 'rule'), ('ip', '-6', 'route'),
                  ('ip', '-6', 'rule'), ('systemctl', 'list-units', '--type=service', '--state=running', '--no-pager')):

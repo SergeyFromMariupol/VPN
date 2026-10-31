@@ -87,20 +87,22 @@ unset xray_version_output
 
 [[ -f "$letsencrypt_live/fullchain.pem" && -f "$letsencrypt_live/privkey.pem" ]] ||
   die 'Let us Encrypt certificate is missing'
-openssl x509 -in "$letsencrypt_live/fullchain.pem" -noout -checkend 86400 >/dev/null ||
-  die 'certificate expires within 24 hours or is invalid'
-openssl x509 -in "$letsencrypt_live/fullchain.pem" -noout -checkhost "$PUBLIC_FQDN" >/dev/null ||
-  die 'certificate does not cover the public FQDN'
+verify_target_certificate "$letsencrypt_live/fullchain.pem" ||
+  die 'certificate is invalid, expires within 24 hours or does not cover the public endpoint'
 cert_pub=$(openssl x509 -in "$letsencrypt_live/fullchain.pem" -pubkey -noout | openssl sha256)
 key_pub=$(openssl pkey -in "$letsencrypt_live/privkey.pem" -pubout | openssl sha256)
 [[ "$cert_pub" == "$key_pub" ]] || die 'certificate/private-key mismatch'
 unset cert_pub key_pub
 
-mapfile -t public_a < <(dig +short A "$PUBLIC_FQDN" @1.1.1.1 | sort -u)
-[[ "${#public_a[@]}" -eq 1 && "${public_a[0]}" == "$SERVER_IPV4" ]] ||
-  die 'public A record does not resolve exactly to the server IPv4'
-[[ -z "$(dig +short AAAA "$PUBLIC_FQDN" @1.1.1.1)" ]] ||
-  die 'public AAAA is forbidden until separate IPv6 acceptance'
+if [[ $TARGET_ADDRESS_MODE == domain ]]; then
+  for resolver in 1.1.1.1 9.9.9.9; do
+    mapfile -t public_a < <(dig +short A "$PUBLIC_FQDN" "@$resolver" | sort -u)
+    [[ "${#public_a[@]}" -eq 1 && "${public_a[0]}" == "$SERVER_IPV4" ]] ||
+      die 'public A record does not resolve exactly to the server IPv4'
+    [[ -z "$(dig +short AAAA "$PUBLIC_FQDN" "@$resolver")" ]] ||
+      die 'public AAAA is forbidden until separate IPv6 acceptance'
+  done
+fi
 
 reality_probe=$(timeout 15 openssl s_client \
   -connect "$REALITY_TARGET:443" -servername "$REALITY_TARGET" \
@@ -340,7 +342,7 @@ jq -n \
   {
     enable:false,remark:"Germany VLESS XHTTP TLS 8443",listen:$ip,port:8443,protocol:"vless",expiryTime:0,total:0,
     settings:{clients:[{id:$uuid,email:"germany-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · XHTTP"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
-    streamSettings:{network:"xhttp",security:"tls",xhttpSettings:{path:$path,host:$fqdn,mode:"packet-up"},tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:true,disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h2"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
+    streamSettings:{network:"xhttp",security:"tls",xhttpSettings:{path:$path,host:$fqdn,mode:"packet-up"},tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h2"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:3
   }
@@ -353,7 +355,7 @@ jq -n \
   {
     enable:false,remark:"Germany Hysteria2 UDP 443",listen:$ip,port:443,protocol:"hysteria",expiryTime:0,total:0,
     settings:{version:2,clients:[{auth:$auth,email:"germany-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · HYSTERIA2"),reset:0}]},
-    streamSettings:{network:"hysteria",hysteriaSettings:{version:2,udpIdleTimeout:60,masquerade:{type:"file",dir:$decoy,url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},security:"tls",tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:true,disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h3"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
+    streamSettings:{network:"hysteria",hysteriaSettings:{version:2,udpIdleTimeout:60,masquerade:{type:"file",dir:$decoy,url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},security:"tls",tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h3"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:2
   }

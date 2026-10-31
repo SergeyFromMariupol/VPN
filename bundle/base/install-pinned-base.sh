@@ -185,7 +185,7 @@ apt_attempted=1
 apt-get update
 base_packages=(
   ca-certificates certbot curl dnsutils gnupg iproute2 jq nftables nginx openssl \
-  python3 python3-bcrypt shellcheck sqlite3 tar tcpdump ufw unzip uuid-runtime xz-utils
+  python3 python3-bcrypt python3-venv shellcheck sqlite3 tar tcpdump ufw unzip uuid-runtime xz-utils
 )
 apt-get -s --no-upgrade --no-remove --no-install-recommends install "${base_packages[@]}" >"$backup/apt-install-plan.txt"
 ! grep -Eq '^Inst [^ ]+ \[' "$backup/apt-install-plan.txt" || die 'base installation would upgrade an existing package; reviewed package transaction required'

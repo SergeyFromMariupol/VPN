@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -88,15 +89,57 @@ def private(path, owner=0):
     return path.read_bytes()
 
 
-def envfile(path):
+def parse_env(raw):
+    """Read the installer's shlex.quote format without expanding shell syntax."""
     out = {}
-    for line in private(path).decode().splitlines():
+    for line in raw.decode('utf-8').split('\n'):
         if line and not line.startswith('#'):
+            need('=' in line, 'ENV_SHAPE')
             key, value = line.split('=', 1)
-            parts = shlex.split(value)
-            need(len(parts) == 1 and key not in out, 'ENV_SHAPE')
+            need(re.fullmatch('[A-Z][A-Z0-9_]*', key) and key not in out, 'ENV_SHAPE')
+            try:
+                parts = shlex.split(value)
+            except ValueError:
+                raise RuntimeError('ENV_SHAPE') from None
+            need(len(parts) == 1 and not any(unicodedata.category(c) == 'Cc' for c in parts[0]),
+                 'ENV_SHAPE')
             out[key] = parts[0]
     return out
+
+
+def envfile(path):
+    return parse_env(private(path))
+
+
+def endpoint(target):
+    """Address selection is independent of the user-visible profile prefix."""
+    mode, address = target.get('TARGET_ADDRESS_MODE', 'domain'), target['TARGET_FQDN']
+    need(mode in ('domain', 'ip'), 'ADDRESS_MODE')
+    if mode == 'ip':
+        try:
+            need(str(ipaddress.IPv4Address(address)) == target['TARGET_IPV4'], 'IP_ENDPOINT')
+        except ipaddress.AddressValueError:
+            raise RuntimeError('IP_ENDPOINT') from None
+    else:
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError('DOMAIN_ENDPOINT')
+        need(len(address) <= 253 and len(address.split('.')) >= 2 and
+             all(re.fullmatch('[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part)
+                 for part in address.split('.')), 'DOMAIN_ENDPOINT')
+    return address
+
+
+def profile_names(target):
+    label = target.get('TARGET_LABEL', '🇩🇪 Германия')
+    need(1 <= len(label) <= 80 and not any(unicodedata.category(c) == 'Cc' for c in label),
+         'PROFILE_LABEL')
+    return [label + ' · ' + egress + ' · ' + protocol
+            for egress in ('☁️ Cloudflare', '🖥️ IP сервера')
+            for protocol in ('REALITY', 'HYSTERIA2', 'XHTTP')]
 
 
 def save(path, raw, uid=0, gid=0, mode=0o600):
@@ -151,7 +194,7 @@ def decode_feed(raw):
 
 
 def native(target, secret):
-    host = target['TARGET_FQDN']
+    host = endpoint(target)
     path = '/' + secret['SUBSCRIPTION_PATH'].strip('/') + '/' + secret['SUBSCRIPTION_ID']
     feeds = []
     for ua in ('v2RayTun', 'Happ', 'Karing'):
@@ -179,6 +222,7 @@ def keypair(raw):
 
 def build(main, target, private_key, sid, path):
     """Render both singleton servers without changing main DNS or egress policy."""
+    host = endpoint(target)
     old = [i for i in main['inbounds'] if i.get('port') == 8443]
     need(len(old) == 1 and len(old[0]['settings']['clients']) == 2, 'OLD_XHTTP_CLIENTS')
     clients = {u['email']: u for u in old[0]['settings']['clients']}
@@ -191,7 +235,7 @@ def build(main, target, private_key, sid, path):
     dns_tags = [server['tag'] for server in main['dns']['servers'] if 'tag' in server]
     stream = {'network': 'xhttp', 'security': 'reality',
               'sockopt': {'tcpMaxSeg': 1200},
-              'xhttpSettings': {'host': target['TARGET_FQDN'], 'path': path, 'mode': 'auto'},
+              'xhttpSettings': {'host': host, 'path': path, 'mode': 'auto'},
               'realitySettings': {'show': False, 'xver': 0,
                                   'target': target['TARGET_REALITY_SNI'] + ':443',
                                   'serverNames': [target['TARGET_REALITY_SNI']],
@@ -201,7 +245,7 @@ def build(main, target, private_key, sid, path):
               {'type': 'field', 'inboundTag': dns_tags, 'outboundTag': 'DIRECT'},
               {'type': 'field', 'ip': ['geoip:private', '::/0', target['TARGET_IPV4'] + '/32'],
                'outboundTag': 'BLOCK'},
-              {'type': 'field', 'domain': ['full:' + target['TARGET_FQDN']], 'outboundTag': 'BLOCK'}]
+              {'type': 'field', 'domain': ['full:' + host], 'outboundTag': 'BLOCK'}]
     configs = []
     for role, port, email in [('DIRECT', 8444, 'germany-xhttp'),
                               ('WARP_CF', 8443, 'germany-warp-xhttp')]:
@@ -476,6 +520,7 @@ def validate_marker(marker, target, direct_raw, warp_raw, main_raw, allow_pendin
 
 
 def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
+    host = endpoint(target)
     for path in (ROOT, CFROOT):
         info = path.lstat()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and
@@ -519,7 +564,7 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
              and stream['sockopt'] == {'tcpMaxSeg': 1200} and stream['xhttpSettings']['mode'] == 'auto'
              and len(config['inbounds']) == 1 and len(config['inbounds'][0]['settings']['clients']) == 1,
              'SINGLETON_XHTTP_SHAPE')
-        need(stream['xhttpSettings']['host'] == target['TARGET_FQDN']
+        need(stream['xhttpSettings']['host'] == host
              and stream['realitySettings']['target'] == target['TARGET_REALITY_SNI'] + ':443'
              and stream['realitySettings']['serverNames'] == [target['TARGET_REALITY_SNI']]
              and stream['realitySettings']['minClientVer'] == '26.3.27'
@@ -540,15 +585,12 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
     feeds = native(target, secret)
     if expected is not None:
         need(feeds == expected, 'FINAL_SUBSCRIPTION_CAS')
-    label = target.get('TARGET_LABEL', '🇩🇪 Германия')
-    names = [label + ' · ' + egress + ' · ' + protocol
-             for egress in ('☁️ Cloudflare', '🖥️ IP сервера')
-             for protocol in ('REALITY', 'HYSTERIA2', 'XHTTP')]
+    names = profile_names(target)
     expected_ids = [secret['WARP_REALITY_UUID'], secret['WARP_HYSTERIA2_AUTH'], secret['WARP_XHTTP_UUID'],
                     secret['VLESS_UUID'], secret['HYSTERIA2_AUTH'], secret['VLESS_UUID']]
     for index, uri in enumerate(feeds):
         parsed, values = query(uri)
-        need(parsed.hostname == target['TARGET_FQDN'] and parsed.username == expected_ids[index]
+        need(parsed.hostname == host and parsed.username == expected_ids[index]
              and unquote(parsed.fragment) == names[index], 'NATIVE_IDENTITY_LABEL')
         if index in (2, 5):
             config = configs[1 if index == 2 else 0]
@@ -561,7 +603,7 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
                  and values.get('sid') == secret['REALITY_SHORT_ID'], 'NATIVE_REALITY')
         else:
             need(parsed.scheme in ('hysteria2', 'hy2') and parsed.port == 443
-                 and values.get('sni') == target['TARGET_FQDN'] and values.get('alpn') == 'h3'
+                 and values.get('sni') == host and values.get('alpn') == 'h3'
                  and values.get('insecure', '0') == '0', 'NATIVE_HYSTERIA')
     connector = next(o for o in main['outbounds'] if o['tag'] == 'WARP_CF')['settings']['vnext'][0]['users'][0]['id']
     need(not any(value in '\n'.join(feeds) for value in (connector, secret['DIRECT_SUBSCRIPTION_ID'],
@@ -760,6 +802,8 @@ def main():
     target, secret = envfile(TARGET_ENV), envfile(SERVER_ENV)
     address = ipaddress.ip_address(target['TARGET_IPV4'])
     need(address.version == 4 and address.is_global, 'PUBLIC_IPV4_REQUIRED')
+    endpoint(target)
+    profile_names(target)
     def interrupted(signum, frame):
         raise RuntimeError('INTERRUPTED')
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
