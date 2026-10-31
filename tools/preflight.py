@@ -1,5 +1,6 @@
 """Read-only clean-host, input and public DNS checks. No packages are installed."""
 import ipaddress
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,12 @@ import struct
 import subprocess
 import sys
 import unicodedata
+
+NETWORK_SPEC = importlib.util.spec_from_file_location(
+    'vpn_network_contract', Path(__file__).resolve().parents[1] / 'bundle/scripts/network-contract.py')
+NETWORK = importlib.util.module_from_spec(NETWORK_SPEC)
+sys.modules[NETWORK_SPEC.name] = NETWORK
+NETWORK_SPEC.loader.exec_module(NETWORK)
 
 
 def run(*args: str) -> str:
@@ -119,6 +126,24 @@ def check_endpoint_dns(env: dict) -> None:
             raise ValueError('Remove AAAA before IPv4-only installation')
 
 
+def listener_conflicts(output: str, env: dict, process_executables=None) -> list[str]:
+    listeners = NETWORK.parse_ss(output)
+    if process_executables is None:
+        process_executables = NETWORK.trusted_process_executables(listeners)
+    conflicts = []
+    for listener in listeners:
+        if ipaddress.ip_address(listener.address).is_loopback:
+            continue
+        if listener.protocol == 'tcp' and listener.port == int(env['TARGET_SSH_PORT']):
+            continue
+        if NETWORK.is_expected_dhcp(listener, env['TARGET_INTERFACE'], process_executables,
+                                    target_ipv4=env['TARGET_IPV4']):
+            continue
+        scope = '%' + listener.scope if listener.scope else ''
+        conflicts.append(f'listener: {listener.address}{scope}:{listener.port}/{listener.protocol}')
+    return conflicts
+
+
 def main() -> None:
     validate_inputs(os.environ)
     conflicts = []
@@ -132,18 +157,7 @@ def main() -> None:
         if path.exists() or path.is_symlink():
             conflicts.append(name)
     listeners = run('ss', '-H', '-lntup')
-    for line in listeners.splitlines():
-        parts = line.split()
-        local = parts[4]
-        host, _, port = local.rpartition(':')
-        # Allow local stub resolver and stock loopback agents; inspect all WAN listeners.
-        if host.strip('[]') in ('127.0.0.1', '127.0.0.53', '127.0.0.54', '::1'):
-            continue
-        if port == os.environ['TARGET_SSH_PORT'] and parts[0] == 'tcp':
-            continue
-        if parts[0] == 'udp' and port == '68':  # stock DHCP client
-            continue
-        conflicts.append(f'listener: {local}/{parts[0]}')
+    conflicts.extend(listener_conflicts(listeners, os.environ))
     for command, args in (('ufw', ('status',)), ('nft', ('list', 'ruleset'))):
         from shutil import which
         if which(command):

@@ -22,6 +22,11 @@ jobs:
           bash bundle/warp-egress/tests/test-bootstrap-plan-safety.sh
           bash bundle/warp-egress/tests/test-health-watchdog-semantics.sh
           sudo bash bundle/warp-egress/tests/test-phase-checkpoints.sh
+      - name: Check actual UFW output in isolated namespaces
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ufw iproute2 util-linux
+          sudo env GITHUB_ACTIONS=true CI=true bash bundle/tests/test-ufw-contract.sh
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"

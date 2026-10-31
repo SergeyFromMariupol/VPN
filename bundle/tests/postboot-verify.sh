@@ -24,9 +24,9 @@ if [[ -e "$promotion_marker" || -L "$promotion_marker" ]]; then
 fi
 export PROMOTED_XHTTP="$promoted_xhttp"
 if ((promoted_xhttp)); then
-  readonly XHTTP_PORT='8444' expected_external_count=4 expected_ufw_count=14
+  readonly XHTTP_PORT='8444' expected_external_count=4
 else
-  readonly XHTTP_PORT='8443' expected_external_count=3 expected_ufw_count=13
+  readonly XHTTP_PORT='8443' expected_external_count=3
 fi
 readonly runtime_root='/etc/krysyuk-standalone'
 readonly runtime_env="$runtime_root/server.env"
@@ -196,43 +196,9 @@ if ss -H -lnt | grep_drain -E ':18080[[:space:]]'; then
   exit 1
 fi
 
-ss -H -lnt >"$stage/tcp-listeners"
-ss -H -lnu >"$stage/udp-listeners"
-TCP_LISTENERS="$stage/tcp-listeners" UDP_LISTENERS="$stage/udp-listeners" python3 - <<'PY'
-import ipaddress
-import os
-from pathlib import Path
-
-def public_ports(path):
-    ports = []
-    for line in Path(path).read_text().splitlines():
-        parts = line.split()
-        if len(parts) < 5:
-            continue
-        local = parts[3]
-        if local.startswith("["):
-            host, port = local.rsplit("]:", 1)
-            host = host[1:]
-        else:
-            host, port = local.rsplit(":", 1)
-        host = host.replace("*", "0.0.0.0")
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            continue
-        if address.is_loopback:
-            continue
-        ports.append(int(port))
-    return set(ports)
-
-allowed_tcp = {int(os.environ['TARGET_SSH_PORT']), 443, 2053, 2096, 8443}
-if os.environ["PROMOTED_XHTTP"] == "1":
-    allowed_tcp.add(8444)
-if not public_ports(os.environ["TCP_LISTENERS"]).issubset(allowed_tcp):
-    raise SystemExit("unexpected public TCP listener")
-if not public_ports(os.environ["UDP_LISTENERS"]).issubset({443}):
-    raise SystemExit("unexpected public UDP listener")
-PY
+python3 "$(dirname -- "$promoted_verifier")/network-contract.py" \
+  --target-ip "$TARGET_IPV4" --interface "$TARGET_INTERFACE" \
+  --ssh-port "$TARGET_SSH_PORT" --promoted "$promoted_xhttp"
 
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep_drain -x ok
 [[ "$(sqlite3 -readonly /etc/x-ui/x-ui.db 'select count(*) from clients;')" == 6 ]]
@@ -289,26 +255,6 @@ if find /var/log/nginx -maxdepth 1 -type f -name '*3x-ui*access*' -print -quit |
 fi
 printf '%s\n' "$PANEL_BASE_PATH" >"$stage/panel-path.pattern"
 if grep -R -Fq -f "$stage/panel-path.pattern" /var/log/nginx 2>/dev/null; then
-  exit 1
-fi
-
-ufw status >"$stage/ufw"
-grep -Fxq 'Status: active' "$stage/ufw"
-[[ "$(grep -c 'ALLOW' "$stage/ufw")" -eq "$expected_ufw_count" ]]
-# The disabled main8443 inbound is replaced by the CFunit using its original firewall rules.
-baseline_rules=("$TARGET_SSH_PORT/tcp" '80/tcp' '2096/tcp' '443/tcp' '443/udp' '8443/tcp')
-for rule in "${baseline_rules[@]}"; do
-  v4_count=$(awk -v rule="$rule" 'index($0,rule)==1 && index($0,"(v6)")==0 {n++} END {print n+0}' "$stage/ufw")
-  v6_count=$(awk -v rule="$rule (v6)" 'index($0,rule)==1 {n++} END {print n+0}' "$stage/ufw")
-  [[ "$v4_count" -eq 1 && "$v6_count" -eq 1 ]]
-done
-panel_rule_count=$(awk -v ip="$TARGET_IPV4" -v interface="$TARGET_INTERFACE" '
-  $1==ip && $2=="2053/tcp" && $3=="on" && $4==interface \
-    && $5=="ALLOW" && $6=="Anywhere" {n++}
-  END {print n+0}
-' "$stage/ufw")
-[[ "$panel_rule_count" -eq 1 ]]
-if grep -Eq '(^|[[:space:]])(18080|24443|24444)(/tcp)?([[:space:]]|$).*ALLOW' "$stage/ufw"; then
   exit 1
 fi
 

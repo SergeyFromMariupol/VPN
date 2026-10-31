@@ -73,6 +73,25 @@ class Inputs(unittest.TestCase):
                     preflight.validate_inputs({**GOOD, field: value})
 
 
+class CleanHostListeners(unittest.TestCase):
+    def test_stock_dhcp_and_ssh_are_accepted(self):
+        rows = ('tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=12,fd=3))\n'
+                'udp UNCONN 0 0 0.0.0.0%enp1s0:68 0.0.0.0:* users:(("systemd-network",pid=42,fd=3))\n'
+                'udp UNCONN 0 0 127.0.0.53:53 0.0.0.0:*\n')
+        self.assertEqual(preflight.listener_conflicts(
+            rows, GOOD, {42: '/usr/lib/systemd/systemd-networkd'}), [])
+
+    def test_arbitrary_udp68_owner_is_rejected(self):
+        row = 'udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:* users:(("systemd-network",pid=42,fd=3))'
+        for owners in ({}, {42: '/tmp/systemd-networkd'}):
+            with self.subTest(owners=owners):
+                self.assertEqual(len(preflight.listener_conflicts(row, GOOD, owners)), 1)
+
+    def test_scoped_extra_public_listener_is_rejected(self):
+        row = 'udp UNCONN 0 0 0.0.0.0%enp1s0:8888 0.0.0.0:*'
+        self.assertEqual(len(preflight.listener_conflicts(row, GOOD, {})), 1)
+
+
 class TargetPersistence(unittest.TestCase):
     def test_arbitrary_prefix_roundtrip(self):
         label = 'Сервер друга: "VPN" \'east\' $HOME `literal` \\ 🇫🇷'

@@ -21,7 +21,7 @@ IP и сетевой интерфейс установщик определяе�
 Подключитесь к VPS по SSH и выполните:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.1.0/install.sh -o /root/vpn-install.sh && bash /root/vpn-install.sh
+curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.1.1/install.sh -o /root/vpn-install.sh && bash /root/vpn-install.sh
 ```
 
 Если `curl` отсутствует, сначала выполните `apt-get update && apt-get install -y curl`.
@@ -98,6 +98,12 @@ IP-сертификат выпускается с профилем `shortlived` 
 устанавливает VPN. Самоподписанные сертификаты и `insecure=1` не используются.
 
 Входящие порты: текущий SSH TCP, TCP80/443/2053/2096/8443/8444 и UDP443.
+Установщик сам включает UFW, разрешает эти порты и запрещает остальные
+входящие соединения и пересылку трафика. Итоговая проверка сверяет правила,
+политики firewall и слушающие службы, включая сохранённый SSH-порт.
+Firewall/security group в панели провайдера управляется отдельно: если он
+включён, разрешите эти же порты там. Установщик не получает доступ к аккаунту
+провайдера и не создаёт DNS-запись домена.
 Внутренний WARP connector доступен только через loopback. Внешние неизвестные
 службы, существующие VPN, Docker, сертификаты или firewall rules блокируют
 установку. Повторная установка поверх работающего сервера не выполняется.

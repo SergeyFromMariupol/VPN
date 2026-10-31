@@ -1,0 +1,176 @@
+"""Offline public firewall/socket fixtures; no host changes or network calls."""
+import importlib.util
+from pathlib import Path, PurePosixPath
+import stat
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('network_contract', ROOT / 'bundle/scripts/network-contract.py')
+network = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(network)
+IP, INTERFACE, SSH = '45.67.89.10', 'ens3', 2222
+DEFAULTS = '''DEFAULT_INPUT_POLICY="DROP"
+DEFAULT_OUTPUT_POLICY="ACCEPT"
+DEFAULT_FORWARD_POLICY="DROP"
+'''
+
+
+def socket(protocol, endpoint, pid=None, name='fixture'):
+    owner = f' users:(("{name}",pid={pid},fd=7))' if pid else ''
+    state = 'LISTEN' if protocol == 'tcp' else 'UNCONN'
+    return f'{protocol} {state} 0 4096 {endpoint} 0.0.0.0:*{owner}\n'
+
+
+def sockets(promoted=True):
+    text = socket('tcp', f'0.0.0.0:{SSH}') + socket('tcp', f'[::]:{SSH}')
+    for port in [443, 2053, 2096, 8443] + ([8444] if promoted else []):
+        text += socket('tcp', f'{IP}:{port}')
+    text += socket('udp', f'{IP}:443')
+    text += socket('udp', '127.0.0.53%lo:53')
+    text += socket('tcp', '127.0.0.1:24443') + socket('tcp', '127.0.0.1:24444')
+    return text
+
+
+def firewall(promoted=True):
+    text = ('Status: active\nLogging: on (low)\n'
+            'Default: deny (incoming), allow (outgoing), deny (routed)\n'
+            'New profiles: skip\n\nTo                         Action      From\n'
+            '--                         ------      ----\n')
+    for port, protocol in [(SSH, 'tcp'), (80, 'tcp'), (443, 'tcp'),
+                           (443, 'udp'), (2096, 'tcp'), (8443, 'tcp')]:
+        for suffix in ('', ' (v6)'):
+            text += f'{str(port) + "/" + protocol + suffix:<40} ALLOW IN    Anywhere{suffix} # vpn\n'
+    for port in [2053] + ([8444] if promoted else []):
+        text += f'{IP + " " + str(port) + "/tcp on " + INTERFACE:<40} ALLOW IN    Anywhere # vpn\n'
+    return text
+
+
+class FirewallContract(unittest.TestCase):
+    def check(self, text, promoted=True, defaults=DEFAULTS):
+        network.validate_ufw(text, IP, INTERFACE, SSH, promoted, defaults)
+
+    def test_baseline_and_promoted_exact_rules(self):
+        for promoted in (False, True):
+            self.check(firewall(promoted), promoted)
+
+    def test_missing_8444_cannot_be_replaced_by_foreign_port(self):
+        original = firewall()
+        changed = original.replace(f'{IP} 8444/tcp on {INTERFACE}', '8888/tcp')
+        self.assertEqual(original.count('ALLOW IN'), changed.count('ALLOW IN'))
+        with self.assertRaises(ValueError):
+            self.check(changed)
+
+    def test_panel_and_8444_scope_direction_and_source_are_exact(self):
+        for port in (2053, 8444):
+            original = f'{IP} {port}/tcp on {INTERFACE}'
+            for replacement in (f'{port}/tcp', f'{IP} {port}/tcp on ens4',
+                                f'{IP} {port}/udp on {INTERFACE}'):
+                with self.subTest(port=port, replacement=replacement), self.assertRaises(ValueError):
+                    self.check(firewall().replace(original, replacement))
+        for change in ('ALLOW OUT', 'DENY IN'):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.check(firewall().replace('ALLOW IN', change, 1))
+        with self.assertRaises(ValueError):
+            self.check(firewall().replace('Anywhere # vpn', '8.8.8.8 # vpn', 1))
+
+    def test_duplicate_and_extra_rules_rejected(self):
+        for rule in ('8888/tcp ALLOW IN Anywhere', '443/tcp ALLOW IN Anywhere',
+                     '24443/tcp ALLOW IN Anywhere'):
+            with self.subTest(rule=rule), self.assertRaises(ValueError):
+                self.check(firewall() + rule + '\n')
+
+    def test_default_policies_checked_in_runtime_and_persistent_config(self):
+        for key, before, after in [('INPUT', 'DROP', 'ACCEPT'), ('OUTPUT', 'ACCEPT', 'DROP'),
+                                    ('FORWARD', 'DROP', 'ACCEPT')]:
+            changed = DEFAULTS.replace(f'DEFAULT_{key}_POLICY="{before}"',
+                                       f'DEFAULT_{key}_POLICY="{after}"')
+            with self.subTest(policy=key), self.assertRaises(ValueError):
+                self.check(firewall(), defaults=changed)
+        for old, new in [('deny (incoming)', 'allow (incoming)'),
+                         ('allow (outgoing)', 'deny (outgoing)'),
+                         ('deny (routed)', 'allow (routed)')]:
+            with self.subTest(default=old), self.assertRaises(ValueError):
+                self.check(firewall().replace(old, new))
+        with self.assertRaises(ValueError):
+            self.check(firewall(), defaults=DEFAULTS + 'DEFAULT_INPUT_POLICY="DROP"\n')
+
+    def test_disabled_routing_requires_persistent_drop(self):
+        text = firewall().replace('deny (routed)', 'disabled (routed)')
+        self.check(text)
+        with self.assertRaises(ValueError):
+            self.check(text, defaults=DEFAULTS.replace('DEFAULT_FORWARD_POLICY="DROP"',
+                                                      'DEFAULT_FORWARD_POLICY="ACCEPT"'))
+
+
+class ListenerContract(unittest.TestCase):
+    def check(self, text, promoted=True, owners=None):
+        network.validate_listeners(network.parse_ss(text), IP, INTERFACE, SSH, promoted, owners)
+
+    def test_baseline_and_promoted_required_sockets(self):
+        for promoted in (False, True):
+            self.check(sockets(promoted), promoted)
+
+    def test_missing_ssh_and_other_required_services_rejected(self):
+        lines = sockets().splitlines(keepends=True)
+        for port in (SSH, 443, 2053, 2096, 8443, 8444):
+            changed = ''.join(line for line in lines
+                              if not (line.startswith('tcp ') and line.split()[4].endswith(f':{port}')))
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                self.check(changed)
+        with self.assertRaises(ValueError):
+            self.check(sockets().replace(socket('udp', f'{IP}:443'), ''))
+
+    def test_foreign_ipv6_and_scoped_extras_rejected(self):
+        for protocol, endpoint in [('tcp', f'{IP}:8888'), ('udp', f'{IP}:123'),
+                                   ('tcp', '[::]:8888'), ('udp', '[fe80::1%ens3]:123'),
+                                   ('tcp', '0.0.0.0%ens3:8888'), ('tcp', '[::]:443'),
+                                   ('tcp', f'{IP}%ens4:443')]:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                self.check(sockets() + socket(protocol, endpoint))
+
+    def test_malformed_listener_records_are_not_silently_ignored(self):
+        for record in ('broken', socket('tcp', 'not-an-ip:8888'),
+                       socket('tcp', '0.0.0.0%ens3%foreign:8888'),
+                       socket('tcp', '[::1:8888'), socket('tcp', f'{IP}:0'),
+                       socket('tcp', f'{IP}:65536')):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                network.parse_ss(record)
+
+    def test_expected_dhcp_scoped_unscoped_and_direct_binds(self):
+        for endpoint in ('0.0.0.0:68', '0.0.0.0%ens3:68', f'{IP}:68'):
+            for executable in network.DHCP_EXECUTABLES:
+                with self.subTest(endpoint=endpoint, executable=executable):
+                    self.check(sockets() + socket('udp', endpoint, 41), owners={41: executable})
+
+    def test_unowned_or_forged_dhcp_and_other_interface_rejected(self):
+        valid_executable = '/usr/lib/systemd/systemd-networkd'
+        cases = [(socket('udp', '0.0.0.0:68'), {}),
+                 (socket('udp', '0.0.0.0:68', 41, 'systemd-network'), {}),
+                 (socket('udp', '0.0.0.0:68', 41), {41: '/tmp/systemd-networkd'}),
+                 (socket('udp', '0.0.0.0%ens4:68', 41), {41: valid_executable}),
+                 (socket('udp', '8.8.8.8:68', 41), {41: valid_executable}),
+                 (socket('udp', '[::]:546', 41), {41: valid_executable})]
+        for record, owners in cases:
+            with self.subTest(record=record, owners=owners), self.assertRaises(ValueError):
+                self.check(sockets() + record, owners=owners)
+
+    def test_proc_owner_resolution_requires_trusted_unwritable_root_binary(self):
+        listener = network.parse_ss(socket('udp', '0.0.0.0%ens3:68', 41))
+        for path, uid, mode, expected in [('/usr/lib/systemd/systemd-networkd', 0, 0o755, True),
+                                          ('/usr/sbin/dhclient', 0, 0o755, True),
+                                          ('/tmp/systemd-networkd', 0, 0o755, False),
+                                          ('/usr/lib/systemd/systemd-networkd', 1000, 0o755, False),
+                                          ('/usr/lib/systemd/systemd-networkd', 0, 0o775, False)]:
+            with self.subTest(path=path, uid=uid, mode=mode):
+                info = SimpleNamespace(st_uid=uid, st_mode=stat.S_IFREG | mode)
+                with patch.object(network.Path, 'resolve', return_value=PurePosixPath(path)), \
+                        patch.object(network.Path, 'stat', return_value=info):
+                    owners = network.trusted_process_executables(listener)
+                self.assertEqual(owners, {41: path} if expected else {})
+
+
+if __name__ == '__main__':
+    unittest.main()

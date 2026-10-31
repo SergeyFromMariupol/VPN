@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.0'
+readonly release='v1.1.1'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -97,7 +97,8 @@ else
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   printf 'Проверка чистого сервера, адреса и TLS…\n'
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
-  printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nОткроются TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE"
+  printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nFirewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$TARGET_SSH_PORT"
+  printf 'Если в панели провайдера включён отдельный firewall, разрешите эти же порты там.\n'
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
   install -d -m 0700 "$state" "$destination"
