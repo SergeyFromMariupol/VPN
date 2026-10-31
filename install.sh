@@ -72,6 +72,10 @@ else
   printf '\nVPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
+    if [[ $TARGET_IPV4 == *:* ]]; then
+      # SSH may arrive over IPv6 while the public VPN endpoints use IPv4.
+      TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
+    fi
   else
     TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
     read -r -p 'SSH порт [22]: ' TARGET_SSH_PORT </dev/tty
