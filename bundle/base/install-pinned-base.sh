@@ -51,6 +51,10 @@ bundle_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 readonly bundle_root
 readonly hardening_source="$bundle_root/templates/20-krysyuk-nonroot-hardening.conf"
 [[ -f $hardening_source && ! -L $hardening_source ]] || die 'non-root hardening template is missing'
+# shellcheck source=apt-options.sh
+source "$bundle_root/base/apt-options.sh"
+# shellcheck source=package-start-policy.sh
+source "$bundle_root/base/package-start-policy.sh"
 
 backup=$(mktemp -d -p /var/backups "germanyvpn-base-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 readonly backup
@@ -59,11 +63,10 @@ stage=$(mktemp -d -p /var/tmp germanyvpn-base.XXXXXXXX)
 readonly stage
 chmod 0700 "$stage"
 committed=0
-policy_created=0
-mask_created=0
 managed_installed=0
 groups_created=0
 apt_attempted=0
+apt_install_attempted=0
 failure_line=unknown
 
 installed_packages() {
@@ -84,31 +87,50 @@ remove_managed_tree() {
     *) return 1 ;;
   esac
 }
-restore_start_policy() {
-  if ((policy_created)); then rm -f -- "$policy_path"; policy_created=0; fi
-  if ((mask_created)); then
-    [[ -L $nginx_mask && $(readlink "$nginx_mask") == /dev/null ]] && rm -f -- "$nginx_mask"
-    mask_created=0
-    systemctl daemon-reload >/dev/null 2>&1 || true
-  fi
-}
 rollback_packages() {
   installed_packages >"$backup/packages.installed.after-failure"
   LC_ALL=C comm -13 "$backup/packages.installed.before" "$backup/packages.installed.after-failure" >"$backup/packages.added"
   mapfile -t added_packages <"$backup/packages.added"
   ((${#added_packages[@]})) || return 0
+  # A background package operation can finish while this installer waits for
+  # the dpkg lock. A post-snapshot addition alone is not proof of ownership.
+  [[ -f $backup/apt-install-plan.txt && ! -L $backup/apt-install-plan.txt ]] || return 1
+  awk '$1=="Inst" && $3 !~ /^\[/ {print $2}' "$backup/apt-install-plan.txt" |
+    sed 's/:amd64$//' | LC_ALL=C sort -u >"$backup/packages.planned-new" || return 1
+  sed 's/:amd64$//' "$backup/packages.added" |
+    LC_ALL=C sort -u >"$backup/packages.added.normalized" || return 1
+  LC_ALL=C comm -23 "$backup/packages.added.normalized" "$backup/packages.planned-new" \
+    >"$backup/packages.unowned-additions" || return 1
+  [[ ! -s $backup/packages.unowned-additions ]] || return 1
   # Never remove a package that was installed before this transaction.
-  apt-get -s purge "${added_packages[@]}" >"$backup/apt-purge-plan.txt" 2>&1 || return 1
-  awk '/^(Remv|Purg) / {print $2}' "$backup/apt-purge-plan.txt" | LC_ALL=C sort -u >"$backup/packages.purge-plan"
-  LC_ALL=C comm -23 "$backup/packages.purge-plan" "$backup/packages.added" >"$backup/packages.unsafe-removal"
+  vpn_apt_get -s purge "${added_packages[@]}" >"$backup/apt-purge-plan.txt" 2>&1 || return 1
+  awk '/^(Remv|Purg) / {print $2}' "$backup/apt-purge-plan.txt" |
+    sed 's/:amd64$//' | LC_ALL=C sort -u >"$backup/packages.purge-plan" || return 1
+  LC_ALL=C comm -23 "$backup/packages.purge-plan" "$backup/packages.added.normalized" >"$backup/packages.unsafe-removal" || return 1
   [[ ! -s $backup/packages.unsafe-removal ]] || return 1
-  DEBIAN_FRONTEND=noninteractive apt-get purge -y "${added_packages[@]}" >"$backup/apt-rollback.log" 2>&1 || return 1
+  vpn_apt_get purge -y "${added_packages[@]}" >"$backup/apt-rollback.log" 2>&1 || return 1
 }
 restore_package_marks() {
-  apt-mark showmanual | LC_ALL=C sort -u >"$backup/apt-manual.after-rollback"
-  LC_ALL=C comm -13 "$backup/apt-manual.before" "$backup/apt-manual.after-rollback" >"$backup/apt-manual.changed"
+  apt-mark showmanual | LC_ALL=C sort -u >"$backup/apt-manual.after-rollback" || return 1
+  LC_ALL=C comm -13 "$backup/apt-manual.before" "$backup/apt-manual.after-rollback" >"$backup/apt-manual.changed" || return 1
   mapfile -t changed_marks <"$backup/apt-manual.changed"
-  if ((${#changed_marks[@]})); then apt-mark auto "${changed_marks[@]}" >/dev/null; fi
+  ((${#changed_marks[@]})) || return 0
+  # Do not change metadata for a concurrent package operation merely because
+  # its manual mark appeared after our snapshot. Only our actual install can
+  # own these changes, including an explicitly requested preexisting package.
+  : >"$backup/apt-manual.owned"
+  if ((apt_install_attempted)); then
+    [[ -f $backup/apt-install-plan.txt && ! -L $backup/apt-install-plan.txt ]] || return 1
+    { printf '%s\n' "${base_packages[@]}"
+      awk '$1=="Inst" && $3 !~ /^\[/ {print $2}' "$backup/apt-install-plan.txt"
+    } | sed 's/:amd64$//' | LC_ALL=C sort -u >"$backup/apt-manual.owned" || return 1
+  fi
+  sed 's/:amd64$//' "$backup/apt-manual.changed" |
+    LC_ALL=C sort -u >"$backup/apt-manual.changed.normalized" || return 1
+  LC_ALL=C comm -23 "$backup/apt-manual.changed.normalized" "$backup/apt-manual.owned" \
+    >"$backup/apt-manual.unowned" || return 1
+  [[ ! -s $backup/apt-manual.unowned ]] || return 1
+  apt-mark auto "${changed_marks[@]}" >/dev/null
 }
 transaction_exit() {
   local status=$? rollback_ok=1
@@ -147,11 +169,14 @@ transaction_exit() {
       groupdel xui >/dev/null 2>&1 || true
       groupdel xui-secrets >/dev/null 2>&1 || rollback_ok=0
     fi
+  fi
+  restore_start_policy || rollback_ok=0
+  systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
+  if ((status != 0 && !committed)); then
     printf 'MANAGED_ROLLBACK_OK=%s\n' "$rollback_ok" >&2
     ((rollback_ok)) || printf 'Review protected snapshot before retrying.\n' >&2
   fi
-  restore_start_policy
-  systemctl daemon-reload >/dev/null 2>&1
+  ((rollback_ok)) || status=1
   # stage was created by mktemp under this exact parent and contains no user files.
   if [[ $stage == /var/tmp/germanyvpn-base.* && -d $stage && ! -L $stage ]]; then rm -rf -- "$stage"; fi
   exit "$status"
@@ -187,19 +212,15 @@ tar -tf "$backup/system-prestate.tar" >/dev/null
 (cd -- "$backup"; sha256sum -- *.before system-prestate.tar >SHA256SUMS; sha256sum -c SHA256SUMS >/dev/null)
 
 # Block package-maintainer service starts; never alter an existing policy file.
-printf '#!/bin/sh\nexit 101\n' >"$policy_path"
-chmod 0755 "$policy_path"
-policy_created=1
-ln -s /dev/null "$nginx_mask"
-mask_created=1
+prepare_start_policy
 systemctl daemon-reload
 export DEBIAN_FRONTEND=noninteractive
 apt_attempted=1
-apt-get update
-apt-get -s --no-remove upgrade >"$backup/apt-upgrade-plan.txt"
+vpn_apt_get update
+vpn_apt_get -s --no-remove upgrade >"$backup/apt-upgrade-plan.txt"
 ! grep -Eq '^(Remv|Purg) ' "$backup/apt-upgrade-plan.txt" || die 'Ubuntu upgrade would remove an existing package'
-apt-get upgrade -y --no-remove
-apt-get check >/dev/null
+vpn_apt_get upgrade -y --no-remove
+vpn_apt_get check >/dev/null
 [[ -z $(dpkg --audit) ]] || die 'package database is not clean after Ubuntu upgrade'
 /usr/sbin/sshd -t || die 'SSH configuration failed after Ubuntu upgrade'
 systemctl is-active --quiet ssh.service || die 'SSH service is inactive after Ubuntu upgrade'
@@ -210,15 +231,16 @@ base_packages=(
   ca-certificates certbot curl dnsutils gnupg iproute2 jq nftables nginx openssl \
   python3 python3-bcrypt python3-venv shellcheck sqlite3 tar tcpdump ufw unzip uuid-runtime xz-utils
 )
-apt-get -s --no-upgrade --no-remove --no-install-recommends install "${base_packages[@]}" >"$backup/apt-install-plan.txt"
+vpn_apt_get -s --no-upgrade --no-remove --no-install-recommends install "${base_packages[@]}" >"$backup/apt-install-plan.txt"
 # --no-upgrade protects explicitly requested packages, but APT may still need
 # newer versions of dependencies already on an older Ubuntu cloud image (for
 # example python3.12 for python3-venv). Record that bounded plan before applying
 # it. The package manager must not remove any pre-existing package.
 ! grep -Eq '^(Remv|Purg) ' "$backup/apt-install-plan.txt" || die 'base installation would remove an existing package'
 grep -E '^Inst [^ ]+ \[' "$backup/apt-install-plan.txt" >"$backup/apt-existing-upgrades.plan" || true
-apt-get install -y --no-upgrade --no-remove --no-install-recommends "${base_packages[@]}"
-apt-get check >/dev/null
+apt_install_attempted=1
+vpn_apt_get install -y --no-upgrade --no-remove --no-install-recommends "${base_packages[@]}"
+vpn_apt_get check >/dev/null
 [[ -z $(dpkg --audit) ]] || die 'package database is not clean after installation'
 touch "$backup/APT_PREREQUISITES_COMMITTED"
 

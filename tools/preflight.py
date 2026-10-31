@@ -29,6 +29,26 @@ def run(*args: str) -> str:
                                    env=dict(os.environ, LC_ALL='C')).strip()
 
 
+def virtualization() -> str:
+    # systemd-detect-virt reports a normal physical host as "none" with status 1.
+    result = subprocess.run(('systemd-detect-virt',), text=True, capture_output=True,
+                            timeout=20, env=dict(os.environ, LC_ALL='C'))
+    value = result.stdout.strip()
+    if result.returncode == 0 or (result.returncode == 1 and value == 'none'):
+        return value
+    raise subprocess.CalledProcessError(result.returncode, result.args)
+
+
+def validate_interface_addresses(records: list, env: dict) -> None:
+    addresses = [address for record in records for address in record.get('addr_info', [])]
+    if not any(address.get('local') == env['TARGET_IPV4'] for address in addresses):
+        raise ValueError('IPv4 is not assigned to the selected interface')
+    if any(address.get('scope') == 'global' and address.get('local') != env['TARGET_IPV4']
+           for address in addresses):
+        raise ValueError('The selected interface must have only the target global IPv4; '
+                         'multiple addresses require a reviewed configuration')
+
+
 def domain(value: str) -> bool:
     return (len(value) <= 253 and '.' in value and all(
         re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p)
@@ -248,8 +268,7 @@ def main() -> None:
     if conflicts:
         raise ValueError('Server is not clean: ' + '; '.join(conflicts))
     addresses = json.loads(run('ip', '-j', '-4', 'address', 'show', 'dev', os.environ['TARGET_INTERFACE']))
-    if not any(a.get('local') == os.environ['TARGET_IPV4'] for i in addresses for a in i.get('addr_info', [])):
-        raise ValueError('IPv4 is not assigned to the selected interface')
+    validate_interface_addresses(addresses, os.environ)
     if run('timedatectl', 'show', '-p', 'NTPSynchronized', '--value') != 'yes':
         raise ValueError('Wait for NTP synchronization before installing')
     check_endpoint_dns(os.environ)
@@ -262,7 +281,8 @@ def main() -> None:
         raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
     dns_status = 'NOT_REQUIRED_IP_MODE' if os.environ.get('TARGET_ADDRESS_MODE') == 'ip' else 'PASS'
     print(f'CLEAN_HOST=PASS DNS={dns_status} REALITY_TARGET_TLS=PASS')
-    for args in (('uname', '-a'), ('systemd-detect-virt',), ('free', '-m'), ('df', '-h', '/'),
+    print('VIRTUALIZATION=' + virtualization())
+    for args in (('uname', '-a'), ('free', '-m'), ('df', '-h', '/'),
                  ('ip', '-4', 'route'), ('ip', '-4', 'rule'), ('ip', '-6', 'route'),
                  ('ip', '-6', 'rule'), ('systemctl', 'list-units', '--type=service', '--state=running', '--no-pager')):
         print(run(*args))

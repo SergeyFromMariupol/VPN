@@ -4,6 +4,7 @@ umask 077
 [[ $EUID == 0 ]] || exit 1
 readonly bundle='/var/lib/vpn-installer/bundle'
 bash "$bundle/base/install-certbot.sh" --check-only
+bash "$bundle/base/install-nginx-restart.sh" --check-only
 bash "$bundle/base/install-cert-reconcile.sh" --check-only
 for unit in x-ui nginx certbot.timer vpn-cert-reconcile.timer krysyuk-warp-netns.service \
   krysyuk-warp-netns-daemon.service krysyuk-warp-netns-configure.service \

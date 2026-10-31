@@ -36,6 +36,7 @@ bootstrap_apt_install \
   shellcheck systemd tcpdump ufw unzip
 
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --retry 2 --connect-timeout 15 --max-time 300 \
   https://pkg.cloudflareclient.com/pubkey.gpg --output "$stage/cloudflare.gpg"
 install -d -o root -g root -m 0755 \
   /usr/share/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
@@ -59,6 +60,7 @@ apt-get update
   die 'Cloudflare WARP package URL does not match the pinned official artifact'
 warp_deb="$stage/cloudflare-warp_${WARP_VERSION}_amd64.deb"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --retry 2 --connect-timeout 15 --max-time 300 \
   "$WARP_DEB_URL" --output "$warp_deb"
 warp_deb_sha=$(sha256sum "$warp_deb" | awk '{print $1}')
 [[ ${warp_deb_sha,,} == "$WARP_DEB_SHA256" ]] || \
@@ -82,8 +84,10 @@ systemctl disable --now warp-svc.service >/dev/null 2>&1 || true
 
 release_base="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --retry 2 --connect-timeout 15 --max-time 300 \
   "${release_base}/${XRAY_RELEASE_ARCHIVE}" --output "$stage/xray.zip"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --retry 2 --connect-timeout 15 --max-time 300 \
   "${release_base}/${XRAY_RELEASE_ARCHIVE}.dgst" --output "$stage/xray.zip.dgst"
 expected_sha=$(grep -Eio '[0-9a-fA-F]{64}' "$stage/xray.zip.dgst" | head -n 1 || true)
 [[ ${#expected_sha} -eq 64 ]] || die 'could not parse the official Xray SHA-256 digest'
