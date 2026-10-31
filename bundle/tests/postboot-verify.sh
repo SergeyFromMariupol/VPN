@@ -285,9 +285,9 @@ jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
   --rawfile warp_xhttp "$stage/warp-xhttp.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
-  ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")]) as $rs
-  | ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")]) as $hs
-  | ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")]) as $xs
+  ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]) as $rs
+  | ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")]) as $hs
+  | ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")]) as $xs
   | .success==true and (.obj|length)==3 and ($rs|length)==1 and ($hs|length)==1 and ($xs|length)==1
   and all(.obj[]; .enable==(if .port==8443 and env.PROMOTED_XHTTP=="1" then false else true end)
     and .shareAddr==$fqdn and (.settings.clients|length)==2)

@@ -327,7 +327,7 @@ jq -n \
   --arg private_key "$REALITY_PRIVATE_KEY" --arg public_key "$REALITY_PUBLIC_KEY" \
   --arg short_id "$REALITY_SHORT_ID" '
   {
-    enable:false,remark:"Germany VLESS REALITY TCP 443",listen:$ip,port:443,protocol:"vless",expiryTime:0,total:0,
+    enable:false,remark:"VPN VLESS REALITY TCP 443",listen:$ip,port:443,protocol:"vless",expiryTime:0,total:0,
     settings:{clients:[{id:$uuid,email:"germany-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · REALITY"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
     streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:($target+":443"),serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
@@ -340,7 +340,7 @@ jq -n \
   --arg sub "$SUBSCRIPTION_ID" --arg path "/$XHTTP_PRIVATE_PATH" \
   --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" '
   {
-    enable:false,remark:"Germany VLESS XHTTP TLS 8443",listen:$ip,port:8443,protocol:"vless",expiryTime:0,total:0,
+    enable:false,remark:"VPN VLESS XHTTP TLS 8443",listen:$ip,port:8443,protocol:"vless",expiryTime:0,total:0,
     settings:{clients:[{id:$uuid,email:"germany-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · XHTTP"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
     streamSettings:{network:"xhttp",security:"tls",xhttpSettings:{path:$path,host:$fqdn,mode:"packet-up"},tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h2"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
@@ -353,7 +353,7 @@ jq -n \
   --arg sub "$SUBSCRIPTION_ID" --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" \
   --arg decoy "$decoy_root" '
   {
-    enable:false,remark:"Germany Hysteria2 UDP 443",listen:$ip,port:443,protocol:"hysteria",expiryTime:0,total:0,
+    enable:false,remark:"VPN Hysteria2 UDP 443",listen:$ip,port:443,protocol:"hysteria",expiryTime:0,total:0,
     settings:{version:2,clients:[{auth:$auth,email:"germany-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · HYSTERIA2"),reset:0}]},
     streamSettings:{network:"hysteria",hysteriaSettings:{version:2,udpIdleTimeout:60,masquerade:{type:"file",dir:$decoy,url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},security:"tls",tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h3"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
@@ -510,9 +510,9 @@ for payload in "$stage/reality.json" "$stage/xhttp.json" "$stage/hysteria2.json"
 done
 
 api_get --output "$stage/inbounds-added.json" "$api_url/inbounds/list"
-reality_id=$(jq -r '.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")|.id' "$stage/inbounds-added.json")
-xhttp_id=$(jq -r '.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")|.id' "$stage/inbounds-added.json")
-hysteria_id=$(jq -r '.obj[]|select(.remark=="Germany Hysteria2 UDP 443")|.id' "$stage/inbounds-added.json")
+reality_id=$(jq -r '.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.id' "$stage/inbounds-added.json")
+xhttp_id=$(jq -r '.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.id' "$stage/inbounds-added.json")
+hysteria_id=$(jq -r '.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.id' "$stage/inbounds-added.json")
 for inbound_id in "$reality_id" "$xhttp_id" "$hysteria_id"; do
   [[ "$inbound_id" =~ ^[1-9][0-9]*$ ]] || die 'could not resolve created inbound IDs'
 done
@@ -525,7 +525,7 @@ add_host_group() {
     --argjson port "$port" --arg security "$security" --arg sni "$sni" \
     --arg path "$path" --arg alpn "$alpn" --arg host_header "$host_header" '
     {
-      groupId:"",inboundIds:[$inbound_id],remark:"Germany standalone",hosts:[$fqdn],sortOrder:0,
+      groupId:"",inboundIds:[$inbound_id],remark:"VPN standalone",hosts:[$fqdn],sortOrder:0,
       serverDescription:"",port:$port,security:$security,sni:$sni,hostHeader:$host_header,path:$path,
       alpn:(if $alpn=="" then [] else [$alpn] end),fingerprint:"chrome",allowInsecure:false,
       isDisabled:false,isHidden:false,keepSniBlank:false,overrideSniFromAddress:false,

@@ -214,9 +214,9 @@ jq --exit-status --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
   .success == true and (.obj|length==3)
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")]|length==1)
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")]|length==1)
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")]|length==1)
   and all(.obj[]; .enable == true and (.settings.clients|length)==1)
   and ([.obj[]|select(.protocol=="vless")|.settings.clients[0].id]|unique)==[($direct_vless|clean)]
   and ([.obj[]|select(.protocol=="hysteria")|.settings.clients[0].auth])==[($direct_hysteria|clean)]
@@ -313,7 +313,7 @@ jq --rawfile connector "$stage/connector.uuid" '
 jq --rawfile warp_uuid "$stage/warp-reality.uuid" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany VLESS REALITY TCP 443")
+  .obj[] | select(.remark=="VPN VLESS REALITY TCP 443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {id:($warp_uuid|clean),email:"germany-warp-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · REALITY"),reset:0},
@@ -325,7 +325,7 @@ jq --rawfile warp_uuid "$stage/warp-reality.uuid" \
 jq --rawfile warp_auth "$stage/warp-hysteria.auth" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany Hysteria2 UDP 443")
+  .obj[] | select(.remark=="VPN Hysteria2 UDP 443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {auth:($warp_auth|clean),email:"germany-warp-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · HYSTERIA2"),reset:0},
@@ -337,7 +337,7 @@ jq --rawfile warp_auth "$stage/warp-hysteria.auth" \
 jq --rawfile warp_uuid "$stage/warp-xhttp.uuid" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany VLESS XHTTP TLS 8443")
+  .obj[] | select(.remark=="VPN VLESS XHTTP TLS 8443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {id:($warp_uuid|clean),email:"germany-warp-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · XHTTP"),reset:0},
@@ -412,12 +412,12 @@ jq --exit-status --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
   .success==true and (.obj|length==3) and all(.obj[];.enable==true and (.settings.clients|length)==2)
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")|.subSortIndex])==[1]
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")|.subSortIndex])==[2]
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")|.subSortIndex])==[3]
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")|.settings.clients[0].id])==[($warp_reality|clean)]
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")|.settings.clients[0].id])==[($warp_xhttp|clean)]
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")|.settings.clients[0].auth])==[($warp_hysteria|clean)]
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.subSortIndex])==[1]
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.subSortIndex])==[2]
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.subSortIndex])==[3]
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.settings.clients[0].id])==[($warp_reality|clean)]
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.settings.clients[0].id])==[($warp_xhttp|clean)]
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.settings.clients[0].auth])==[($warp_hysteria|clean)]
   and ([.obj[].settings.clients[0].subId]|unique)==[($public_sub|clean)]
   and ([.obj[].settings.clients[1].subId]|unique)==[($direct_sub|clean)]
   and ([.obj[]|select(.protocol=="vless")|.settings.clients[1].id]|unique)==[($direct_vless|clean)]
