@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.1'
+readonly release='v1.1.2'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -72,6 +72,10 @@ else
   printf '\nVPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
+    if [[ $TARGET_IPV4 == *:* ]]; then
+      # SSH may arrive over IPv6 while the public VPN endpoints use IPv4.
+      TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
+    fi
   else
     TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
     read -r -p 'SSH порт [22]: ' TARGET_SSH_PORT </dev/tty
@@ -99,11 +103,18 @@ else
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
   printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nFirewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$TARGET_SSH_PORT"
   printf 'Если в панели провайдера включён отдельный firewall, разрешите эти же порты там.\n'
+  printf 'После подтверждения обновятся пакеты Ubuntu (apt-get update/upgrade), затем установится VPN.\n'
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
   install -d -m 0700 "$state" "$destination"
   cp -- "$task_stage/inventory.txt" "$state/inventory-before.txt"
   cp -a -- "$source_dir/." "$destination/"
+  # GitHub tarballs can carry mode 0664 for ordinary tracked files. The pinned
+  # Certbot installer requires its reviewed source to be root-owned and not
+  # writable by a group; normalize the private installed copy only.
+  find "$destination" -type d -exec chmod go-w {} +
+  find "$destination" -type f -exec chmod go-w {} +
+  chmod 0700 "$destination"
   # Do not publish the mutable rendered copy; the verified original stays intact.
   python3 "$destination/tools/write-target.py" "$target_file"
   cat /proc/sys/kernel/random/boot_id >"$state/install-boot-id"
@@ -140,6 +151,7 @@ bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log"
 phase tls bash "$runtime/base/acme.sh" --apply
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
 phase panel bash "$runtime/scripts/expose-panel-https.sh" --apply
+phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
 phase warp bash "$runtime/warp-egress/scripts/install-warp.sh"
 phase dual env CONFIRM_STANDALONE_DUAL_EGRESS="ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" bash "$runtime/scripts/enable-dual-egress.sh" --apply
 if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]]; then
@@ -149,7 +161,9 @@ if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]];
 else
   phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
 fi
-phase renewal certbot renew --dry-run --run-deploy-hooks
+# The production timer keeps Certbot's random spread; an interactive install
+# should run its one acceptance renewal immediately.
+phase renewal certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew
 # Always recheck live state, including a resume after a later phase failed.
 printf '\n→ verify\n'
 if ! bash "$destination/tools/verify.sh" >"$state/verify.log" 2>&1; then

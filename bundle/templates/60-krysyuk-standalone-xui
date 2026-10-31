@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -eu
+# Idempotent deploy hook, also run by the independent reconciliation timer.
+set -Eeuo pipefail
 umask 077
 [[ -f /etc/germanyvpn-target.env && ! -L /etc/germanyvpn-target.env && $(stat -c '%U:%G:%a' /etc/germanyvpn-target.env) == root:root:600 ]] || exit 1
 # shellcheck disable=SC1091
@@ -8,54 +9,162 @@ fqdn=$TARGET_FQDN
 lineage="/etc/letsencrypt/live/$fqdn"
 [ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
 root=/etc/krysyuk-standalone
+marker="$root/tls-deployed.sha256"
+nginx_config=/etc/nginx/conf.d/3x-ui-public.conf
+lock_root=/run/vpn-cert-reconcile
+mkdir -p -m 0700 -- "$lock_root"
+[[ -d $lock_root && ! -L $lock_root && $(stat -c '%u:%g:%a' "$lock_root") == 0:0:700 ]] || exit 1
+if [[ -e $lock_root/deploy.lock || -L $lock_root/deploy.lock ]]; then
+  [[ -f $lock_root/deploy.lock && ! -L $lock_root/deploy.lock &&
+     $(stat -c '%u:%g:%a:%h' "$lock_root/deploy.lock") == 0:0:600:1 ]] || exit 1
+fi
+exec 8>"$lock_root/deploy.lock"
+flock -w 120 8
+[[ -d $root && ! -L $root && $(stat -c '%U:%G:%a' "$root") == root:xui-secrets:750 ]] || exit 1
 [ -L "$root/tls" ] || { printf 'ERROR: runtime TLS pointer is not a symlink\n' >&2; exit 1; }
 previous=$(readlink "$root/tls")
-case "$previous" in tls-gen.*) ;; *) exit 1;; esac
-new=$(mktemp -d "$root/tls-gen.XXXXXXXX")
+[[ $previous =~ ^tls-gen\.[A-Za-z0-9]+$ && -d $root/$previous && ! -L $root/$previous ]] || exit 1
+if [[ -e $marker || -L $marker ]]; then
+  [[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a:%h' "$marker") == 0:0:600:1 ]] || exit 1
+fi
+systemctl is-active --quiet x-ui.service || exit 1
+if [[ -e $nginx_config ]]; then systemctl is-active --quiet nginx.service || exit 1; fi
+new=''
 link="$root/.tls-next-$$"
 switched=0
 committed=0
+marker_written=0
+marker_stage=''
+marker_before=''
+marker_existed=0
 cleanup() {
-  status=$?
+  status=$?; rollback_ok=1
   trap - EXIT INT TERM HUP
-  rm -f -- "$link"
+  set +e
+  rm -f -- "$link" || rollback_ok=0
+  if [[ -n $marker_stage ]]; then rm -f -- "$marker_stage" || rollback_ok=0; fi
   if [ "$committed" = 0 ]; then
-    if [ "$switched" = 1 ]; then
-      ln -s -- "$previous" "$link"
-      mv -Tf -- "$link" "$root/tls"
-      systemctl try-restart x-ui.service >/dev/null 2>&1 || true
-      if systemctl is-active --quiet nginx.service; then nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || true; fi
+    if ((marker_written)); then
+      if ((marker_existed)); then
+        install -o root -g root -m 0600 "$marker_before" "$marker" || rollback_ok=0
+      else
+        rm -f -- "$marker" || rollback_ok=0
+      fi
     fi
-    rm -f -- "$new/fullchain.pem" "$new/privkey.pem"
-    rmdir -- "$new" 2>/dev/null || true
+    if [ "$switched" = 1 ]; then
+      ln -s -- "$previous" "$link" && mv -Tf -- "$link" "$root/tls" || rollback_ok=0
+      systemctl restart x-ui.service >/dev/null 2>&1 || rollback_ok=0
+      if [[ -e $nginx_config ]]; then
+        nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || rollback_ok=0
+      fi
+    fi
+    if [[ -n $new ]]; then
+      rm -f -- "$new/fullchain.pem" "$new/privkey.pem" || rollback_ok=0
+      rmdir -- "$new" 2>/dev/null || rollback_ok=0
+    fi
   fi
+  if [[ -n $marker_before ]]; then rm -f -- "$marker_before" || rollback_ok=0; fi
+  ((rollback_ok)) || printf 'ERROR: TLS rollback requires review\n' >&2
+  ((status != 0)) || ((rollback_ok)) || status=1
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then
-  [[ $fqdn == "$TARGET_IPV4" ]] || exit 1
-  openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$lineage/chain.pem" \
-    -verify_ip "$TARGET_IPV4" "$lineage/cert.pem" >/dev/null
-else
-  openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$lineage/chain.pem" \
-    -verify_hostname "$fqdn" "$lineage/cert.pem" >/dev/null
+marker_before=$(mktemp "$root/.tls-marker-before.XXXXXXXX")
+if [[ -f $marker ]]; then
+  cp -- "$marker" "$marker_before"
+  marker_existed=1
 fi
-openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400 >/dev/null
-cert_pub=$(openssl x509 -in "$lineage/fullchain.pem" -pubkey -noout | openssl sha256)
-key_pub=$(openssl pkey -in "$lineage/privkey.pem" -pubout | openssl sha256)
-[ "$cert_pub" = "$key_pub" ] || exit 1
+case ${TARGET_ADDRESS_MODE:-domain} in
+  ip)
+    [[ $fqdn == "$TARGET_IPV4" ]] || exit 1
+    identity=(-verify_ip "$TARGET_IPV4") ;;
+  domain) identity=(-verify_hostname "$fqdn") ;;
+  *) exit 1 ;;
+esac
+verify_pair() {
+  local cert=$1 key=$2 cert_pub key_pub
+  openssl verify -purpose sslserver -CApath /etc/ssl/certs -untrusted "$cert" \
+    "${identity[@]}" "$cert" >/dev/null || return 1
+  openssl x509 -in "$cert" -noout -checkend 86400 >/dev/null || return 1
+  cert_pub=$(openssl x509 -in "$cert" -pubkey -noout | openssl sha256) || return 1
+  key_pub=$(openssl pkey -in "$key" -pubout | openssl sha256) || return 1
+  [[ $cert_pub == "$key_pub" ]]
+}
+verify_pair "$lineage/fullchain.pem" "$lineage/privkey.pem"
+expected_hash=$(sha256sum "$lineage/fullchain.pem"); expected_hash=${expected_hash%% *}
+[[ $expected_hash =~ ^[a-f0-9]{64}$ ]] || exit 1
+same_files=0
+if cmp -s "$lineage/fullchain.pem" "$root/tls/fullchain.pem" &&
+   cmp -s "$lineage/privkey.pem" "$root/tls/privkey.pem"; then same_files=1; fi
+if ((same_files)) && [[ -f $marker && $(cat "$marker") == "$expected_hash" ]] &&
+   systemctl is-active --quiet x-ui.service &&
+   { [[ ! -e $nginx_config ]] || systemctl is-active --quiet nginx.service; }; then
+  committed=1
+  exit 0
+fi
+if ((same_files == 0)); then
+new=$(mktemp -d "$root/tls-gen.XXXXXXXX")
 chown root:xui-secrets "$new"
 chmod 0750 "$new"
 install -o root -g xui-secrets -m 0640 "$lineage/fullchain.pem" "$new/fullchain.pem"
 install -o root -g xui-secrets -m 0640 "$lineage/privkey.pem" "$new/privkey.pem"
+cmp -s "$lineage/fullchain.pem" "$new/fullchain.pem"
+cmp -s "$lineage/privkey.pem" "$new/privkey.pem"
+verify_pair "$new/fullchain.pem" "$new/privkey.pem"
 ln -s -- "$(basename "$new")" "$link"
-mv -Tf -- "$link" "$root/tls"
 switched=1
-systemctl try-restart x-ui.service >/dev/null
-if systemctl is-active --quiet nginx.service; then
+mv -Tf -- "$link" "$root/tls"
+fi
+systemctl restart x-ui.service >/dev/null
+systemctl is-active --quiet x-ui.service
+if [[ -e $nginx_config ]]; then
+  systemctl is-active --quiet nginx.service
   nginx -t >/dev/null
   systemctl reload nginx.service >/dev/null
 fi
+cmp -s "$lineage/fullchain.pem" "$root/tls/fullchain.pem"
+cmp -s "$lineage/privkey.pem" "$root/tls/privkey.pem"
+verify_pair "$root/tls/fullchain.pem" "$root/tls/privkey.pem"
+verify_pair "$lineage/fullchain.pem" "$lineage/privkey.pem"
+current_hash=$(sha256sum "$lineage/fullchain.pem"); current_hash=${current_hash%% *}
+deployed_hash=$(sha256sum "$root/tls/fullchain.pem"); deployed_hash=${deployed_hash%% *}
+[[ $current_hash == "$deployed_hash" && $current_hash =~ ^[a-f0-9]{64}$ ]]
+expected_hash=$current_hash
+expected_leaf=$(openssl x509 -in "$root/tls/fullchain.pem" -outform DER | sha256sum)
+expected_leaf=${expected_leaf%% *}
+verify_served() {
+  local port=$1 attempt output observed
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if output=$(timeout 8s openssl s_client -connect "$TARGET_IPV4:$port" \
+        "${identity[@]}" "${sni_option[@]}" -CApath /etc/ssl/certs \
+        -verify_return_error -showcerts </dev/null 2>/dev/null); then
+      observed=$(printf '%s\n' "$output" | openssl x509 -outform DER 2>/dev/null | sha256sum) || observed=''
+      observed=${observed%% *}
+      [[ $observed == "$expected_leaf" ]] && return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then sni_option=(-noservername)
+else sni_option=(-servername "$fqdn"); fi
+verify_served 2096
+if [[ -e $nginx_config ]]; then verify_served 2053; fi
+# A renewal can rotate the lineage while the independent timer probes listeners.
+# Commit only the exact pair that is still current after those probes.
+cmp -s "$lineage/fullchain.pem" "$root/tls/fullchain.pem"
+cmp -s "$lineage/privkey.pem" "$root/tls/privkey.pem"
+verify_pair "$lineage/fullchain.pem" "$lineage/privkey.pem"
+verify_pair "$root/tls/fullchain.pem" "$root/tls/privkey.pem"
+current_hash=$(sha256sum "$lineage/fullchain.pem"); current_hash=${current_hash%% *}
+deployed_hash=$(sha256sum "$root/tls/fullchain.pem"); deployed_hash=${deployed_hash%% *}
+[[ $current_hash == "$deployed_hash" && $current_hash =~ ^[a-f0-9]{64}$ ]]
+expected_hash=$current_hash
+marker_stage=$(mktemp "$root/.tls-deployed.XXXXXXXX")
+printf '%s\n' "$expected_hash" >"$marker_stage"
+chmod 0600 "$marker_stage"
+marker_written=1
+mv -Tf -- "$marker_stage" "$marker"
 committed=1
 # Keep the previous root-owned generation available for certificate rollback.

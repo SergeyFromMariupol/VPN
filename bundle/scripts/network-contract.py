@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only checks for the installer's public sockets and UFW contract."""
 import argparse
+import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -8,10 +9,14 @@ import re
 import shlex
 import stat
 import subprocess
+import time
 from typing import NamedTuple
 
 
 DHCP_EXECUTABLES = frozenset(('/usr/lib/systemd/systemd-networkd', '/usr/sbin/dhclient'))
+XRAY_SHA256 = '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
+MAIN_XRAY = '/usr/local/x-ui/bin/xray-linux-amd64'
+XHTTP_XRAY = '/usr/local/lib/germanyvpn-xhttp-test/xray'
 
 
 class Listener(NamedTuple):
@@ -86,6 +91,45 @@ def is_expected_dhcp(listener, target_interface, process_executables, target_ipv
             and all(process_executables.get(pid) in DHCP_EXECUTABLES for pid in listener.pids))
 
 
+def listener_summary(listener):
+    scope = '%' + listener.scope if listener.scope else ''
+    owners = ','.join(map(str, listener.pids)) or 'none'
+    return f'{listener.protocol} [{listener.address}{scope}]:{listener.port} pids={owners}'
+
+
+def managed_uid(name):
+    import pwd
+    return pwd.getpwnam(name).pw_uid
+
+
+def trusted_managed_udp_owners(listeners, promoted):
+    """Authenticate running managed Xray images, never their display names."""
+    expected = {MAIN_XRAY: 'xui'}
+    if promoted:
+        expected[XHTTP_XRAY] = 'xhttp-test'
+    authenticated = set()
+    for pid in {pid for listener in listeners for pid in listener.pids}:
+        try:
+            process = Path('/proc') / str(pid)
+            executable = process / 'exe'
+            canonical = str(executable.resolve(strict=True))
+            if canonical not in expected:
+                continue
+            info = executable.stat()
+            uid = managed_uid(expected[canonical])
+            uids = re.search(r'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$',
+                             (process / 'status').read_text(), re.M)
+            if (uid <= 0 or uids is None or any(int(value) != uid for value in uids.groups())
+                    or not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) & 0o022):
+                continue
+            if hashlib.sha256(executable.read_bytes()).hexdigest() == XRAY_SHA256:
+                authenticated.add(pid)
+        except (OSError, RuntimeError, KeyError, ImportError):
+            continue
+    return authenticated
+
+
 def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promoted,
                        process_executables=None):
     target_ipv4 = str(ipaddress.IPv4Address(target_ipv4))
@@ -101,21 +145,63 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
         if is_expected_dhcp(listener, target_interface, process_executables, target_ipv4):
             continue
         if listener.scope not in (None, target_interface):
-            raise ValueError('Unexpected public listener interface')
+            raise ValueError('Unexpected public listener interface: ' + listener_summary(listener))
         if listener.protocol == 'tcp' and listener.port == ssh_port:
             if listener.address not in (target_ipv4, '0.0.0.0', '::'):
-                raise ValueError('SSH listener is not bound to the server address')
+                raise ValueError('SSH listener is not bound to the server address: ' + listener_summary(listener))
             found_tcp.add(ssh_port)
         elif listener.address != target_ipv4:
-            raise ValueError('Unexpected public listener address')
+            raise ValueError('Unexpected public listener address: ' + listener_summary(listener))
         elif listener.protocol == 'tcp' and listener.port in required_tcp:
             found_tcp.add(listener.port)
         elif listener.protocol == 'udp' and listener.port == 443:
             found_udp.add(443)
         else:
-            raise ValueError('Unexpected public listener port')
+            raise ValueError('Unexpected public listener port: ' + listener_summary(listener))
     if found_tcp != required_tcp or found_udp != {443}:
         raise ValueError('Required public listener is missing')
+
+
+def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh_port,
+                              promoted, wait_seconds=90):
+    """Let owned self-test UDP sessions expire; PASS still needs the exact contract.
+
+    Xray's outbound UDP sockets are unconnected and therefore appear in ss -l.
+    Closing a self-test client does not immediately expire its server session.
+    Only those authenticated extra sockets can cause a bounded retry. Required
+    services, other public sockets and the strict validator stay unchanged.
+    """
+    if not 0 <= wait_seconds <= 90:
+        raise ValueError('Listener convergence timeout must be between 0 and 90 seconds')
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        listeners = read_listeners()
+        dhcp_owners = trusted_process_executables(listeners)
+        try:
+            validate_listeners(listeners, target_ipv4, target_interface, ssh_port,
+                               promoted, dhcp_owners)
+            return
+        except ValueError as error:
+            extras = [listener for listener in listeners
+                      if listener.protocol == 'udp'
+                      and not ipaddress.ip_address(listener.address).is_loopback
+                      and not is_expected_dhcp(listener, target_interface, dhcp_owners, target_ipv4)
+                      and not (listener.address == target_ipv4 and listener.port == 443
+                               and listener.scope in (None, target_interface))]
+            if not extras:
+                raise
+            # Removing the candidate sessions must leave every required listener
+            # and no other mismatch; this is only a retry eligibility check.
+            validate_listeners([listener for listener in listeners if listener not in extras],
+                               target_ipv4, target_interface, ssh_port, promoted, dhcp_owners)
+            owners = trusted_managed_udp_owners(extras, promoted)
+            if any(not listener.pids or not set(listener.pids) <= owners for listener in extras):
+                raise error
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('Managed UDP sessions did not expire within '
+                                 f'{wait_seconds}s; {error}') from error
+            time.sleep(min(2, remaining))
 
 
 def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaults_text):
@@ -186,9 +272,9 @@ def main():
         return subprocess.run(command, check=True, text=True, capture_output=True,
                               env=environment, timeout=30).stdout
     try:
-        listeners = parse_ss(output(['ss', '-H', '-lntup']))
-        validate_listeners(listeners, args.target_ip, args.interface, args.ssh_port,
-                           args.promoted == '1', trusted_process_executables(listeners))
+        wait_for_strict_listeners(lambda: parse_ss(output(['ss', '-H', '-lntup'])),
+                                 args.target_ip, args.interface, args.ssh_port,
+                                 args.promoted == '1')
         validate_ufw(output(['ufw', 'status', 'verbose']), args.target_ip, args.interface,
                      args.ssh_port, args.promoted == '1', Path('/etc/default/ufw').read_text())
     except (ValueError, OSError, subprocess.SubprocessError) as error:

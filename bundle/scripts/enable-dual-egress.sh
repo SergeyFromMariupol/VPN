@@ -54,6 +54,7 @@ wait_ready() {
 rollback() {
   local status=$?
   local rollback_ok=1
+  local -a legacy_args=()
   trap - ERR EXIT INT TERM HUP
   if [[ "$committed" -eq 0 && "$backup_ready" -eq 1 && -s "$backup/x-ui.db" ]]; then
     printf 'ROLLBACK_STARTED=1\n' >&2
@@ -69,6 +70,14 @@ rollback() {
       if ((rollback_ok)); then systemctl start x-ui.service >/dev/null 2>&1 || rollback_ok=0; fi
       wait_ready >/dev/null 2>&1 || rollback_ok=0
       sqlite3 "$db" 'PRAGMA quick_check;' 2>/dev/null | grep -qx ok || rollback_ok=0
+      if ((rollback_ok)); then
+        legacy_args=(--verify-legacy-rollback --rollback-snapshot "$backup")
+        if [[ -s "$stage/subscription-before.body" ]]; then
+          legacy_args+=(--baseline-feed "$stage/subscription-before.body")
+        fi
+        python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/finalize-xhttp.py" \
+          "${legacy_args[@]}" >/dev/null || rollback_ok=0
+      fi
     else
       rollback_ok=0
     fi
@@ -205,9 +214,9 @@ jq --exit-status --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
   .success == true and (.obj|length==3)
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")]|length==1)
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")]|length==1)
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")]|length==1)
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")]|length==1)
   and all(.obj[]; .enable == true and (.settings.clients|length)==1)
   and ([.obj[]|select(.protocol=="vless")|.settings.clients[0].id]|unique)==[($direct_vless|clean)]
   and ([.obj[]|select(.protocol=="hysteria")|.settings.clients[0].auth])==[($direct_hysteria|clean)]
@@ -304,7 +313,7 @@ jq --rawfile connector "$stage/connector.uuid" '
 jq --rawfile warp_uuid "$stage/warp-reality.uuid" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany VLESS REALITY TCP 443")
+  .obj[] | select(.remark=="VPN VLESS REALITY TCP 443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {id:($warp_uuid|clean),email:"germany-warp-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · REALITY"),reset:0},
@@ -316,7 +325,7 @@ jq --rawfile warp_uuid "$stage/warp-reality.uuid" \
 jq --rawfile warp_auth "$stage/warp-hysteria.auth" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany Hysteria2 UDP 443")
+  .obj[] | select(.remark=="VPN Hysteria2 UDP 443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {auth:($warp_auth|clean),email:"germany-warp-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · HYSTERIA2"),reset:0},
@@ -328,7 +337,7 @@ jq --rawfile warp_auth "$stage/warp-hysteria.auth" \
 jq --rawfile warp_uuid "$stage/warp-xhttp.uuid" \
   --rawfile direct_sub "$stage/direct-sub.id" --rawfile public_sub "$stage/public-sub.id" '
   def clean: rtrimstr("\n");
-  .obj[] | select(.remark=="Germany VLESS XHTTP TLS 8443")
+  .obj[] | select(.remark=="VPN VLESS XHTTP TLS 8443")
   | .settings.clients[0] as $direct
   | .settings.clients = [
       {id:($warp_uuid|clean),email:"germany-warp-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:($public_sub|clean),comment:(env.TARGET_LABEL+" · ☁️ Cloudflare · XHTTP"),reset:0},
@@ -349,16 +358,27 @@ jq --slurpfile global "$stage/xray-global-intended.json" \
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test \
   -config "$stage/xray-preflight.json" >/dev/null
 
-jq --null-input --rawfile reality "$stage/direct-reality.uri" \
-  --rawfile hysteria "$stage/direct-hysteria2.uri" \
-  --rawfile xhttp "$stage/direct-xhttp.uri" '
-  def clean: rtrimstr("\n");
-  {externalLinks:[
-    {kind:"link",value:($reality|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · REALITY"),enable:true,expiryTime:0,namePrefix:""},
-    {kind:"link",value:($hysteria|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · HYSTERIA2"),enable:true,expiryTime:0,namePrefix:""},
-    {kind:"link",value:($xhttp|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · XHTTP"),enable:true,expiryTime:0,namePrefix:""}
-  ]}
-' >"$stage/external-links.json"
+DIRECT_LINK_STAGE="$stage" python3 - <<'PY' >"$stage/external-links.json"
+import json
+import os
+from pathlib import Path
+from urllib.parse import quote, unquote
+
+root = Path(os.environ['DIRECT_LINK_STAGE'])
+label = os.environ['TARGET_LABEL']
+links = []
+for filename, protocol in (('direct-reality.uri', 'REALITY'),
+                           ('direct-hysteria2.uri', 'HYSTERIA2'),
+                           ('direct-xhttp.uri', 'XHTTP')):
+    original = (root / filename).read_text().rstrip('\n')
+    endpoint, separator, old_fragment = original.partition('#')
+    if separator != '#' or unquote(old_fragment) != label + ' · ' + protocol:
+        raise SystemExit('unexpected direct link fragment')
+    remark = label + ' · 🖥️ IP сервера · ' + protocol
+    links.append(dict(kind='link', value=endpoint + '#' + quote(remark, safe=''),
+                      remark=remark, enable=True, expiryTime=0, namePrefix=''))
+print(json.dumps({'externalLinks': links}, ensure_ascii=False, separators=(',', ':')))
+PY
 jq --exit-status '
   (.externalLinks|length)==3 and ([.externalLinks[].kind]|unique)==["link"]
   and ([.externalLinks[].value]|unique|length)==3 and all(.externalLinks[];.enable==true and .expiryTime==0)
@@ -403,12 +423,12 @@ jq --exit-status --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
   .success==true and (.obj|length==3) and all(.obj[];.enable==true and (.settings.clients|length)==2)
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")|.subSortIndex])==[1]
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")|.subSortIndex])==[2]
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")|.subSortIndex])==[3]
-  and ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")|.settings.clients[0].id])==[($warp_reality|clean)]
-  and ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")|.settings.clients[0].id])==[($warp_xhttp|clean)]
-  and ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")|.settings.clients[0].auth])==[($warp_hysteria|clean)]
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.subSortIndex])==[1]
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.subSortIndex])==[2]
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.subSortIndex])==[3]
+  and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.settings.clients[0].id])==[($warp_reality|clean)]
+  and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.settings.clients[0].id])==[($warp_xhttp|clean)]
+  and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.settings.clients[0].auth])==[($warp_hysteria|clean)]
   and ([.obj[].settings.clients[0].subId]|unique)==[($public_sub|clean)]
   and ([.obj[].settings.clients[1].subId]|unique)==[($direct_sub|clean)]
   and ([.obj[]|select(.protocol=="vless")|.settings.clients[1].id]|unique)==[($direct_vless|clean)]
@@ -423,11 +443,12 @@ jq --exit-status '
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-time 30 \
   --user-agent 'v2rayN/7' --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
   --output "$stage/subscription-after.body" "$subscription_url"
-SUB_BODY="$stage/subscription-after.body" SECRET_DIR="$stage" CHECK_FQDN="$PUBLIC_FQDN" \
+SUB_BODY="$stage/subscription-after.body" SECRET_DIR="$stage" DB_PATH="$db" CHECK_FQDN="$PUBLIC_FQDN" \
   python3 - <<'PY'
 import base64
 import os
 from pathlib import Path
+import sqlite3
 from urllib.parse import parse_qs, unquote, urlparse
 
 root = Path(os.environ["SECRET_DIR"])
@@ -449,6 +470,16 @@ if len(links) != 6 or len(set(links)) != 6:
 items = [urlparse(link) for link in links]
 if [unquote(item.fragment) for item in items] != names:
     raise SystemExit("public subscription display order mismatch")
+with sqlite3.connect('file:' + os.environ['DB_PATH'] + '?mode=ro', uri=True) as db:
+    external_rows = db.execute('SELECT value, remark FROM client_external_links ORDER BY sort_index,id').fetchall()
+if len(external_rows) != 3:
+    raise SystemExit("stored direct links count mismatch")
+for index, (value, remark) in enumerate(external_rows):
+    stored = urlparse(value)
+    served = items[index + 3]
+    if (stored._replace(fragment='') != served._replace(fragment='') or
+            unquote(stored.fragment) != names[index + 3] or remark != names[index + 3]):
+        raise SystemExit("stored direct link differs from public subscription")
 if any(item.hostname != os.environ["CHECK_FQDN"] for item in items):
     raise SystemExit("public subscription hostname mismatch")
 wr = root.joinpath("warp-reality.uuid").read_text().strip()

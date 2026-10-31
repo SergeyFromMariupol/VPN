@@ -128,6 +128,19 @@ transaction_exit() {
     if ((apt_attempted)); then
       rollback_packages || rollback_ok=0
       restore_package_marks || rollback_ok=0
+      dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Status}\n' >"$backup/package-versions.after-failure" || rollback_ok=0
+      if [[ -f $backup/OS_UPGRADE_COMMITTED ]]; then
+        if ! cmp -s "$backup/package-versions.before" "$backup/package-versions.after-os-upgrade"; then
+          printf 'OS_UPGRADE_PERSISTED=1 details=%s\n' "$backup" >&2
+        fi
+        if ! cmp -s "$backup/package-versions.after-os-upgrade" "$backup/package-versions.after-failure"; then
+          printf 'APT_INSTALL_PACKAGE_CHANGES_REMAIN=1 details=%s\n' "$backup" >&2
+          rollback_ok=0
+        fi
+      elif ! cmp -s "$backup/package-versions.before" "$backup/package-versions.after-failure"; then
+        printf 'OS_UPGRADE_INCOMPLETE=1 details=%s\n' "$backup" >&2
+        rollback_ok=0
+      fi
     fi
     if ((groups_created)); then
       userdel xui >/dev/null 2>&1 || rollback_ok=0
@@ -183,13 +196,31 @@ systemctl daemon-reload
 export DEBIAN_FRONTEND=noninteractive
 apt_attempted=1
 apt-get update
+apt-get -s --no-remove upgrade >"$backup/apt-upgrade-plan.txt"
+! grep -Eq '^(Remv|Purg) ' "$backup/apt-upgrade-plan.txt" || die 'Ubuntu upgrade would remove an existing package'
+apt-get upgrade -y --no-remove
+apt-get check >/dev/null
+[[ -z $(dpkg --audit) ]] || die 'package database is not clean after Ubuntu upgrade'
+/usr/sbin/sshd -t || die 'SSH configuration failed after Ubuntu upgrade'
+systemctl is-active --quiet ssh.service || die 'SSH service is inactive after Ubuntu upgrade'
+ss -H -lnt | grep -Eq "(:|\\])${TARGET_SSH_PORT}[[:space:]]" || die 'SSH listener disappeared after Ubuntu upgrade'
+dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Status}\n' >"$backup/package-versions.after-os-upgrade"
+touch "$backup/OS_UPGRADE_COMMITTED"
 base_packages=(
   ca-certificates certbot curl dnsutils gnupg iproute2 jq nftables nginx openssl \
   python3 python3-bcrypt python3-venv shellcheck sqlite3 tar tcpdump ufw unzip uuid-runtime xz-utils
 )
 apt-get -s --no-upgrade --no-remove --no-install-recommends install "${base_packages[@]}" >"$backup/apt-install-plan.txt"
-! grep -Eq '^Inst [^ ]+ \[' "$backup/apt-install-plan.txt" || die 'base installation would upgrade an existing package; reviewed package transaction required'
+# --no-upgrade protects explicitly requested packages, but APT may still need
+# newer versions of dependencies already on an older Ubuntu cloud image (for
+# example python3.12 for python3-venv). Record that bounded plan before applying
+# it. The package manager must not remove any pre-existing package.
+! grep -Eq '^(Remv|Purg) ' "$backup/apt-install-plan.txt" || die 'base installation would remove an existing package'
+grep -E '^Inst [^ ]+ \[' "$backup/apt-install-plan.txt" >"$backup/apt-existing-upgrades.plan" || true
 apt-get install -y --no-upgrade --no-remove --no-install-recommends "${base_packages[@]}"
+apt-get check >/dev/null
+[[ -z $(dpkg --audit) ]] || die 'package database is not clean after installation'
+touch "$backup/APT_PREREQUISITES_COMMITTED"
 
 [[ $(ufw status | sed -n '1p') == 'Status: inactive' ]] || die 'UFW unexpectedly active after package installation'
 ufw show added | grep -Fq '(None)' || die 'unexpected UFW user rules'

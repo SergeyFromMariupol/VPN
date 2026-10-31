@@ -25,8 +25,34 @@ jobs:
       - name: Check actual UFW output in isolated namespaces
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ufw iproute2 util-linux
+          sudo apt-get install -y --no-install-recommends ufw iproute2 util-linux shellcheck
           sudo env GITHUB_ACTIONS=true CI=true bash bundle/tests/test-ufw-contract.sh
+      - name: ShellCheck WARP runtime scripts
+        run: find bundle/warp-egress/scripts bundle/warp-egress/tests -type f -name '*.sh' -print0 | xargs -0 shellcheck --external-sources --severity=warning
+      - name: Render and validate WARP static assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get install -y --no-install-recommends jq nftables
+          rendered="$RUNNER_TEMP/vpn-bundle-rendered"
+          cp -a bundle "$rendered"
+          TARGET_IPV4=198.51.100.42 TARGET_INTERFACE=ci0 python3 tools/render.py "$rendered"
+          (cd "$rendered" && sha256sum --check --strict SOURCE_SHA256SUMS >/dev/null)
+          ! getent passwd xraywarp
+          ! getent group xraywarp
+          [[ ! -e /bin/warp-svc && ! -e /opt/krysyuk-warp-egress && ! -e /usr/local/libexec/krysyuk-warp-egress ]]
+          cleanup() {
+            sudo rm -f -- /bin/warp-svc
+            sudo rm -r -- /opt/krysyuk-warp-egress /usr/local/libexec/krysyuk-warp-egress 2>/dev/null || true
+            sudo userdel xraywarp 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin xraywarp
+          sudo install -d -m 0755 /opt/krysyuk-warp-egress/bin /usr/local/libexec/krysyuk-warp-egress
+          sudo install -m 0755 /bin/true /bin/warp-svc
+          sudo install -m 0755 /bin/true /opt/krysyuk-warp-egress/bin/xray
+          sudo install -m 0755 "$rendered"/warp-egress/scripts/*.sh /usr/local/libexec/krysyuk-warp-egress/
+          sudo bash "$rendered/warp-egress/tests/test-static-assets.sh"
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"

@@ -1,5 +1,6 @@
 """Offline public firewall/socket fixtures; no host changes or network calls."""
 import importlib.util
+import hashlib
 from pathlib import Path, PurePosixPath
 import stat
 from types import SimpleNamespace
@@ -170,6 +171,88 @@ class ListenerContract(unittest.TestCase):
                         patch.object(network.Path, 'stat', return_value=info):
                     owners = network.trusted_process_executables(listener)
                 self.assertEqual(owners, {41: path} if expected else {})
+
+
+class ListenerConvergence(unittest.TestCase):
+    def listeners(self, extra=''):
+        return network.parse_ss(sockets() + extra)
+
+    def wait(self, snapshot, owners=frozenset((41,)), clock=(0, 0)):
+        with patch.object(network, 'trusted_managed_udp_owners', return_value=owners), \
+                patch.object(network.time, 'monotonic', side_effect=clock), \
+                patch.object(network.time, 'sleep') as sleep:
+            network.wait_for_strict_listeners(snapshot, IP, INTERFACE, SSH, True)
+        return sleep
+
+    def test_owned_udp_must_disappear_before_success(self):
+        temporary = self.listeners(socket('udp', '*:34192', 41, 'xray-linux-amd6'))
+        snapshots = iter((temporary, self.listeners()))
+        with self.assertRaisesRegex(ValueError, r'udp \[0.0.0.0\]:34192 pids=41'):
+            network.validate_listeners(temporary, IP, INTERFACE, SSH, True)
+        sleep = self.wait(lambda: next(snapshots))
+        sleep.assert_called_once_with(2)
+
+    def test_owned_udp_that_persists_fails_at_deadline(self):
+        temporary = self.listeners(socket('udp', '*:34192', 41))
+        with self.assertRaisesRegex(ValueError, 'did not expire within 90s'):
+            self.wait(lambda: temporary, clock=(0, 0, 90))
+
+    def test_unowned_udp_and_any_unauthenticated_coowner_fail_without_waiting(self):
+        for extra, owners in [(socket('udp', '*:34192'), {41}),
+                              (socket('udp', '*:34192', 41), set()),
+                              (socket('udp', '*:34192', 41) + socket('udp', '*:34193', 42), {41})]:
+            with self.subTest(extra=extra):
+                with patch.object(network.time, 'sleep') as sleep, self.assertRaises(ValueError):
+                    self.wait(lambda: self.listeners(extra), owners=owners, clock=(0,))
+                sleep.assert_not_called()
+        extra = socket('udp', '*:34192', 41).replace('fd=7))', 'fd=7),("other",pid=42,fd=8))')
+        with self.assertRaises(ValueError):
+            self.wait(lambda: self.listeners(extra), clock=(0,))
+
+    def test_missing_required_listener_or_extra_tcp_cannot_be_retried(self):
+        extra = socket('udp', '*:34192', 41)
+        bad = (self.listeners(extra + socket('tcp', f'{IP}:8888')),
+               network.parse_ss((sockets() + extra).replace(socket('udp', f'{IP}:443'), '')),
+               network.parse_ss((sockets() + extra).replace(socket('tcp', f'{IP}:2053'), '')))
+        for listeners in bad:
+            with self.subTest(listeners=listeners), self.assertRaises(ValueError):
+                self.wait(lambda: listeners, clock=(0,))
+
+    def test_malformed_snapshot_and_excessive_timeout_fail_immediately(self):
+        with patch.object(network.time, 'sleep') as sleep:
+            with self.assertRaises(ValueError):
+                network.wait_for_strict_listeners(lambda: network.parse_ss('broken'),
+                                                  IP, INTERFACE, SSH, True)
+            for timeout in (-1, 91):
+                with self.assertRaises(ValueError):
+                    network.wait_for_strict_listeners(lambda: self.listeners(),
+                                                      IP, INTERFACE, SSH, True, timeout)
+        sleep.assert_not_called()
+
+    def test_real_image_path_uid_root_ownership_permissions_and_digest_required(self):
+        listeners = self.listeners(socket('udp', '*:34192', 41))
+        image = b'offline pinned-image fixture'
+        digest = hashlib.sha256(image).hexdigest()
+        cases = [(network.MAIN_XRAY, 0, 0o755, '1001 1001 1001 1001', digest, True, True),
+                 (network.XHTTP_XRAY, 0, 0o750, '1001 1001 1001 1001', digest, True, True),
+                 (network.XHTTP_XRAY, 0, 0o750, '1001 1001 1001 1001', digest, False, False),
+                 ('/tmp/xray-linux-amd64', 0, 0o755, '1001 1001 1001 1001', digest, True, False),
+                 (network.MAIN_XRAY, 1001, 0o755, '1001 1001 1001 1001', digest, True, False),
+                 (network.MAIN_XRAY, 0, 0o775, '1001 1001 1001 1001', digest, True, False),
+                 (network.MAIN_XRAY, 0, 0o755, '1001 0 1001 1001', digest, True, False),
+                 (network.MAIN_XRAY, 0, 0o755, '1001 1001', digest, True, False),
+                 (network.MAIN_XRAY, 0, 0o755, '1001 1001 1001 1001', '0' * 64, True, False)]
+        for path, owner, mode, uids, pin, promoted, expected in cases:
+            with self.subTest(path=path, owner=owner, mode=mode, uids=uids, pin=pin, promoted=promoted):
+                info = SimpleNamespace(st_uid=owner, st_mode=stat.S_IFREG | mode)
+                with patch.object(network.Path, 'resolve', return_value=PurePosixPath(path)), \
+                        patch.object(network.Path, 'stat', return_value=info), \
+                        patch.object(network.Path, 'read_text', return_value='Uid:\t' + uids + '\n'), \
+                        patch.object(network.Path, 'read_bytes', return_value=image), \
+                        patch.object(network, 'managed_uid', return_value=1001), \
+                        patch.object(network, 'XRAY_SHA256', pin):
+                    owners = network.trusted_managed_udp_owners(listeners, promoted)
+                self.assertEqual(owners, {41} if expected else set())
 
 
 if __name__ == '__main__':

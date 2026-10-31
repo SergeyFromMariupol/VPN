@@ -64,7 +64,7 @@ probe_warp_payload() {
     | grep -Fq "dev $WARP_EGRESS_IFACE" || return 1
 
   status=$(netns_exec curl -4sS --output /dev/null --write-out '%{http_code}' \
-    --proto '=https' --connect-timeout 3 --max-time 6 \
+    --proto '=https' --connect-timeout 2 --max-time 3 \
     'https://cp.cloudflare.com/generate_204' 2>/dev/null) || return 1
   [[ "$status" == 204 ]] || return 1
 
@@ -73,12 +73,12 @@ probe_warp_payload() {
   # target first, then use a second Google-family endpoint to distinguish a
   # single-observer incident from the Google blackhole users actually see.
   status=$(netns_exec curl -4sS --output /dev/null --write-out '%{http_code}' \
-    --proto '=https' --connect-timeout 3 --max-time 6 \
+    --proto '=https' --connect-timeout 2 --max-time 3 \
     'https://www.gstatic.com/generate_204' 2>/dev/null) || status=000
   [[ "$status" == 204 ]] && return 0
 
   status=$(netns_exec curl -4sS --output /dev/null --write-out '%{http_code}' \
-    --proto '=https' --connect-timeout 3 --max-time 6 \
+    --proto '=https' --connect-timeout 2 --max-time 3 \
     'https://www.google.com/generate_204' 2>/dev/null) || return 1
   [[ "$status" == 204 ]]
 }

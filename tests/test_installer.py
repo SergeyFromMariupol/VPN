@@ -79,17 +79,68 @@ class CleanHostListeners(unittest.TestCase):
                 'udp UNCONN 0 0 0.0.0.0%enp1s0:68 0.0.0.0:* users:(("systemd-network",pid=42,fd=3))\n'
                 'udp UNCONN 0 0 127.0.0.53:53 0.0.0.0:*\n')
         self.assertEqual(preflight.listener_conflicts(
-            rows, GOOD, {42: '/usr/lib/systemd/systemd-networkd'}), [])
+            rows, GOOD, {42: '/usr/lib/systemd/systemd-networkd'},
+            {12: '/usr/sbin/sshd'}), [])
 
     def test_arbitrary_udp68_owner_is_rejected(self):
-        row = 'udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:* users:(("systemd-network",pid=42,fd=3))'
+        row = ('tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=12,fd=3))\n'
+               'udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:* users:(("systemd-network",pid=42,fd=3))')
         for owners in ({}, {42: '/tmp/systemd-networkd'}):
             with self.subTest(owners=owners):
-                self.assertEqual(len(preflight.listener_conflicts(row, GOOD, owners)), 1)
+                self.assertEqual(len(preflight.listener_conflicts(
+                    row, GOOD, owners, {12: '/usr/sbin/sshd'})), 1)
 
     def test_scoped_extra_public_listener_is_rejected(self):
-        row = 'udp UNCONN 0 0 0.0.0.0%enp1s0:8888 0.0.0.0:*'
-        self.assertEqual(len(preflight.listener_conflicts(row, GOOD, {})), 1)
+        row = ('tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=12,fd=3))\n'
+               'udp UNCONN 0 0 0.0.0.0%enp1s0:8888 0.0.0.0:*')
+        self.assertEqual(len(preflight.listener_conflicts(
+            row, GOOD, {}, {12: '/usr/sbin/sshd'})), 1)
+
+    def test_managed_loopback_ports_are_rejected_before_mutation(self):
+        ssh = 'tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=12,fd=3))'
+        for port in preflight.MANAGED_LOOPBACK_PORTS:
+            with self.subTest(port=port):
+                row = f'tcp LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:* users:(("other",pid=42,fd=3))'
+                conflicts = preflight.listener_conflicts(
+                    ssh + '\n' + row, GOOD, {}, {12: '/usr/sbin/sshd'})
+                self.assertTrue(any('managed loopback port' in conflict for conflict in conflicts))
+
+    def test_ssh_listener_must_be_present_and_authenticated(self):
+        row = 'tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=12,fd=3))'
+        self.assertTrue(any('missing authenticated SSH' in conflict for conflict in
+                            preflight.listener_conflicts('', GOOD, {}, {})))
+        for owners in ({}, {12: '/tmp/sshd'}):
+            with self.subTest(owners=owners):
+                self.assertTrue(preflight.listener_conflicts(row, GOOD, {}, owners))
+        self.assertEqual(preflight.listener_conflicts(row, GOOD, {}, {12: '/usr/sbin/sshd'}), [])
+
+    def test_systemd_socket_ownership_requires_active_matching_ssh_socket(self):
+        row = 'tcp LISTEN 0 4096 0.0.0.0:2222 0.0.0.0:* users:(("systemd",pid=1,fd=99))'
+        owners = {1: '/usr/lib/systemd/systemd'}
+        self.assertEqual(preflight.listener_conflicts(row, GOOD, {}, owners, True), [])
+        self.assertTrue(preflight.listener_conflicts(row, GOOD, {}, owners, False))
+
+    def test_systemd_socket_must_be_active_and_configured_for_selected_port(self):
+        with patch.object(preflight.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(preflight, 'run', return_value='[::]:22 (Stream) 0.0.0.0:2222 (Stream)'):
+            self.assertTrue(preflight.systemd_ssh_socket_listens(2222))
+            self.assertFalse(preflight.systemd_ssh_socket_listens(222))
+        with patch.object(preflight.subprocess, 'run', return_value=subprocess.CompletedProcess([], 3)), \
+                patch.object(preflight, 'run', side_effect=AssertionError('inactive socket queried')):
+            self.assertFalse(preflight.systemd_ssh_socket_listens(2222))
+
+
+class SavedUfwRules(unittest.TestCase):
+    def test_inactive_ufw_with_saved_rules_is_rejected(self):
+        empty = "Added user rules (see 'ufw status' for running firewall):\n(None)\n"
+        preflight.validate_ufw_saved_rules(empty)
+        for output in (
+            "Added user rules (see 'ufw status' for running firewall):\nufw allow 22/tcp\n",
+            empty + 'ufw allow 80/tcp\n',
+            '',
+        ):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                preflight.validate_ufw_saved_rules(output)
 
 
 class TargetPersistence(unittest.TestCase):

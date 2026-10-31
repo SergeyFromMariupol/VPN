@@ -1,11 +1,10 @@
 [Unit]
-Description=Run the isolated WARP payload watchdog every 15 seconds
+Description=Run the isolated WARP payload watchdog at a 14-second cadence
 
 [Timer]
 OnBootSec=45s
-OnUnitInactiveSec=15s
+OnUnitActiveSec=14s
 AccuracySec=1s
-RandomizedDelaySec=2s
 Unit=krysyuk-warp-health.service
 
 [Install]

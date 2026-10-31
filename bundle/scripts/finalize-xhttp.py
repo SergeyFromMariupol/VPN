@@ -46,6 +46,7 @@ UNIT_PATHS = tuple(Path('/etc/systemd/system') / u for u in UNITS)
 XRAY_SHA = '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
 SERVER_ENV = Path('/etc/krysyuk-standalone/server.env')
 TARGET_ENV = Path('/etc/germanyvpn-target.env')
+LEGACY_BACKUP_ROOT = Path('/var/backups/krysyuk-standalone')
 USER = 'xhttp-test'
 ENV = {k: v for k, v in os.environ.items() if k.lower() not in
        ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')}
@@ -184,20 +185,33 @@ def query(uri):
     return parsed, result
 
 
-def decode_feed(raw):
+def direct_row_matches_feed(row, served, target):
+    """3X-UI may apply the stored remark to an older link's URI fragment."""
+    stored_uri = urlsplit(row['value'])
+    served_uri = urlsplit(served)
+    full_name = profile_names(target)[5]
+    old_name = target.get('TARGET_LABEL', '🇩🇪 Германия') + ' · XHTTP'
+    return (row['remark'] == full_name and
+            stored_uri._replace(fragment='') == served_uri._replace(fragment='') and
+            unquote(stored_uri.fragment) in (old_name, full_name) and
+            unquote(served_uri.fragment) == full_name)
+
+
+def decode_feed(raw, expected_count=6):
     text = raw.decode().strip()
     if '://' not in text:
         text = base64.urlsafe_b64decode(text + '=' * ((-len(text)) % 4)).decode()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    need(len(lines) == 6 and len(set(lines)) == 6, 'NATIVE_SIX_COUNT')
+    need(len(lines) == expected_count and len(set(lines)) == expected_count,
+         'NATIVE_SIX_COUNT' if expected_count == 6 else 'NATIVE_PROFILE_COUNT')
     return lines
 
 
-def native(target, secret):
+def native(target, secret, expected_count=6, user_agents=('v2RayTun', 'Happ', 'Karing')):
     host = endpoint(target)
     path = '/' + secret['SUBSCRIPTION_PATH'].strip('/') + '/' + secret['SUBSCRIPTION_ID']
     feeds = []
-    for ua in ('v2RayTun', 'Happ', 'Karing'):
+    for ua in user_agents:
         connection = http.client.HTTPSConnection(host, 2096, timeout=20,
                                                  context=ssl.create_default_context())
         try:
@@ -205,7 +219,7 @@ def native(target, secret):
             response = connection.getresponse()
             raw = response.read(2 * 1024 * 1024 + 1)
             need(response.status == 200 and len(raw) <= 2 * 1024 * 1024, 'SUB_HTTP')
-            feeds.append(decode_feed(raw))
+            feeds.append(decode_feed(raw, expected_count))
         finally:
             connection.close()
     need(all(feed == feeds[0] for feed in feeds), 'UA_DIFFERENCE')
@@ -376,13 +390,23 @@ def client_config(uri, local_port):
     need(parsed.hostname is not None and parsed.username is not None, 'URI_ENDPOINT')
     if parsed.scheme == 'vless':
         stream = {'network': values['type'], 'security': values['security']}
-        need(values['security'] == 'reality' and values.get('flow', '') == '', 'CLIENT_SECURITY')
-        stream['realitySettings'] = {'serverName': values['sni'], 'fingerprint': values['fp'],
-                                     'publicKey': values['pbk'], 'shortId': values['sid'],
-                                     'spiderX': values.get('spx', '/')}
+        need(values.get('flow', '') == '', 'CLIENT_SECURITY')
+        if values['security'] == 'reality':
+            stream['realitySettings'] = {'serverName': values['sni'], 'fingerprint': values['fp'],
+                                         'publicKey': values['pbk'], 'shortId': values['sid'],
+                                         'spiderX': values.get('spx', '/')}
+        elif values['security'] == 'tls' and values['type'] == 'xhttp':
+            need(values.get('insecure', '0') == '0', 'CLIENT_SECURITY')
+            stream['tlsSettings'] = {'serverName': values['sni'],
+                                     'alpn': values['alpn'].split(','),
+                                     'allowInsecure': False}
+        else:
+            raise RuntimeError('CLIENT_SECURITY')
         if values['type'] == 'xhttp':
             stream['xhttpSettings'] = {'host': values['host'], 'path': values['path'],
-                                       'mode': values['mode'], 'extra': strict_json(values['extra'])}
+                                       'mode': values['mode']}
+            if 'extra' in values:
+                stream['xhttpSettings']['extra'] = strict_json(values['extra'])
         else:
             need(values['type'] == 'grpc', 'CLIENT_TRANSPORT')
             stream['grpcSettings'] = {'serviceName': values['serviceName'], 'multiMode': False}
@@ -441,7 +465,7 @@ def udp_dns(port):
              int.from_bytes(dns[6:8], 'big') > 0, 'UDP_DNS_ANSWER')
 
 
-def payload(uri, warp, target):
+def payload(uri, warp, target, binary=XRAY):
     """A new process uses only the exact published URI; never patch its endpoint."""
     with socket.socket() as reserve:
         reserve.bind(('127.0.0.1', 0))
@@ -449,10 +473,12 @@ def payload(uri, warp, target):
     with tempfile.TemporaryDirectory(prefix='vpn-uri-', dir='/run') as directory:
         conf = Path(directory) / 'config.json'
         save(conf, canonical(client_config(uri, port)))
-        run([str(XRAY), 'run', '-test', '-config', str(conf)])
-        child = subprocess.Popen([str(XRAY), 'run', '-config', str(conf)],
+        client_env = {**ENV, 'XRAY_LOCATION_ASSET': str(binary.parent),
+                      'GODEBUG': 'multipathtcp=0'}
+        run([str(binary), 'run', '-test', '-config', str(conf)], env=client_env)
+        child = subprocess.Popen([str(binary), 'run', '-config', str(conf)],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 env={**ENV, 'XRAY_LOCATION_ASSET': str(EXECROOT), 'GODEBUG': 'multipathtcp=0'})
+                                  env=client_env)
         try:
             deadline = time.monotonic() + 10
             while True:
@@ -480,6 +506,122 @@ def payload(uri, warp, target):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=5)
+
+
+def validate_legacy_feed(feeds, target, secret):
+    """Verify the exact three direct profiles published before dual-egress."""
+    host = endpoint(target)
+    label = target['TARGET_LABEL']
+    expected = {
+        'reality': ('vless', 443, secret['VLESS_UUID'], label + ' · REALITY'),
+        'hysteria2': ('hysteria2', 443, secret['HYSTERIA2_AUTH'], label + ' · HYSTERIA2'),
+        'xhttp': ('vless', 8443, secret['VLESS_UUID'], label + ' · XHTTP'),
+    }
+    need(len(feeds) == 3 and len(set(feeds)) == 3, 'LEGACY_FEED_COUNT')
+    seen = set()
+    for uri in feeds:
+        parsed, values = query(uri)
+        if parsed.scheme == 'vless' and values.get('security') == 'reality':
+            role = 'reality'
+            need(values.get('type') == 'grpc' and values.get('serviceName') == 'reality-grpc'
+                 and values.get('sni') == target['TARGET_REALITY_SNI']
+                 and values.get('pbk') == secret['REALITY_PUBLIC_KEY']
+                 and values.get('sid') == secret['REALITY_SHORT_ID']
+                 and values.get('fp') == 'chrome' and values.get('flow', '') == '',
+                 'LEGACY_REALITY_URI')
+        elif parsed.scheme in ('hysteria2', 'hy2'):
+            role = 'hysteria2'
+            need(values.get('sni') == host and values.get('alpn') == 'h3'
+                 and values.get('insecure', '0').lower() not in ('1', 'true', 'yes'),
+                 'LEGACY_HYSTERIA_URI')
+        elif parsed.scheme == 'vless' and values.get('type') == 'xhttp':
+            role = 'xhttp'
+            need(values.get('security') == 'tls' and values.get('sni') == host
+                 and values.get('alpn') == 'h2' and values.get('host') == host
+                 and values.get('path') == '/' + secret['XHTTP_PRIVATE_PATH']
+                 and values.get('mode') == 'packet-up' and values.get('flow', '') == ''
+                 and values.get('insecure', '0') == '0', 'LEGACY_XHTTP_URI')
+            if 'extra' in values:
+                extra = strict_json(values['extra'])
+                need(isinstance(extra, dict) and extra.get('mode', 'packet-up') == 'packet-up',
+                     'LEGACY_XHTTP_EXTRA')
+        else:
+            raise RuntimeError('LEGACY_URI_ROLE')
+        scheme, port, identity, remark = expected[role]
+        need(role not in seen and parsed.scheme in (('hysteria2', 'hy2') if role == 'hysteria2' else (scheme,))
+             and parsed.hostname == host and parsed.port == port and parsed.username == identity
+             and unquote(parsed.fragment) == remark, 'LEGACY_URI_IDENTITY')
+        seen.add(role)
+    need(seen == set(expected), 'LEGACY_URI_SET')
+
+
+def verify_legacy_rollback(target, secret, snapshot, baseline_feed=None):
+    """Do not certify an inverse transaction until the old data plane works."""
+    need(LEGACY_BACKUP_ROOT.is_dir() and not LEGACY_BACKUP_ROOT.is_symlink() and
+         snapshot.is_dir() and not snapshot.is_symlink() and
+         snapshot.resolve().is_relative_to(LEGACY_BACKUP_ROOT.resolve()),
+         'ROLLBACK_SNAPSHOT_PATH')
+    need(private(SERVER_ENV) == private(snapshot / 'server.env'), 'ROLLBACK_ENV')
+    need('DUAL_EGRESS_SCHEMA' not in secret, 'ROLLBACK_DUAL_ENV')
+    need(strict_json(RUNTIME.read_bytes()) == strict_json(private(snapshot / 'config-before.json')),
+         'ROLLBACK_RUNTIME')
+    need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
+    run(['systemctl', 'is-active', 'x-ui.service'])
+    run(['systemctl', 'is-active', 'nginx.service'])
+    run([str(SOURCE_XRAY), 'run', '-test', '-config', str(RUNTIME)],
+        env={**ENV, 'XRAY_LOCATION_ASSET': str(SOURCE_XRAY.parent)})
+    run([sys.executable, str(Path(__file__).with_name('network-contract.py')),
+         '--target-ip', target['TARGET_IPV4'], '--interface', target['TARGET_INTERFACE'],
+         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0'])
+    with closing(sqlite3.connect(DB.as_uri() + '?mode=ro', uri=True)) as db:
+        need(db.execute('PRAGMA quick_check').fetchone() == ('ok',), 'ROLLBACK_DB_CHECK')
+        need(db.execute('SELECT count(*) FROM clients').fetchone() == (3,) and
+             db.execute('SELECT count(*) FROM client_inbounds').fetchone() == (3,) and
+             db.execute('SELECT count(*) FROM client_external_links').fetchone() == (0,) and
+             db.execute('SELECT count(*) FROM inbounds WHERE enable=1').fetchone() == (3,),
+             'ROLLBACK_DB_SHAPE')
+    need(run(['ip', '-4', 'route', 'show', 'table', 'all']).stdout ==
+         private(snapshot / 'ip4-routes-before.txt') and
+         run(['ip', '-4', 'rule', 'show']).stdout ==
+         private(snapshot / 'ip4-rules-before.txt'), 'ROLLBACK_HOST_ROUTE')
+    for unit in UNITS:
+        need(subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                            capture_output=True, timeout=10).returncode != 0,
+             'ROLLBACK_XHTTP_UNIT')
+    for path in (*UNIT_PATHS, ROOT, CFROOT, EXECROOT):
+        need(not path.exists() and not path.is_symlink(), 'ROLLBACK_XHTTP_RESOURCE')
+    feeds = native(target, secret, expected_count=3)
+    validate_legacy_feed(feeds, target, secret)
+    if baseline_feed is not None:
+        need(native(target, secret, expected_count=3, user_agents=('v2rayN/7',)) ==
+             decode_feed(private(baseline_feed), expected_count=3),
+             'ROLLBACK_FEED_BYTES')
+    for uri in feeds:
+        payload(uri, False, target['TARGET_IPV4'], binary=SOURCE_XRAY)
+
+
+def verify_xhttp_rollback(target, secret, main_before, rows, inbounds,
+                          before_feed, route_before):
+    """Verify the complete dual-six state after a failed promotion."""
+    need(strict_json(RUNTIME.read_bytes()) == strict_json(main_before), 'ROLLBACK_RUNTIME')
+    need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
+    run(['systemctl', 'is-active', 'x-ui.service'])
+    run([str(SOURCE_XRAY), 'run', '-test', '-config', str(RUNTIME)],
+        env={**ENV, 'XRAY_LOCATION_ASSET': str(SOURCE_XRAY.parent)})
+    run([sys.executable, str(Path(__file__).with_name('network-contract.py')),
+         '--target-ip', target['TARGET_IPV4'], '--interface', target['TARGET_INTERFACE'],
+         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0'])
+    need(database() == (rows, inbounds), 'ROLLBACK_DB_SHAPE')
+    need(routes() == route_before, 'ROLLBACK_HOST_ROUTE')
+    for unit in UNITS:
+        need(subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                            capture_output=True, timeout=10).returncode != 0,
+             'ROLLBACK_XHTTP_UNIT')
+    for path in (*UNIT_PATHS, ROOT, CFROOT, EXECROOT):
+        need(not path.exists() and not path.is_symlink(), 'ROLLBACK_XHTTP_RESOURCE')
+    need(native(target, secret) == before_feed, 'ROLLBACK_FEED_BYTES')
+    for index, uri in enumerate(before_feed):
+        payload(uri, index < 3, target['TARGET_IPV4'], binary=SOURCE_XRAY)
 
 
 def kernel_listener(pid, port):
@@ -633,7 +775,7 @@ def finalize(target, secret):
     main_before = RUNTIME.read_bytes()
     main = strict_json(main_before)
     before_feed = native(target, secret)
-    need(rows[2]['value'] == before_feed[5], 'DIRECT_ROW_BASELINE')
+    need(direct_row_matches_feed(rows[2], before_feed[5], target), 'DIRECT_ROW_BASELINE')
     need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
     route_before = routes()
     private_key, pubkey = keypair(run([str(SOURCE_XRAY), 'x25519']).stdout)
@@ -782,8 +924,8 @@ def finalize(target, secret):
                 run(['groupdel', USER])
         run(['systemctl', 'start', 'x-ui.service'])
         time.sleep(2)
-        need(database() == (rows, inbounds) and native(target, secret) == before_feed
-             and routes() == route_before, 'ROLLBACK_VERIFY')
+        verify_xhttp_rollback(target, secret, main_before, rows, inbounds,
+                              before_feed, route_before)
         save(backup / 'ROLLBACK_VERIFIED', b'owned-fresh-XHTTP-delta-restored\n')
         raise
 
@@ -793,6 +935,9 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--apply', action='store_true')
     group.add_argument('--verify', action='store_true')
+    group.add_argument('--verify-legacy-rollback', action='store_true')
+    parser.add_argument('--rollback-snapshot', type=Path)
+    parser.add_argument('--baseline-feed', type=Path)
     args = parser.parse_args()
     need(os.geteuid() == 0, 'ROOT_REQUIRED')
     os.umask(0o077)
@@ -809,11 +954,17 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
     if args.apply:
+        need(args.rollback_snapshot is None and args.baseline_feed is None, 'UNEXPECTED_ROLLBACK_ARG')
         finalize(target, secret)
-    else:
+    elif args.verify:
+        need(args.rollback_snapshot is None and args.baseline_feed is None, 'UNEXPECTED_ROLLBACK_ARG')
         need(strict_json(private(MARKER))['status'] == 'committed', 'MARKER_NOT_COMMITTED')
         verify(target, secret)
         print('PROMOTED_XHTTP_VERIFY_OK=1')
+    else:
+        need(args.rollback_snapshot is not None, 'ROLLBACK_SNAPSHOT_REQUIRED')
+        verify_legacy_rollback(target, secret, args.rollback_snapshot, args.baseline_feed)
+        print('LEGACY_ROLLBACK_E2E_OK=1')
 
 
 if __name__ == '__main__':

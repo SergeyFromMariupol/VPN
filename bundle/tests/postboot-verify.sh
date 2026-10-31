@@ -161,7 +161,7 @@ done
 fi
 unset resolver public_a public_aaaa
 
-for unit in nginx.service x-ui.service certbot.timer krysyuk-warp-health.timer; do
+for unit in nginx.service x-ui.service certbot.timer vpn-cert-reconcile.timer krysyuk-warp-health.timer; do
   systemctl is-active --quiet "$unit"
   systemctl is-enabled --quiet "$unit"
 done
@@ -246,6 +246,7 @@ jq --exit-status --rawfile connector "$stage/connector.uuid" '
 ' /usr/local/x-ui/bin/config.json >/dev/null
 
 verify_target_certificate "$runtime_root/tls/fullchain.pem"
+bash "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../base" && pwd -P)/install-cert-reconcile.sh" --check-only
 nginx -t >/dev/null
 [[ "$(stat -c '%U:%G:%a' /etc/nginx/conf.d/3x-ui-public.conf)" == 'root:root:600' ]]
 [[ "$(stat -c '%U:%G:%a' /etc/letsencrypt/renewal-hooks/deploy/70-krysyuk-standalone-nginx)" == 'root:root:755' ]]
@@ -284,9 +285,9 @@ jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
   --rawfile warp_xhttp "$stage/warp-xhttp.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
-  ([.obj[]|select(.remark=="Germany VLESS REALITY TCP 443")]) as $rs
-  | ([.obj[]|select(.remark=="Germany Hysteria2 UDP 443")]) as $hs
-  | ([.obj[]|select(.remark=="Germany VLESS XHTTP TLS 8443")]) as $xs
+  ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]) as $rs
+  | ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")]) as $hs
+  | ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")]) as $xs
   | .success==true and (.obj|length)==3 and ($rs|length)==1 and ($hs|length)==1 and ($xs|length)==1
   and all(.obj[]; .enable==(if .port==8443 and env.PROMOTED_XHTTP=="1" then false else true end)
     and .shareAddr==$fqdn and (.settings.clients|length)==2)

@@ -2,6 +2,7 @@
 
 set -Eeuo pipefail
 umask 077
+trap 'printf "WARP_STATIC_FAILED_LINE=%s\n" "$LINENO" >&2' ERR
 
 test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly test_dir
@@ -244,14 +245,14 @@ for array_name in units managed_paths; do
   }
 done
 grep -Fq 'trap cleanup_on_exit EXIT' "$bundle_root/scripts/setup-netns.sh"
-grep -Fq 'if (( rc != 0 && setup_complete == 0 )); then' \
+grep -Fq 'if (( rc != 0 && setup_complete == 0 && namespace_owned == 1 )); then' \
   "$bundle_root/scripts/setup-netns.sh"
 grep -Fq '/usr/local/libexec/krysyuk-warp-egress/apply-guard.sh' \
   "$bundle_root/scripts/setup-netns.sh"
 setup_guard_line=$(grep -nF '/usr/local/libexec/krysyuk-warp-egress/apply-guard.sh' \
   "$bundle_root/scripts/setup-netns.sh" | cut -d: -f1)
 setup_ready_line=$(grep -nF 'setup_complete=1' "$bundle_root/scripts/setup-netns.sh" | \
-  cut -d: -f1)
+  tail -n 1 | cut -d: -f1)
 [[ "$setup_guard_line" =~ ^[0-9]+$ && "$setup_ready_line" =~ ^[0-9]+$ &&
    "$setup_guard_line" -lt "$setup_ready_line" ]] || {
   echo 'ERROR: namespace carrier/mark guard is not applied before setup readiness' >&2
@@ -331,7 +332,7 @@ grep -Fq '/var/lib/krysyuk-warp-health/last-recovery-epoch' \
   "$bundle_root/scripts/deploy-health-watchdog.sh"
 grep -Fq '/var/lib/krysyuk-warp-health/last-success-epoch' \
   "$bundle_root/scripts/deploy-health-watchdog.sh"
-grep -Fq 'OnUnitInactiveSec=15s' \
+grep -Fq 'OnUnitActiveSec=14s' \
   "$bundle_root/systemd/krysyuk-warp-health.timer"
 grep -Fq 'ExecStart=/usr/local/libexec/krysyuk-warp-egress/warp-health-watchdog.sh' \
   "$bundle_root/systemd/krysyuk-warp-health.service"

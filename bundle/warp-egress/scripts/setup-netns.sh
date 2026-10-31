@@ -28,6 +28,7 @@ cleanup_partial() {
   sysctl -q -w "net.ipv4.ip_forward=$ip_forward_before" >/dev/null 2>&1 || true
 }
 setup_complete=0
+namespace_owned=0
 transaction=''
 cleanup_on_exit() {
   local rc=$?
@@ -35,7 +36,7 @@ cleanup_on_exit() {
   if [[ -n "$transaction" ]]; then
     rm -f -- "$transaction"
   fi
-  if (( rc != 0 && setup_complete == 0 )); then
+  if (( rc != 0 && setup_complete == 0 && namespace_owned == 1 )); then
     cleanup_partial
   fi
   exit "$rc"
@@ -54,9 +55,24 @@ if (( namespace_exists == 1 )); then
   netns_exec ip -4 address show dev "$WARP_NETNS_VETH" \
     | grep -F "$WARP_NETNS_IPV4/30" >/dev/null || \
       die 'existing netns veth address is wrong'
+  # An active namespace belongs to the running data plane. Validate it without
+  # changing routes or guards; a failed idempotent start must not tear it down.
+  [[ "$ip_forward_before" == 1 ]] || die 'existing netns lacks host forwarding'
+  nft list table inet "$WARP_HOST_GUARD_TABLE" >/dev/null || die 'existing host guard is absent'
+  nft list table ip "$WARP_HOST_NAT_TABLE" >/dev/null || die 'existing host NAT is absent'
+  netns_exec nft list table inet "$WARP_EGRESS_TABLE" >/dev/null || die 'existing namespace guard is absent'
+  ip route get "$WARP_NETNS_IPV4" | grep -F "dev $WARP_HOST_VETH" >/dev/null || \
+    die 'existing host route to WARP netns is absent'
+  netns_exec ip -4 route get "$WARP_HOST_IPV4" | grep -F "dev $WARP_NETNS_VETH" >/dev/null || \
+    die 'existing namespace route to host veth is absent'
+  setup_complete=1
+  trap - EXIT
+  printf '%s\n' 'WARP_NETNS_READY=1'
+  exit 0
 else
   ! ip link show "$WARP_HOST_VETH" >/dev/null 2>&1 || die 'stale host veth exists without netns'
   ip netns add "$WARP_NETNS"
+  namespace_owned=1
   ip link add "$WARP_HOST_VETH" type veth peer name "$WARP_NETNS_VETH"
   ip link set "$WARP_NETNS_VETH" netns "$WARP_NETNS"
   ip address add "$WARP_HOST_IPV4/30" dev "$WARP_HOST_VETH"
