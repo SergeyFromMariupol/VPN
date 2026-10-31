@@ -2,6 +2,7 @@
 
 set -Eeuo pipefail
 umask 077
+trap 'printf "WARP_STATIC_FAILED_LINE=%s\n" "$LINENO" >&2' ERR
 
 test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly test_dir
