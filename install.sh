@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.2'
+readonly release='v1.1.3'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -24,6 +24,27 @@ fi
 if [[ $mode == --verify ]]; then
   exec bash "$destination/tools/verify.sh"
 fi
+# Resume belongs to the installed release. A newer downloaded entrypoint must
+# not combine its new phase list with an older rendered runtime, nor require a
+# network download before continuing a complete local source installation.
+if [[ $mode == --resume ]]; then
+  current_file=$(readlink -f -- "${BASH_SOURCE[0]}")
+  current_parent=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+  if [[ $current_file != "$destination/install.sh" || $current_parent != "$destination" ]]; then
+    [[ -d $destination && ! -L $destination &&
+       $(stat -c '%u:%g:%a' "$destination") == 0:0:700 ]] || die 'Нет безопасного установленного исходного кода для продолжения'
+    for path in "$destination/install.sh" "$destination/SHA256SUMS"; do
+      [[ -f $path && ! -L $path && $(stat -c '%u:%h' "$path") == 0:1 ]] || die 'Небезопасный установленный исходный код'
+      (( (8#$(stat -c %a "$path") & 8#022) == 0 )) || die 'Установленный исходный код доступен для записи другим пользователям'
+    done
+    [[ -z $(find "$destination" \( -type l -o ! -user root -o -perm /022 \) -print -quit) ]] || die 'Небезопасные права или ссылки в установленном исходном коде'
+    grep -Eq '^[0-9a-f]{64}  install[.]sh$' "$destination/SHA256SUMS" || die 'Установщик отсутствует в source manifest'
+    (cd -- "$destination"; sha256sum --check --strict SHA256SUMS >/dev/null) || die 'Проверка установленного исходного кода не пройдена'
+    # Dispatch precedes lock acquisition, so the installed entrypoint can take
+    # the normal installer lock without inheriting a second conflicting lock.
+    exec bash "$destination/install.sh" --resume
+  fi
+fi
 # Serialize all installs, including the read-only check and download stages.
 exec 9>/run/vpn-installer.lock
 flock -n 9 || die 'Другая установка уже выполняется'
@@ -33,8 +54,17 @@ source /etc/os-release
 for cmd in python3 curl tar sha256sum ip openssl timeout; do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
 [[ $(ps -p 1 -o comm=) == systemd ]] || die 'Нужен VPS/VM с systemd'
 task_stage=$(mktemp -d /run/vpn-installer.XXXXXXXX)
-cleanup() { local rc=$?; trap - EXIT; rm -rf -- "$task_stage"; exit "$rc"; }
+cleanup() {
+  local rc=$?
+  trap - EXIT HUP INT TERM
+  if declare -F cleanup_installation_bootstrap >/dev/null; then
+    cleanup_installation_bootstrap || { ((rc)) || rc=1; }
+  fi
+  rm -rf -- "$task_stage"
+  exit "$rc"
+}
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -60,6 +90,7 @@ PY
   source_dir="$task_stage/source"
 fi
 (cd -- "$source_dir"; sha256sum --check --strict SHA256SUMS >/dev/null)
+source "$source_dir/tools/bootstrap.sh"
 if [[ $mode == --resume ]]; then
   [[ -d $state && ! -L $state && $(stat -c '%U:%G:%a' "$state") == root:root:700 ]] || die 'Нет безопасного состояния для продолжения'
   [[ -f $target_file && ! -L $target_file && $(stat -c '%U:%G:%a' "$target_file") == root:root:600 ]] || die 'Небезопасный target env'
@@ -106,18 +137,7 @@ else
   printf 'После подтверждения обновятся пакеты Ubuntu (apt-get update/upgrade), затем установится VPN.\n'
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
-  install -d -m 0700 "$state" "$destination"
-  cp -- "$task_stage/inventory.txt" "$state/inventory-before.txt"
-  cp -a -- "$source_dir/." "$destination/"
-  # GitHub tarballs can carry mode 0664 for ordinary tracked files. The pinned
-  # Certbot installer requires its reviewed source to be root-owned and not
-  # writable by a group; normalize the private installed copy only.
-  find "$destination" -type d -exec chmod go-w {} +
-  find "$destination" -type f -exec chmod go-w {} +
-  chmod 0700 "$destination"
-  # Do not publish the mutable rendered copy; the verified original stays intact.
-  python3 "$destination/tools/write-target.py" "$target_file"
-  cat /proc/sys/kernel/random/boot_id >"$state/install-boot-id"
+  prepare_installation_bootstrap
 fi
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 export TARGET_ADDRESS_MODE TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
@@ -151,6 +171,7 @@ bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log"
 phase tls bash "$runtime/base/acme.sh" --apply
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
 phase panel bash "$runtime/scripts/expose-panel-https.sh" --apply
+phase nginx-restart bash "$runtime/base/install-nginx-restart.sh" --apply
 phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
 phase warp bash "$runtime/warp-egress/scripts/install-warp.sh"
 phase dual env CONFIRM_STANDALONE_DUAL_EGRESS="ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" bash "$runtime/scripts/enable-dual-egress.sh" --apply

@@ -91,30 +91,78 @@ committed=0
 venv_identity=''
 service_identity=''
 timer_identity=''
-shim_created=0
+shim_identity=''
+shim_stage=''
 timer_stopped=0
+staged_directories=()
+staged_identities=()
+publish_directory() {
+  # Record the inode before exposing a fixed managed path. A signal after the
+  # rename must not leave an untracked directory that blocks --resume.
+  local destination=$1 identity_variable=$2 staged identity
+  staged=$(mktemp -d -p "$(dirname -- "$destination")" .vpn-certbot.XXXXXXXX)
+  identity=$(stat -c '%d:%i' "$staged")
+  staged_directories+=("$staged")
+  staged_identities+=("$identity")
+  chmod 0755 "$staged"
+  printf -v "$identity_variable" '%s' "$identity"
+  mv -T --no-clobber -- "$staged" "$destination"
+  [[ -d $destination && ! -L $destination && $(stat -c '%d:%i' "$destination") == "$identity" ]] ||
+    die 'managed Certbot directory appeared concurrently'
+}
+publish_shim() {
+  # Publishing a known symlink inode also distinguishes a concurrent foreign
+  # symlink pointing to the very same target from the one created here.
+  local identity
+  shim_stage=$(mktemp -d -p "$(dirname -- "$SHIM")" .vpn-certbot-shim.XXXXXXXX)
+  identity=$(stat -c '%d:%i' "$shim_stage")
+  staged_directories+=("$shim_stage")
+  staged_identities+=("$identity")
+  ln -s "$VENV/bin/certbot" "$shim_stage/shim"
+  shim_identity=$(stat -c '%d:%i' "$shim_stage/shim")
+  mv -T --no-clobber -- "$shim_stage/shim" "$SHIM"
+  [[ -L $SHIM && $(stat -c '%d:%i' "$SHIM") == "$shim_identity" ]] ||
+    die 'managed Certbot shim appeared concurrently'
+  rmdir -- "$shim_stage"
+}
 cleanup() {
-  local status=$? rollback_ok=1 path identity
+  local status=$? rollback_ok=1 path identity index
   trap - EXIT INT TERM HUP
   set +e
   if ((committed == 0)); then
     systemctl stop certbot.timer >/dev/null 2>&1 || rollback_ok=0
-    if ((shim_created)); then
-      if [[ -L $SHIM && $(readlink "$SHIM") == "$VENV/bin/certbot" ]]; then rm -- "$SHIM"; else rollback_ok=0; fi
+    if [[ -n $shim_identity ]]; then
+      if [[ ! -e $SHIM && ! -L $SHIM ]]; then :
+      elif [[ -L $SHIM && $(stat -c '%d:%i' "$SHIM") == "$shim_identity" &&
+              $(readlink "$SHIM") == "$VENV/bin/certbot" ]]; then rm -- "$SHIM" || rollback_ok=0
+      else rollback_ok=0; fi
     fi
     for path in "$SERVICE_DIR" "$TIMER_DIR"; do
       identity=$service_identity; [[ $path != "$TIMER_DIR" ]] || identity=$timer_identity
       if [[ -n $identity ]]; then
-        if [[ -d $path && ! -L $path && $(stat -c '%d:%i' "$path") == "$identity" ]]; then
+        if [[ ! -e $path && ! -L $path ]]; then :
+        elif [[ -d $path && ! -L $path && $(stat -c '%d:%i' "$path") == "$identity" ]]; then
           mv -- "$path" "$snapshot/$(basename "$path").failed" || rollback_ok=0
         else rollback_ok=0; fi
       fi
     done
     if [[ -n $venv_identity ]]; then
-      if [[ -d $VENV && ! -L $VENV && $(stat -c '%d:%i' "$VENV") == "$venv_identity" ]]; then
+      if [[ ! -e $VENV && ! -L $VENV ]]; then :
+      elif [[ -d $VENV && ! -L $VENV && $(stat -c '%d:%i' "$VENV") == "$venv_identity" ]]; then
         mv -- "$VENV" "$snapshot/venv.failed" || rollback_ok=0
       else rollback_ok=0; fi
     fi
+    for index in "${!staged_directories[@]}"; do
+      path=${staged_directories[$index]}; identity=${staged_identities[$index]}
+      if [[ -e $path || -L $path ]]; then
+        if [[ -d $path && ! -L $path && $(stat -c '%d:%i' "$path") == "$identity" ]]; then
+          if [[ $path == "$shim_stage" && -L $path/shim && $(readlink "$path/shim") == "$VENV/bin/certbot" ]]; then
+            rm -- "$path/shim" || rollback_ok=0
+          fi
+          rmdir -- "$path" || rollback_ok=0
+        else rollback_ok=0; fi
+      fi
+    done
     systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
     if ((timer_stopped)); then systemctl start certbot.timer >/dev/null 2>&1 || rollback_ok=0; fi
     printf 'CERTBOT_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$snapshot" >&2
@@ -124,26 +172,22 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-systemctl stop certbot.timer
 timer_stopped=1
+systemctl stop certbot.timer
 ! systemctl is-active --quiet certbot.service || die 'a renewal began before timer quiescence'
-install -d -o root -g root -m 0755 "$VENV"
-venv_identity=$(stat -c '%d:%i' "$VENV")
+publish_directory "$VENV" venv_identity
 python3 -I -m venv "$VENV"
 # --isolated ignores user pip configuration. Every runtime wheel and dependency
 # is pinned with an official PyPI SHA-256; source distributions are forbidden.
 "$VENV/bin/python" -I -m pip --isolated install --index-url https://pypi.org/simple \
   --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "$lock"
 "$VENV/bin/python" -I "$validator" "$lock" "$VENV"
-install -d -o root -g root -m 0755 "$SERVICE_DIR"
-service_identity=$(stat -c '%d:%i' "$SERVICE_DIR")
-install -d -o root -g root -m 0755 "$TIMER_DIR"
-timer_identity=$(stat -c '%d:%i' "$TIMER_DIR")
+publish_directory "$SERVICE_DIR" service_identity
+publish_directory "$TIMER_DIR" timer_identity
 service_dropin >"$SERVICE_DIR/$DROPIN"
 timer_dropin >"$TIMER_DIR/$DROPIN"
 chmod 0644 "$SERVICE_DIR/$DROPIN" "$TIMER_DIR/$DROPIN"
-ln -s "$VENV/bin/certbot" "$SHIM"
-shim_created=1
+publish_shim
 printf '%s\n%s\n' "$CERTBOT_VERSION" "$lock_hash" >"$VENV/.vpn-installer-version"
 chmod 0600 "$VENV/.vpn-installer-version"
 systemctl daemon-reload
