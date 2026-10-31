@@ -24,4 +24,4 @@ jq -S -n \
     ipv4_defaults: ($ipv4_defaults | stable | sort_by(.table, .metric, .gateway, .dev)),
     ipv6_defaults: ($ipv6_defaults | stable | sort_by(.table, .metric, .gateway, .dev))
   }
-' 
+'

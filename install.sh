@@ -105,6 +105,7 @@ if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
   cp -a -- "$destination/bundle/." "$rendered_stage/"
   python3 "$destination/tools/render.py" "$rendered_stage"
+  chmod 0700 "$rendered_stage"
   mv -T -- "$rendered_stage" "$runtime"
 fi
 [[ ! -L $runtime && $(stat -c '%U:%G:%a' "$runtime") == root:root:700 ]] || die 'Небезопасный runtime bundle'
