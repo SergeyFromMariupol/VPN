@@ -122,6 +122,7 @@ else
 fi
 
 snapshot_complete=0
+failure_line=unknown
 restore_early_services() {
   local unit state_file present active enable_state
   systemctl daemon-reload >/dev/null 2>&1 || true
@@ -153,7 +154,10 @@ restore_early_network() {
 }
 on_exit() {
   local rc=$?
-  trap - EXIT HUP INT TERM
+  trap - EXIT ERR HUP INT TERM
+  if (( rc != 0 )); then
+    printf 'WARP_NETNS_DEPLOY_FAILED_LINE=%s\n' "$failure_line" >&2
+  fi
   if (( snapshot_complete == 0 )); then
     restore_early_network
     restore_early_services
@@ -168,6 +172,7 @@ on_exit() {
   exit "$rc"
 }
 trap on_exit EXIT
+trap 'failure_line=$LINENO' ERR
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
