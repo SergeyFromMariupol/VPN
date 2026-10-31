@@ -161,7 +161,9 @@ if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]];
 else
   phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
 fi
-phase renewal certbot renew --dry-run --run-deploy-hooks
+# The production timer keeps Certbot's random spread; an interactive install
+# should run its one acceptance renewal immediately.
+phase renewal certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew
 # Always recheck live state, including a resume after a later phase failed.
 printf '\n→ verify\n'
 if ! bash "$destination/tools/verify.sh" >"$state/verify.log" 2>&1; then
