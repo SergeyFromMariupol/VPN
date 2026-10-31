@@ -11,7 +11,7 @@ target_env=/etc/germanyvpn-target.env
 [[ $(stat -c '%u' "$target_env") == 0 ]] || exit 1
 target_mode=$(stat -c '%a' "$target_env")
 (( (8#$target_mode & 8#022) == 0 )) || exit 1
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$target_env"
 [[ ${TARGET_IPV4:-} == '@TARGET_IPV4@' && ${TARGET_INTERFACE:-} == '@TARGET_INTERFACE@' ]] || {
   printf '%s\n' 'ERROR: rendered WARP bundle does not match the target contract' >&2; exit 1;

@@ -25,8 +25,10 @@ jobs:
       - name: Check actual UFW output in isolated namespaces
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ufw iproute2 util-linux
+          sudo apt-get install -y --no-install-recommends ufw iproute2 util-linux shellcheck
           sudo env GITHUB_ACTIONS=true CI=true bash bundle/tests/test-ufw-contract.sh
+      - name: ShellCheck WARP runtime scripts
+        run: find bundle/warp-egress/scripts bundle/warp-egress/tests -type f -name '*.sh' -print0 | xargs -0 shellcheck --external-sources --severity=warning
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"
