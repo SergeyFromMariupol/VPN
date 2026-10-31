@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile the VPN runtime TLS certificate with Certbot
+After=network-online.target certbot.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /etc/letsencrypt/renewal-hooks/deploy/60-krysyuk-standalone-xui
+TimeoutStartSec=5min
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true

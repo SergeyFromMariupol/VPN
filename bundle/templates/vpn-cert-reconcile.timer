@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry VPN TLS deployment independently of Certbot renewal
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+AccuracySec=1min
+Persistent=true
+Unit=vpn-cert-reconcile.service
+
+[Install]
+WantedBy=timers.target

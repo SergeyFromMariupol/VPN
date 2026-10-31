@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +79,138 @@ class FinalizerTests(unittest.TestCase):
         self.assertFalse(out['streamSettings']['tlsSettings']['allowInsecure'])
         with self.assertRaisesRegex(RuntimeError, 'CLIENT_HY2'):
             module.client_config('hysteria2://fixture-auth@vpn.example.test:443?insecure=1', 11223)
+
+    def test_legacy_tls_xhttp_client_keeps_verified_h2(self):
+        uri = ('vless://fixture-id@vpn.example.test:8443?' + urlencode({
+            'security': 'tls', 'type': 'xhttp', 'sni': 'vpn.example.test',
+            'alpn': 'h2', 'host': 'vpn.example.test', 'path': '/private',
+            'mode': 'packet-up', 'extra': '{"mode":"packet-up"}'}) + '#fixture')
+        out = module.client_config(uri, 11223)['outbounds'][0]
+        stream = out['streamSettings']
+        self.assertEqual(stream['security'], 'tls')
+        self.assertEqual(stream['tlsSettings']['serverName'], 'vpn.example.test')
+        self.assertEqual(stream['tlsSettings']['alpn'], ['h2'])
+        self.assertFalse(stream['tlsSettings']['allowInsecure'])
+        self.assertEqual(stream['xhttpSettings']['extra'], {'mode': 'packet-up'})
+        self.assertNotIn('realitySettings', stream)
+        with self.assertRaisesRegex(RuntimeError, 'CLIENT_SECURITY'):
+            module.client_config(uri.replace('security=tls', 'security=none'), 11223)
+
+    def test_legacy_feed_requires_three_exact_direct_profiles(self):
+        secret = {'VLESS_UUID': 'direct-fixture', 'HYSTERIA2_AUTH': 'hy2-fixture',
+                  'REALITY_PUBLIC_KEY': 'B' * 43, 'REALITY_SHORT_ID': '0123456789abcdef',
+                  'XHTTP_PRIVATE_PATH': 'private'}
+        host = self.target['TARGET_FQDN']
+        label = self.target['TARGET_LABEL']
+        links = [
+            'vless://direct-fixture@' + host + ':443?' + urlencode({
+                'security': 'reality', 'type': 'grpc', 'serviceName': 'reality-grpc',
+                'sni': self.target['TARGET_REALITY_SNI'], 'pbk': 'B' * 43,
+                'sid': '0123456789abcdef', 'fp': 'chrome'}) + '#' + quote(label + ' · REALITY'),
+            'hysteria2://hy2-fixture@' + host + ':443?' + urlencode({
+                'sni': host, 'alpn': 'h3', 'insecure': '0'}) + '#' + quote(label + ' · HYSTERIA2'),
+            'vless://direct-fixture@' + host + ':8443?' + urlencode({
+                'security': 'tls', 'type': 'xhttp', 'sni': host, 'alpn': 'h2',
+                'host': host, 'path': '/private', 'mode': 'packet-up'}) + '#' + quote(label + ' · XHTTP'),
+        ]
+        module.validate_legacy_feed(links, self.target, secret)
+        self.assertEqual(module.decode_feed(base64.b64encode('\n'.join(links).encode()), 3), links)
+        with self.assertRaisesRegex(RuntimeError, 'NATIVE_PROFILE_COUNT'):
+            module.decode_feed(base64.b64encode('\n'.join(links[:2]).encode()), 3)
+        with self.assertRaisesRegex(RuntimeError, 'LEGACY_REALITY_URI'):
+            module.validate_legacy_feed([links[0].replace('camouflage.example.test', 'other.example.test'),
+                                         *links[1:]], self.target, secret)
+        with self.assertRaisesRegex(RuntimeError, 'LEGACY_XHTTP_URI'):
+            module.validate_legacy_feed([*links[:2], links[2].replace('packet-up', 'stream-one')],
+                                         self.target, secret)
+
+    def test_failed_promotion_rollback_requires_six_live_payloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / 'runtime.json'
+            runtime.write_bytes(b'{"inbounds":[]}')
+            binary = root / 'xray'
+            binary.write_bytes(b'fixture-xray')
+            target = {**self.target, 'TARGET_INTERFACE': 'ens3', 'TARGET_SSH_PORT': '22'}
+            before_feed = self.six_profiles(target)
+            rows, inbounds, routes = [], [], {'route': 'unchanged'}
+            payload_check = Mock()
+            with patch.object(module, 'RUNTIME', runtime), patch.object(module, 'SOURCE_XRAY', binary), \
+                 patch.object(module, 'XRAY_SHA', module.sha(binary.read_bytes())), \
+                 patch.object(module, 'UNIT_PATHS', (root / 'unit-direct', root / 'unit-warp')), \
+                 patch.object(module, 'ROOT', root / 'direct'), patch.object(module, 'CFROOT', root / 'warp'), \
+                 patch.object(module, 'EXECROOT', root / 'exec'), \
+                 patch.object(module, 'run', return_value=Mock(stdout=b'')), \
+                 patch.object(module, 'database', return_value=(rows, inbounds)), \
+                 patch.object(module, 'routes', return_value=routes), \
+                 patch.object(module, 'native', return_value=before_feed), \
+                 patch.object(module, 'payload', payload_check), \
+                 patch.object(module.subprocess, 'run', return_value=Mock(returncode=3)):
+                module.verify_xhttp_rollback(target, {}, runtime.read_bytes(), rows, inbounds,
+                                             before_feed, routes)
+                self.assertEqual(payload_check.call_count, 6)
+                self.assertEqual([call.args[1] for call in payload_check.call_args_list],
+                                 [True, True, True, False, False, False])
+                payload_check.side_effect = RuntimeError('PAYLOAD_EGRESS_CLASS')
+                with self.assertRaisesRegex(RuntimeError, 'PAYLOAD_EGRESS_CLASS'):
+                    module.verify_xhttp_rollback(target, {}, runtime.read_bytes(), rows, inbounds,
+                                                 before_feed, routes)
+
+    def test_failed_dual_rollback_requires_three_direct_payloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_root = root / 'backups'
+            snapshot = backup_root / 'snapshot'
+            snapshot.mkdir(parents=True)
+            runtime = root / 'runtime.json'
+            runtime.write_bytes(b'{"inbounds":[]}')
+            server_env = root / 'server.env'
+            server_env.write_bytes(b'PANEL_USERNAME=fixture\n')
+            (snapshot / 'server.env').write_bytes(server_env.read_bytes())
+            (snapshot / 'config-before.json').write_bytes(runtime.read_bytes())
+            (snapshot / 'ip4-routes-before.txt').write_bytes(b'fixture route\n')
+            (snapshot / 'ip4-rules-before.txt').write_bytes(b'fixture rule\n')
+            binary = root / 'xray'
+            binary.write_bytes(b'fixture-xray')
+            db_file = root / 'fixture.db'
+            with sqlite3.connect(db_file) as db:
+                db.executescript('CREATE TABLE clients(id INTEGER);'
+                                 'CREATE TABLE client_inbounds(id INTEGER);'
+                                 'CREATE TABLE client_external_links(id INTEGER);'
+                                 'CREATE TABLE inbounds(enable INTEGER);'
+                                 'INSERT INTO clients VALUES(1),(2),(3);'
+                                 'INSERT INTO client_inbounds VALUES(1),(2),(3);'
+                                 'INSERT INTO inbounds VALUES(1),(1),(1);')
+            db.close()
+            target = {**self.target, 'TARGET_INTERFACE': 'ens3', 'TARGET_SSH_PORT': '22'}
+            feeds = ['direct-reality', 'direct-hysteria', 'direct-xhttp']
+            payload_check = Mock()
+            def fake_run(args, **kwargs):
+                if args == ['ip', '-4', 'route', 'show', 'table', 'all']:
+                    return Mock(stdout=b'fixture route\n')
+                if args == ['ip', '-4', 'rule', 'show']:
+                    return Mock(stdout=b'fixture rule\n')
+                return Mock(stdout=b'')
+            with patch.object(module, 'LEGACY_BACKUP_ROOT', backup_root), \
+                 patch.object(module, 'SERVER_ENV', server_env), patch.object(module, 'RUNTIME', runtime), \
+                 patch.object(module, 'SOURCE_XRAY', binary), patch.object(module, 'DB', db_file), \
+                 patch.object(module, 'XRAY_SHA', module.sha(binary.read_bytes())), \
+                 patch.object(module, 'UNIT_PATHS', (root / 'unit-direct', root / 'unit-warp')), \
+                 patch.object(module, 'ROOT', root / 'direct'), patch.object(module, 'CFROOT', root / 'warp'), \
+                 patch.object(module, 'EXECROOT', root / 'exec'), \
+                 patch.object(module, 'private', side_effect=lambda path: path.read_bytes()), \
+                 patch.object(module, 'run', side_effect=fake_run), \
+                 patch.object(module, 'native', return_value=feeds), \
+                 patch.object(module, 'validate_legacy_feed'), \
+                 patch.object(module, 'payload', payload_check), \
+                 patch.object(module.subprocess, 'run', return_value=Mock(returncode=3)):
+                module.verify_legacy_rollback(target, {}, snapshot)
+                self.assertEqual(payload_check.call_count, 3)
+                self.assertEqual([call.args[1] for call in payload_check.call_args_list],
+                                 [False, False, False])
+                payload_check.side_effect = RuntimeError('PAYLOAD_EGRESS_CLASS')
+                with self.assertRaisesRegex(RuntimeError, 'PAYLOAD_EGRESS_CLASS'):
+                    module.verify_legacy_rollback(target, {}, snapshot)
 
     def test_parser_refuses_duplicate_fields_and_partial_feeds(self):
         with self.assertRaisesRegex(RuntimeError, 'DUP_URI_QUERY'):

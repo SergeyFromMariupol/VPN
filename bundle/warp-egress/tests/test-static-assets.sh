@@ -331,7 +331,7 @@ grep -Fq '/var/lib/krysyuk-warp-health/last-recovery-epoch' \
   "$bundle_root/scripts/deploy-health-watchdog.sh"
 grep -Fq '/var/lib/krysyuk-warp-health/last-success-epoch' \
   "$bundle_root/scripts/deploy-health-watchdog.sh"
-grep -Fq 'OnUnitInactiveSec=15s' \
+grep -Fq 'OnUnitActiveSec=14s' \
   "$bundle_root/systemd/krysyuk-warp-health.timer"
 grep -Fq 'ExecStart=/usr/local/libexec/krysyuk-warp-egress/warp-health-watchdog.sh' \
   "$bundle_root/systemd/krysyuk-warp-health.service"

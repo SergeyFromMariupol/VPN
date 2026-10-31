@@ -54,6 +54,7 @@ wait_ready() {
 rollback() {
   local status=$?
   local rollback_ok=1
+  local -a legacy_args=()
   trap - ERR EXIT INT TERM HUP
   if [[ "$committed" -eq 0 && "$backup_ready" -eq 1 && -s "$backup/x-ui.db" ]]; then
     printf 'ROLLBACK_STARTED=1\n' >&2
@@ -69,6 +70,14 @@ rollback() {
       if ((rollback_ok)); then systemctl start x-ui.service >/dev/null 2>&1 || rollback_ok=0; fi
       wait_ready >/dev/null 2>&1 || rollback_ok=0
       sqlite3 "$db" 'PRAGMA quick_check;' 2>/dev/null | grep -qx ok || rollback_ok=0
+      if ((rollback_ok)); then
+        legacy_args=(--verify-legacy-rollback --rollback-snapshot "$backup")
+        if [[ -s "$stage/subscription-before.body" ]]; then
+          legacy_args+=(--baseline-feed "$stage/subscription-before.body")
+        fi
+        python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/finalize-xhttp.py" \
+          "${legacy_args[@]}" >/dev/null || rollback_ok=0
+      fi
     else
       rollback_ok=0
     fi

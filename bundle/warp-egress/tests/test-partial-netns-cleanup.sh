@@ -25,6 +25,26 @@ if [[ ${FAKE_NETNS_COMMAND_MODE:-} == 1 ]]; then
           [[ -e "$FAKE_NETNS_STATE/host-veth" ]]
           exit
           ;;
+        '-4 address show dev kw-host')
+          if [[ ${FAKE_HEALTHY_EXISTING:-0} == 1 ]]; then
+            printf '%s\n' 'inet 169.254.254.1/30 scope global kw-host'
+          fi
+          exit 0
+          ;;
+        'netns exec krysyuk-warp ip -4 address show dev kw-warp')
+          if [[ ${FAKE_HEALTHY_EXISTING:-0} == 1 ]]; then
+            printf '%s\n' 'inet 169.254.254.2/30 scope global kw-warp'
+          fi
+          exit 0
+          ;;
+        'route get 169.254.254.2')
+          printf '%s\n' '169.254.254.2 dev kw-host src 169.254.254.1'
+          exit 0
+          ;;
+        'netns exec krysyuk-warp ip -4 route get 169.254.254.1')
+          printf '%s\n' '169.254.254.1 dev kw-warp src 169.254.254.2'
+          exit 0
+          ;;
         'netns add krysyuk-warp')
           : >"$FAKE_NETNS_STATE/netns"
           exit 0
@@ -151,5 +171,51 @@ grep -Fq 'nft delete table inet krysyuk_warp_netns_host_guard' \
   echo 'ERROR: failed setup did not restore its fake forwarding state' >&2
   exit 1
 }
+
+# A failed repeat start must leave resources owned by the active data plane in
+# place. The fake pre-existing namespace intentionally has an invalid address.
+: >"$stage/state/netns"
+: >"$stage/state/host-veth"
+: >"$stage/state/netns-veth"
+printf '%s\n' 1 >"$stage/state/ip-forward"
+: >"$stage/state/commands.log"
+set +e
+FAKE_NETNS_COMMAND_MODE=1 FAKE_NETNS_STATE="$stage/state" \
+  PATH="$stage/bin:$PATH" "$stage/setup-netns.sh" >"$stage/output.log" 2>&1
+rc=$?
+set -e
+(( rc != 0 )) || {
+  echo 'ERROR: invalid pre-existing namespace unexpectedly succeeded' >&2
+  exit 1
+}
+[[ -e "$stage/state/netns" && -e "$stage/state/host-veth" \
+  && -e "$stage/state/netns-veth" ]] || {
+  echo 'ERROR: failed repeat start destroyed an existing namespace' >&2
+  exit 1
+}
+[[ $(<"$stage/state/ip-forward") == 1 ]] || {
+  echo 'ERROR: failed repeat start changed existing forwarding state' >&2
+  exit 1
+}
+if grep -Eq 'ip (netns delete|link delete)' "$stage/state/commands.log"; then
+  echo 'ERROR: failed repeat start deleted existing network resources' >&2
+  exit 1
+fi
+
+: >"$stage/state/commands.log"
+FAKE_HEALTHY_EXISTING=1 FAKE_NETNS_COMMAND_MODE=1 FAKE_NETNS_STATE="$stage/state" \
+  PATH="$stage/bin:$PATH" "$stage/setup-netns.sh" >"$stage/output.log" 2>&1 || {
+  echo 'ERROR: healthy pre-existing namespace did not pass idempotent start' >&2
+  exit 1
+}
+grep -Fq 'WARP_NETNS_READY=1' "$stage/output.log" || {
+  echo 'ERROR: healthy pre-existing namespace did not report readiness' >&2
+  exit 1
+}
+if grep -Eq 'ip (link (add|set|delete)|netns (add|delete))|sysctl .* -w|nft -f' \
+    "$stage/state/commands.log"; then
+  echo 'ERROR: healthy repeat start mutated network state' >&2
+  exit 1
+fi
 
 printf '%s\n' 'WARP_NETNS_PARTIAL_SETUP_CLEANUP_OK=1'

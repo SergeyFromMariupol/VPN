@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -18,9 +19,14 @@ NETWORK = importlib.util.module_from_spec(NETWORK_SPEC)
 sys.modules[NETWORK_SPEC.name] = NETWORK
 NETWORK_SPEC.loader.exec_module(NETWORK)
 
+MANAGED_LOOPBACK_PORTS = frozenset((2053, 11111, 24443, 24444, 62789))
+SSHD_EXECUTABLE = '/usr/sbin/sshd'
+SYSTEMD_EXECUTABLE = '/usr/lib/systemd/systemd'
+
 
 def run(*args: str) -> str:
-    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=20).strip()
+    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=20,
+                                   env=dict(os.environ, LC_ALL='C')).strip()
 
 
 def domain(value: str) -> bool:
@@ -126,21 +132,80 @@ def check_endpoint_dns(env: dict) -> None:
             raise ValueError('Remove AAAA before IPv4-only installation')
 
 
-def listener_conflicts(output: str, env: dict, process_executables=None) -> list[str]:
+def trusted_ssh_process_executables(listeners) -> dict[int, str]:
+    """Authenticate the executable behind each candidate SSH listener PID."""
+    executables = {}
+    for listener in listeners:
+        if listener.protocol != 'tcp':
+            continue
+        for pid in listener.pids:
+            try:
+                executable = Path('/proc') / str(pid) / 'exe'
+                canonical = executable.resolve(strict=True)
+                info = executable.stat()
+                if (str(canonical) in (SSHD_EXECUTABLE, SYSTEMD_EXECUTABLE)
+                        and stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                        and not stat.S_IMODE(info.st_mode) & 0o022):
+                    executables[pid] = str(canonical)
+            except (OSError, RuntimeError):
+                continue
+    return executables
+
+
+def systemd_ssh_socket_listens(port: int) -> bool:
+    """Permit PID 1 only when the active ssh.socket owns this TCP port."""
+    active = subprocess.run(('systemctl', 'is-active', '--quiet', 'ssh.socket'),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=20).returncode == 0
+    if not active:
+        return False
+    listeners = run('systemctl', 'show', '--property=Listen', '--value', 'ssh.socket')
+    return any(endpoint == str(port) or endpoint.endswith(':' + str(port))
+               for endpoint in re.findall(r'(\S+)\s+\(Stream\)', listeners))
+
+
+def validate_ufw_saved_rules(output: str) -> None:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if lines != ["Added user rules (see 'ufw status' for running firewall):", '(None)']:
+        raise ValueError('existing UFW saved user rules')
+
+
+def listener_conflicts(output: str, env: dict, process_executables=None,
+                       ssh_process_executables=None, ssh_socket_listens=None) -> list[str]:
     listeners = NETWORK.parse_ss(output)
     if process_executables is None:
         process_executables = NETWORK.trusted_process_executables(listeners)
+    if ssh_process_executables is None:
+        ssh_process_executables = trusted_ssh_process_executables(listeners)
     conflicts = []
+    ssh_listener_found = False
     for listener in listeners:
         if ipaddress.ip_address(listener.address).is_loopback:
+            if listener.port in MANAGED_LOOPBACK_PORTS:
+                conflicts.append(f'occupied managed loopback port: {listener.port}/{listener.protocol}')
             continue
         if listener.protocol == 'tcp' and listener.port == int(env['TARGET_SSH_PORT']):
+            if listener.address not in (env['TARGET_IPV4'], '0.0.0.0', '::') or not listener.pids:
+                conflicts.append('SSH listener has an unexpected address or no authenticated owner')
+                continue
+            if ssh_socket_listens is None and 1 in listener.pids:
+                ssh_socket_listens = systemd_ssh_socket_listens(listener.port)
+            owners = (ssh_process_executables.get(pid) == SSHD_EXECUTABLE
+                      or (pid == 1 and ssh_process_executables.get(pid) == SYSTEMD_EXECUTABLE
+                          and ssh_socket_listens is True)
+                      for pid in listener.pids)
+            if not all(owners):
+                conflicts.append('SSH listener is not owned by trusted sshd/ssh.socket')
+                continue
+            ssh_listener_found = True
             continue
         if NETWORK.is_expected_dhcp(listener, env['TARGET_INTERFACE'], process_executables,
                                     target_ipv4=env['TARGET_IPV4']):
             continue
         scope = '%' + listener.scope if listener.scope else ''
         conflicts.append(f'listener: {listener.address}{scope}:{listener.port}/{listener.protocol}')
+    if not ssh_listener_found:
+        conflicts.append('missing authenticated SSH TCP listener on selected port')
     return conflicts
 
 
@@ -164,6 +229,11 @@ def main() -> None:
             output = run(command, *args)
             if (command == 'ufw' and 'Status: active' in output) or (command == 'nft' and output):
                 conflicts.append(f'existing {command} rules')
+            if command == 'ufw':
+                try:
+                    validate_ufw_saved_rules(run('ufw', 'show', 'added'))
+                except ValueError as error:
+                    conflicts.append(str(error))
     for identity in ('xui', 'xui-secrets', 'xraywarp'):
         for database in ('passwd', 'group'):
             if subprocess.run(['getent', database, identity], stdout=subprocess.DEVNULL).returncode == 0:

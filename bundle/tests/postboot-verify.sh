@@ -161,7 +161,7 @@ done
 fi
 unset resolver public_a public_aaaa
 
-for unit in nginx.service x-ui.service certbot.timer krysyuk-warp-health.timer; do
+for unit in nginx.service x-ui.service certbot.timer vpn-cert-reconcile.timer krysyuk-warp-health.timer; do
   systemctl is-active --quiet "$unit"
   systemctl is-enabled --quiet "$unit"
 done
@@ -246,6 +246,7 @@ jq --exit-status --rawfile connector "$stage/connector.uuid" '
 ' /usr/local/x-ui/bin/config.json >/dev/null
 
 verify_target_certificate "$runtime_root/tls/fullchain.pem"
+bash "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../base" && pwd -P)/install-cert-reconcile.sh" --check-only
 nginx -t >/dev/null
 [[ "$(stat -c '%U:%G:%a' /etc/nginx/conf.d/3x-ui-public.conf)" == 'root:root:600' ]]
 [[ "$(stat -c '%U:%G:%a' /etc/letsencrypt/renewal-hooks/deploy/70-krysyuk-standalone-nginx)" == 'root:root:755' ]]

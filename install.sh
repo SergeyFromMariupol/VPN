@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.1'
+readonly release='v1.1.2'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -140,6 +140,7 @@ bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log"
 phase tls bash "$runtime/base/acme.sh" --apply
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
 phase panel bash "$runtime/scripts/expose-panel-https.sh" --apply
+phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
 phase warp bash "$runtime/warp-egress/scripts/install-warp.sh"
 phase dual env CONFIRM_STANDALONE_DUAL_EGRESS="ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" bash "$runtime/scripts/enable-dual-egress.sh" --apply
 if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]]; then
