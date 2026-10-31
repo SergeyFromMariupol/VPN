@@ -45,12 +45,19 @@ write_warp_phase_marker() {
     return 1
   fi
   identity=$(stat -c '%d:%i:%h' "$temporary") || { rm -f -- "$temporary"; return 1; }
-  if ! mv -T -- "$temporary" "$path"; then
+  # Arm rollback before publication: a signal immediately after mv must not
+  # leave a committed-looking checkpoint for resources already rolled back.
+  WARP_PHASE_MARKER_CREATED=$path
+  WARP_PHASE_MARKER_IDENTITY=$identity
+  if ! mv -nT -- "$temporary" "$path"; then
     rm -f -- "$temporary"
     return 1
   fi
-  WARP_PHASE_MARKER_CREATED=$path
-  WARP_PHASE_MARKER_IDENTITY=$identity
+  if ! validate_warp_phase_marker "$1" ||
+     [[ $(stat -c '%d:%i:%h' "$path") != "$identity" ]]; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 clear_uncommitted_warp_phase_marker() {
@@ -59,6 +66,11 @@ clear_uncommitted_warp_phase_marker() {
   for phase in base deploy watchdog; do
     path=$(warp_phase_path "$phase") || return 1
     if [[ "$path" == "$WARP_PHASE_MARKER_CREATED" ]]; then
+      if [[ ! -e $path && ! -L $path ]]; then
+        WARP_PHASE_MARKER_CREATED=''
+        WARP_PHASE_MARKER_IDENTITY=''
+        return 0
+      fi
       validate_warp_phase_marker "$phase" || return 1
       [[ $(stat -c '%d:%i:%h' "$path") == "$WARP_PHASE_MARKER_IDENTITY" ]] || return 1
       rm -f -- "$path"

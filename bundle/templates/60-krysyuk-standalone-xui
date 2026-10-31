@@ -37,8 +37,12 @@ marker_written=0
 marker_stage=''
 marker_before=''
 marker_existed=0
+tls_pointer_target() {
+  [[ -L $root/tls ]] && readlink -- "$root/tls"
+}
 cleanup() {
   status=$?; rollback_ok=1
+  local current='' pointer_restored=0
   trap - EXIT INT TERM HUP
   set +e
   rm -f -- "$link" || rollback_ok=0
@@ -52,17 +56,38 @@ cleanup() {
       fi
     fi
     if [ "$switched" = 1 ]; then
-      ln -s -- "$previous" "$link" && mv -Tf -- "$link" "$root/tls" || rollback_ok=0
-      systemctl restart x-ui.service >/dev/null 2>&1 || rollback_ok=0
-      if [[ -e $nginx_config ]]; then
-        nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || rollback_ok=0
+      current=$(tls_pointer_target) || current=''
+      if [[ $current == "$previous" ]]; then
+        pointer_restored=1
+      elif [[ -n $new && $current == "${new##*/}" ]]; then
+        if ln -s -- "$previous" "$link" && mv -Tf -- "$link" "$root/tls"; then
+          pointer_restored=1
+        else rollback_ok=0; fi
+      else
+        # A foreign pointer replacement is not owned by this transaction.
+        rollback_ok=0
+      fi
+      if ((pointer_restored)); then
+        systemctl restart x-ui.service >/dev/null 2>&1 || rollback_ok=0
+        if [[ -e $nginx_config ]]; then
+          nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || rollback_ok=0
+        fi
       fi
     fi
     if [[ -n $new ]]; then
-      rm -f -- "$new/fullchain.pem" "$new/privkey.pem" || rollback_ok=0
-      rmdir -- "$new" 2>/dev/null || rollback_ok=0
+      current=$(tls_pointer_target) || current=''
+      if [[ $current == "$previous" && $current != "${new##*/}" ]]; then
+        rm -f -- "$new/fullchain.pem" "$new/privkey.pem" || rollback_ok=0
+        rmdir -- "$new" 2>/dev/null || rollback_ok=0
+      else
+        # Failed pointer restoration must never turn a valid active generation
+        # into a dangling symlink by deleting the certificate it still uses.
+        printf 'TLS_ROLLBACK_GENERATION_RETAINED=1\n' >&2
+        rollback_ok=0
+      fi
     fi
   fi
+  rm -f -- "$link" || rollback_ok=0
   if [[ -n $marker_before ]]; then rm -f -- "$marker_before" || rollback_ok=0; fi
   ((rollback_ok)) || printf 'ERROR: TLS rollback requires review\n' >&2
   ((status != 0)) || ((rollback_ok)) || status=1

@@ -1,6 +1,7 @@
 """Execute raw new-entrypoint resume against a private older source fixture."""
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -81,7 +82,8 @@ class ResumeDispatch(unittest.TestCase):
             # The installed fixture has the actual dispatch code and an old
             # release's phase body. It proves no recursion or inherited lock.
             preamble = source.split('# Serialize all installs,', 1)[0]
-            preamble = preamble.replace("readonly release='v1.1.3'", "readonly release='v1.1.2'")
+            preamble = re.sub(r"readonly release='v[^']+'", "readonly release='v1.1.2'", preamble)
+            self.assertIn("readonly release='v1.1.2'", preamble)
             old_body = ('\n[[ $mode == --resume ]]\n'
                         'exec 9>"' + str(root / 'installer.lock') + '"\n'
                         'flock -n 9 || exit 72\n'

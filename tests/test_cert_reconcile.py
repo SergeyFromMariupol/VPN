@@ -56,6 +56,8 @@ class ReconcileCertificate(unittest.TestCase):
         self.fail = self.root / "fail-restart"
         self.signal_after_marker = self.root / "signal-after-marker"
         self.signal_after_tls = self.root / "signal-after-tls"
+        self.fail_rollback_move = self.root / "fail-rollback-move"
+        self.tls_switch_seen = self.root / "tls-switch-seen"
         self.served = self.root / "served.pem"
         shutil.copyfile(self.lineage / "cert.pem", self.served)
         self.nginx_config = self.root / "panel.conf"
@@ -67,8 +69,11 @@ class ReconcileCertificate(unittest.TestCase):
         (self.bin / "nginx").write_text(
             "#!/bin/sh\nprintf 'nginx %s\\n' \"$*\" >>\"$VPN_TEST_LOG\"\nexit 0\n")
         (self.bin / "mv").write_text(
-            "#!/bin/sh\n/bin/mv \"$@\" || exit $?\n"
-            "last=''\nfor arg do last=$arg; done\n"
+            "#!/bin/sh\nlast=''\nfor arg do last=$arg; done\n"
+            "if [ \"$last\" = \"$VPN_TEST_TLS_LINK\" ] && [ -e \"$VPN_TEST_ROLLBACK_FAIL\" ]; then\n"
+            "  if [ -e \"$VPN_TEST_TLS_SWITCH_SEEN\" ]; then exit 1; fi\n"
+            "  touch \"$VPN_TEST_TLS_SWITCH_SEEN\"\n"
+            "fi\n/bin/mv \"$@\" || exit $?\n"
             "if [ \"$last\" = \"$VPN_TEST_MARKER\" ] && [ -e \"$VPN_TEST_SIGNAL\" ]; then\n"
             "  rm -f \"$VPN_TEST_SIGNAL\"\n  kill -TERM \"$PPID\"\nfi\n"
             "if [ \"$last\" = \"$VPN_TEST_TLS_LINK\" ] && [ -e \"$VPN_TEST_TLS_SIGNAL\" ]; then\n"
@@ -181,6 +186,8 @@ class ReconcileCertificate(unittest.TestCase):
                     VPN_TEST_SIGNAL=str(self.signal_after_marker),
                     VPN_TEST_TLS_LINK=str(self.runtime / "tls"),
                     VPN_TEST_TLS_SIGNAL=str(self.signal_after_tls),
+                    VPN_TEST_ROLLBACK_FAIL=str(self.fail_rollback_move),
+                    VPN_TEST_TLS_SWITCH_SEEN=str(self.tls_switch_seen),
                     VPN_TEST_SERVED=str(self.served))
 
     def test_valid_deployment_and_idempotent_followup(self):
@@ -232,6 +239,21 @@ class ReconcileCertificate(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.runtime / "tls").readlink().as_posix(), "tls-gen.old")
         self.assertEqual((self.runtime / "tls/fullchain.pem").read_text(), "OLD_CERTIFICATE\n")
+
+    def test_failed_rollback_pointer_move_keeps_the_still_referenced_generation(self):
+        self.fail.touch()
+        self.fail_rollback_move.touch()
+        before_marker = self.marker.read_bytes()
+        result = self.run_hook()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual((self.runtime / "tls").readlink().as_posix(), "tls-gen.old")
+        self.assertEqual((self.runtime / "tls/fullchain.pem").read_bytes(),
+                         (self.lineage / "fullchain.pem").read_bytes())
+        self.assertEqual((self.runtime / "tls/privkey.pem").read_bytes(),
+                         (self.lineage / "privkey.pem").read_bytes())
+        self.assertEqual(self.marker.read_bytes(), before_marker)
+        self.assertIn('TLS_ROLLBACK_GENERATION_RETAINED=1', result.stderr)
+        self.assertFalse(list(self.runtime.glob('.tls-next-*')))
 
     def test_wrong_served_certificate_rolls_back_pointer(self):
         self.served.write_text("NOT A CERTIFICATE\n", encoding="ascii")
