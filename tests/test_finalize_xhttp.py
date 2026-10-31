@@ -71,6 +71,20 @@ class FinalizerTests(unittest.TestCase):
         self.assertEqual(client['streamSettings']['xhttpSettings']['extra'], {'mode': 'stream-one'})
         self.assertNotIn('tlsSettings', client['streamSettings'])
 
+    def test_direct_external_link_accepts_only_legacy_or_canonical_fragment(self):
+        endpoint = 'vless://fixture-id@vpn.example.test:8443?security=tls&type=xhttp'
+        full_name = 'Тест · 🖥️ IP сервера · XHTTP'
+        served = endpoint + '#' + quote(full_name, safe='')
+        for saved_name in ('Тест · XHTTP', full_name):
+            row = {'value': endpoint + '#' + quote(saved_name, safe=''), 'remark': full_name}
+            self.assertTrue(module.direct_row_matches_feed(row, served, self.target))
+            self.assertFalse(module.direct_row_matches_feed(
+                row, served.replace('security=tls', 'security=none'), self.target))
+            self.assertFalse(module.direct_row_matches_feed(
+                {**row, 'remark': 'wrong remark'}, served, self.target))
+        self.assertFalse(module.direct_row_matches_feed(
+            {'value': endpoint + '#wrong', 'remark': full_name}, served, self.target))
+
     def test_hysteria_native_client_contract(self):
         conf = module.client_config('hysteria2://fixture-auth@vpn.example.test:443?sni=vpn.example.test&alpn=h3&fp=chrome', 11223)
         out = conf['outbounds'][0]

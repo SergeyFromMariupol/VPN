@@ -185,6 +185,18 @@ def query(uri):
     return parsed, result
 
 
+def direct_row_matches_feed(row, served, target):
+    """3X-UI may apply the stored remark to an older link's URI fragment."""
+    stored_uri = urlsplit(row['value'])
+    served_uri = urlsplit(served)
+    full_name = profile_names(target)[5]
+    old_name = target.get('TARGET_LABEL', '🇩🇪 Германия') + ' · XHTTP'
+    return (row['remark'] == full_name and
+            stored_uri._replace(fragment='') == served_uri._replace(fragment='') and
+            unquote(stored_uri.fragment) in (old_name, full_name) and
+            unquote(served_uri.fragment) == full_name)
+
+
 def decode_feed(raw, expected_count=6):
     text = raw.decode().strip()
     if '://' not in text:
@@ -763,7 +775,7 @@ def finalize(target, secret):
     main_before = RUNTIME.read_bytes()
     main = strict_json(main_before)
     before_feed = native(target, secret)
-    need(rows[2]['value'] == before_feed[5], 'DIRECT_ROW_BASELINE')
+    need(direct_row_matches_feed(rows[2], before_feed[5], target), 'DIRECT_ROW_BASELINE')
     need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
     route_before = routes()
     private_key, pubkey = keypair(run([str(SOURCE_XRAY), 'x25519']).stdout)

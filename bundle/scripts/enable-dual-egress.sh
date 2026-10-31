@@ -358,16 +358,27 @@ jq --slurpfile global "$stage/xray-global-intended.json" \
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test \
   -config "$stage/xray-preflight.json" >/dev/null
 
-jq --null-input --rawfile reality "$stage/direct-reality.uri" \
-  --rawfile hysteria "$stage/direct-hysteria2.uri" \
-  --rawfile xhttp "$stage/direct-xhttp.uri" '
-  def clean: rtrimstr("\n");
-  {externalLinks:[
-    {kind:"link",value:($reality|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · REALITY"),enable:true,expiryTime:0,namePrefix:""},
-    {kind:"link",value:($hysteria|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · HYSTERIA2"),enable:true,expiryTime:0,namePrefix:""},
-    {kind:"link",value:($xhttp|clean),remark:(env.TARGET_LABEL+" · 🖥️ IP сервера · XHTTP"),enable:true,expiryTime:0,namePrefix:""}
-  ]}
-' >"$stage/external-links.json"
+DIRECT_LINK_STAGE="$stage" python3 - <<'PY' >"$stage/external-links.json"
+import json
+import os
+from pathlib import Path
+from urllib.parse import quote, unquote
+
+root = Path(os.environ['DIRECT_LINK_STAGE'])
+label = os.environ['TARGET_LABEL']
+links = []
+for filename, protocol in (('direct-reality.uri', 'REALITY'),
+                           ('direct-hysteria2.uri', 'HYSTERIA2'),
+                           ('direct-xhttp.uri', 'XHTTP')):
+    original = (root / filename).read_text().rstrip('\n')
+    endpoint, separator, old_fragment = original.partition('#')
+    if separator != '#' or unquote(old_fragment) != label + ' · ' + protocol:
+        raise SystemExit('unexpected direct link fragment')
+    remark = label + ' · 🖥️ IP сервера · ' + protocol
+    links.append(dict(kind='link', value=endpoint + '#' + quote(remark, safe=''),
+                      remark=remark, enable=True, expiryTime=0, namePrefix=''))
+print(json.dumps({'externalLinks': links}, ensure_ascii=False, separators=(',', ':')))
+PY
 jq --exit-status '
   (.externalLinks|length)==3 and ([.externalLinks[].kind]|unique)==["link"]
   and ([.externalLinks[].value]|unique|length)==3 and all(.externalLinks[];.enable==true and .expiryTime==0)
@@ -432,11 +443,12 @@ jq --exit-status '
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-time 30 \
   --user-agent 'v2rayN/7' --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
   --output "$stage/subscription-after.body" "$subscription_url"
-SUB_BODY="$stage/subscription-after.body" SECRET_DIR="$stage" CHECK_FQDN="$PUBLIC_FQDN" \
+SUB_BODY="$stage/subscription-after.body" SECRET_DIR="$stage" DB_PATH="$db" CHECK_FQDN="$PUBLIC_FQDN" \
   python3 - <<'PY'
 import base64
 import os
 from pathlib import Path
+import sqlite3
 from urllib.parse import parse_qs, unquote, urlparse
 
 root = Path(os.environ["SECRET_DIR"])
@@ -458,6 +470,16 @@ if len(links) != 6 or len(set(links)) != 6:
 items = [urlparse(link) for link in links]
 if [unquote(item.fragment) for item in items] != names:
     raise SystemExit("public subscription display order mismatch")
+with sqlite3.connect('file:' + os.environ['DB_PATH'] + '?mode=ro', uri=True) as db:
+    external_rows = db.execute('SELECT value, remark FROM client_external_links ORDER BY sort_index,id').fetchall()
+if len(external_rows) != 3:
+    raise SystemExit("stored direct links count mismatch")
+for index, (value, remark) in enumerate(external_rows):
+    stored = urlparse(value)
+    served = items[index + 3]
+    if (stored._replace(fragment='') != served._replace(fragment='') or
+            unquote(stored.fragment) != names[index + 3] or remark != names[index + 3]):
+        raise SystemExit("stored direct link differs from public subscription")
 if any(item.hostname != os.environ["CHECK_FQDN"] for item in items):
     raise SystemExit("public subscription hostname mismatch")
 wr = root.joinpath("warp-reality.uuid").read_text().strip()
