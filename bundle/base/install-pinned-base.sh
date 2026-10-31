@@ -66,6 +66,7 @@ committed=0
 managed_installed=0
 groups_created=0
 apt_attempted=0
+apt_install_attempted=0
 failure_line=unknown
 
 installed_packages() {
@@ -110,10 +111,26 @@ rollback_packages() {
   vpn_apt_get purge -y "${added_packages[@]}" >"$backup/apt-rollback.log" 2>&1 || return 1
 }
 restore_package_marks() {
-  apt-mark showmanual | LC_ALL=C sort -u >"$backup/apt-manual.after-rollback"
-  LC_ALL=C comm -13 "$backup/apt-manual.before" "$backup/apt-manual.after-rollback" >"$backup/apt-manual.changed"
+  apt-mark showmanual | LC_ALL=C sort -u >"$backup/apt-manual.after-rollback" || return 1
+  LC_ALL=C comm -13 "$backup/apt-manual.before" "$backup/apt-manual.after-rollback" >"$backup/apt-manual.changed" || return 1
   mapfile -t changed_marks <"$backup/apt-manual.changed"
-  if ((${#changed_marks[@]})); then apt-mark auto "${changed_marks[@]}" >/dev/null; fi
+  ((${#changed_marks[@]})) || return 0
+  # Do not change metadata for a concurrent package operation merely because
+  # its manual mark appeared after our snapshot. Only our actual install can
+  # own these changes, including an explicitly requested preexisting package.
+  : >"$backup/apt-manual.owned"
+  if ((apt_install_attempted)); then
+    [[ -f $backup/apt-install-plan.txt && ! -L $backup/apt-install-plan.txt ]] || return 1
+    { printf '%s\n' "${base_packages[@]}"
+      awk '$1=="Inst" && $3 !~ /^\[/ {print $2}' "$backup/apt-install-plan.txt"
+    } | sed 's/:amd64$//' | LC_ALL=C sort -u >"$backup/apt-manual.owned" || return 1
+  fi
+  sed 's/:amd64$//' "$backup/apt-manual.changed" |
+    LC_ALL=C sort -u >"$backup/apt-manual.changed.normalized" || return 1
+  LC_ALL=C comm -23 "$backup/apt-manual.changed.normalized" "$backup/apt-manual.owned" \
+    >"$backup/apt-manual.unowned" || return 1
+  [[ ! -s $backup/apt-manual.unowned ]] || return 1
+  apt-mark auto "${changed_marks[@]}" >/dev/null
 }
 transaction_exit() {
   local status=$? rollback_ok=1
@@ -221,6 +238,7 @@ vpn_apt_get -s --no-upgrade --no-remove --no-install-recommends install "${base_
 # it. The package manager must not remove any pre-existing package.
 ! grep -Eq '^(Remv|Purg) ' "$backup/apt-install-plan.txt" || die 'base installation would remove an existing package'
 grep -E '^Inst [^ ]+ \[' "$backup/apt-install-plan.txt" >"$backup/apt-existing-upgrades.plan" || true
+apt_install_attempted=1
 vpn_apt_get install -y --no-upgrade --no-remove --no-install-recommends "${base_packages[@]}"
 vpn_apt_get check >/dev/null
 [[ -z $(dpkg --audit) ]] || die 'package database is not clean after installation'

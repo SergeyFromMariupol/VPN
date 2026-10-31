@@ -81,6 +81,9 @@ inject() {
         (self.bin / 'dpkg').write_text('#!/bin/sh\nprintf "amd64\\n"\n')
         (self.bin / 'systemctl').write_text('''#!/bin/sh
 printf '%s\\n' "$*" >>"$VPN_TEST_CALLS"
+if [ "${2:-}" = --quiet ]; then
+  verb=$1; shift 2; set -- "$verb" "$@"
+fi
 ''' + inject + '''
 case "$1:$2" in
   is-enabled:certbot.timer) exit 0;;
