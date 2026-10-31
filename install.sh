@@ -109,6 +109,12 @@ else
   install -d -m 0700 "$state" "$destination"
   cp -- "$task_stage/inventory.txt" "$state/inventory-before.txt"
   cp -a -- "$source_dir/." "$destination/"
+  # GitHub tarballs can carry mode 0664 for ordinary tracked files. The pinned
+  # Certbot installer requires its reviewed source to be root-owned and not
+  # writable by a group; normalize the private installed copy only.
+  find "$destination" -type d -exec chmod go-w {} +
+  find "$destination" -type f -exec chmod go-w {} +
+  chmod 0700 "$destination"
   # Do not publish the mutable rendered copy; the verified original stays intact.
   python3 "$destination/tools/write-target.py" "$target_file"
   cat /proc/sys/kernel/random/boot_id >"$state/install-boot-id"
