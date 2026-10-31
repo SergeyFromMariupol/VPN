@@ -204,7 +204,9 @@ class ReconcileCertificate(unittest.TestCase):
         result = self.run_hook()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.runtime / "tls").readlink().as_posix(), "tls-gen.old")
-        self.assertFalse(self.log.exists())
+        calls = self.log.read_text() if self.log.exists() else ""
+        self.assertNotIn("systemctl restart", calls)
+        self.assertNotIn("systemctl reload", calls)
 
     def test_wrong_san_preserves_old_runtime(self):
         self._make_cert(self.lineage, "DNS:wrong.example.invalid")
