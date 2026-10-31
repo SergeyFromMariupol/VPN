@@ -8,8 +8,10 @@ try:
 except ImportError:  # Windows can import the suite; Linux CI runs the fixtures.
     pwd = grp = None
 import shutil
+import socket
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -132,6 +134,45 @@ class ReconcileCertificate(unittest.TestCase):
     def run_hook(self):
         return subprocess.run(["bash", str(self.script)], env=self.hook_environment(),
                               capture_output=True, text=True, check=False)
+
+    def test_real_s_client_reads_and_validates_served_leaf(self):
+        """Exercise the exact OpenSSL probe options against a local TLS server."""
+        for mode in ("domain", "ip"):
+            with self.subTest(mode=mode):
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                server = subprocess.Popen(
+                    ["openssl", "s_server", "-accept", f"127.0.0.1:{port}",
+                     "-cert", str(self.lineage / "cert.pem"),
+                     "-key", str(self.lineage / "privkey.pem"),
+                     "-cert_chain", str(self.lineage / "chain.pem"), "-quiet"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE)
+                try:
+                    args = ["openssl", "s_client", "-connect", f"127.0.0.1:{port}",
+                            "-CApath", str(self.trust), "-verify_return_error", "-showcerts"]
+                    args += (["-verify_hostname", self.fqdn, "-servername", self.fqdn]
+                             if mode == "domain" else ["-verify_ip", self.ip, "-noservername"])
+                    for _ in range(20):
+                        result = subprocess.run(args, input="", capture_output=True,
+                                                text=True, timeout=5)
+                        if result.returncode == 0 or server.poll() is not None:
+                            break
+                        time.sleep(0.1)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    observed = subprocess.run(["openssl", "x509", "-outform", "DER"],
+                                              input=result.stdout.encode("ascii"),
+                                              capture_output=True, check=True).stdout
+                    expected = subprocess.run(["openssl", "x509", "-in",
+                                               str(self.lineage / "cert.pem"), "-outform", "DER"],
+                                              capture_output=True, check=True).stdout
+                    self.assertEqual(hashlib.sha256(observed).digest(),
+                                     hashlib.sha256(expected).digest())
+                finally:
+                    if server.poll() is None:
+                        server.terminate()
+                    server.communicate(timeout=5)
 
     def hook_environment(self):
         return dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
