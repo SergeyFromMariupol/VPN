@@ -393,8 +393,11 @@ def _check_command(stage, issue):
         'dual': 'x-ui.service krysyuk-xray-warp-egress.service',
         'xhttp': 'germanyvpn-xhttp-test.service germanyvpn-xhttp-warp.service',
         'renewal': 'certbot.service certbot.timer',
-        'verify': 'x-ui.service nginx.service certbot.timer',
+        'verify': ('x-ui.service nginx.service krysyuk-warp-netns.service '
+                   'krysyuk-xray-warp-egress.service krysyuk-warp-health.timer'),
     }
+    if os.environ.get('TARGET_TLS_MODE', 'letsencrypt') != 'none':
+        units['verify'] += ' certbot.timer vpn-cert-reconcile.timer'
     if stage in units:
         return ('systemctl show -p Id -p ActiveState -p SubState -p Result -p ExecMainStatus '
                 + units[stage])

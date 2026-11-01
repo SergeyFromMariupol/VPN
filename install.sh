@@ -265,6 +265,10 @@ source "$source_dir/tools/progress.sh"
 installer_progress_init "$task_stage" "$source_dir/tools/progress.py" || :
 if [[ $mode == --verify ]]; then
   installer_resume_ready || die 'Небезопасное или неполное состояние для проверки VPN'
+  TARGET_TLS_MODE=letsencrypt
+  source "$target_file"
+  [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
+  export TARGET_TLS_MODE
   if [[ -e $state/verify-command.log || -L $state/verify-command.log ]]; then
     [[ -f $state/verify-command.log && ! -L $state/verify-command.log &&
        $(stat -c '%u:%g:%a:%h' "$state/verify-command.log") == 0:0:600:1 ]] || die 'Небезопасный журнал проверки VPN'
