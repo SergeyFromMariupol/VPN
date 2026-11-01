@@ -30,7 +30,7 @@ source "$script_dir/bootstrap-transaction.sh"
 stage=''
 bootstrap_transaction_begin
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+apt-get --error-on=any update
 bootstrap_apt_install \
   ca-certificates curl dnsutils gnupg iproute2 jq nftables python3-minimal \
   shellcheck systemd tcpdump ufw unzip
@@ -52,7 +52,7 @@ install -o root -g root -m 0644 \
   "$bundle_root/config/90-krysyuk-cloudflare-warp.pref" \
   /etc/apt/preferences.d/90-krysyuk-cloudflare-warp
 
-apt-get update
+apt-get --error-on=any update
 # The official package index may retire the audited version while retaining
 # its immutable pool artifact. Fetch only that exact official artifact and
 # verify the bundle-pinned digest before exposing it to the package manager.

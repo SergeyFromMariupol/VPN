@@ -87,6 +87,19 @@ remove_managed_tree() {
     *) return 1 ;;
   esac
 }
+ssh_activation_ready() {
+  # Ubuntu 24.04 may keep ssh.service inactive until ssh.socket accepts the
+  # first connection. A provider-console installation must preserve that
+  # valid socket-activated setup rather than require an existing SSH session.
+  if systemctl is-active --quiet ssh.service; then return 0; fi
+  systemctl is-active --quiet ssh.socket || return 1
+  systemctl show -p Listen --value ssh.socket | python3 -c '
+import re, sys
+port = str(int(sys.argv[1]))
+listeners = re.findall(r"(\S+)\s+\(Stream\)", sys.stdin.read())
+sys.exit(0 if any(value == port or value.endswith(":" + port) for value in listeners) else 1)
+' "$TARGET_SSH_PORT"
+}
 rollback_packages() {
   installed_packages >"$backup/packages.installed.after-failure"
   LC_ALL=C comm -13 "$backup/packages.installed.before" "$backup/packages.installed.after-failure" >"$backup/packages.added"
@@ -223,7 +236,7 @@ vpn_apt_get upgrade -y --no-remove
 vpn_apt_get check >/dev/null
 [[ -z $(dpkg --audit) ]] || die 'package database is not clean after Ubuntu upgrade'
 /usr/sbin/sshd -t || die 'SSH configuration failed after Ubuntu upgrade'
-systemctl is-active --quiet ssh.service || die 'SSH service is inactive after Ubuntu upgrade'
+ssh_activation_ready || die 'SSH service or matching activation socket is unavailable after Ubuntu upgrade'
 ss -H -lnt | grep -Eq "(:|\\])${TARGET_SSH_PORT}[[:space:]]" || die 'SSH listener disappeared after Ubuntu upgrade'
 dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Status}\n' >"$backup/package-versions.after-os-upgrade"
 touch "$backup/OS_UPGRADE_COMMITTED"
