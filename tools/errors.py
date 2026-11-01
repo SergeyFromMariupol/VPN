@@ -169,6 +169,10 @@ FIXED = {
         'DNS больше не соответствует установленному VPN.',
         'Адреса выбранного домена не совпадают с ожидаемой конфигурацией.',
         'Восстановите одну A-запись на IPv4 этого VPS, отключите DNS-проксирование и удалите неподдерживаемую AAAA-запись.'),
+    'XHTTP_ENV_FORMAT': (
+        'Не удалось прочитать сохранённые параметры XHTTP.',
+        'Формат файла параметров не поддерживается этой версией обработчика или нарушен.',
+        'Сохраните настройки и снимки. Проверьте формат и целостность исходников; не заменяйте UUID, ключи или пароли вручную. Для корректных пустых параметров нужен исправленный выпуск установщика.'),
     'VERIFY_CERT': (
         'Сертификат не прошёл итоговую проверку.',
         'Не подтверждён достаточный оставшийся срок действия сертификата.',
@@ -248,7 +252,9 @@ def classify(stage, text, status=1, code=''):
         title, cause, solution = FIXED['STATE_UNSAFE']
         return _issue('STATE_UNSAFE', title, cause, solution)
     if not selected:
-        if 'server is not clean:' in lower or 'existing ufw saved user rules' in lower:
+        if 'FRESH_XHTTP_FAILED=ENV_SHAPE' in text:
+            selected = 'XHTTP_ENV_FORMAT'
+        elif 'server is not clean:' in lower or 'existing ufw saved user rules' in lower:
             selected = 'HOST_NOT_CLEAN'
         elif 'wait for ntp synchronization' in lower:
             selected = 'NTP_UNSYNCED'
