@@ -267,6 +267,7 @@ class Progress(unittest.TestCase):
             self.assertEqual(result['renderers_alive'], 0, result)
             self.assertFalse(result['fd9_seen'], result)
             self.assertNotIn('PRIVATE_PHASE_CANARY', result['output'])
+            self.assertNotRegex(result['output'], r'[^\r\n]*%[^\r\n]*— (?:готово|уже завершено)')
             return result
 
     def test_live_pty_frames_precede_foreground_completion_and_checkpoint(self):
@@ -278,6 +279,7 @@ class Progress(unittest.TestCase):
         self.assertEqual(set(result['held_counts']), {0})
         self.assertTrue(result['direct_valid'])
         self.assertTrue(result['canary_logged'])
+        self.assertIn('Общий прогресс: ', result['output'])
         self.assertIn('[1/12]', result['output'])
         self.assertIn('░', result['output'])
         self.assertNotIn('\x1b', result['output'])
