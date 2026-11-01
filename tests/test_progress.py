@@ -39,6 +39,10 @@ if [[ $CASE == count ]]; then
   date -u +%FT%TZ >"$state/verify.done"
   stat -c '%d:%i' "$state/verify.done" >"$FIXTURE_ROOT/verify.before"
 fi
+if [[ $CASE == prep ]]; then
+  # Preparatory activity must not display a false 0% on an existing installation.
+  for name in base certbot tls; do date -u +%FT%TZ >"$state/$name.done"; done
+fi
 installer_progress_init "$FIXTURE_ROOT/progress" "$PROGRESS_PYTHON"
 # Observe the real renderer owned by each phase subshell, without changing it.
 definition=$(declare -f installer_progress_begin)
@@ -58,6 +62,10 @@ hold() {
 }
 instant() { printf '%s\n' "$CANARY"; }
 case $CASE in
+  prep)
+    installer_progress_begin "$PROGRESS_STAGE"
+    hold >"$state/prep.log"
+    installer_progress_end "$PROGRESS_STAGE" "$PROGRESS_RESULT";;
   group-term)
     # The PTY driver owns its session/group; this can never reach the CI runner.
     [[ $(ps -o pgid= -p "$BASHPID" | tr -d '[:space:]') == "$BASHPID" ]] || exit 98
@@ -88,6 +96,8 @@ environment = dict(os.environ, FIXTURE_ROOT=str(root), CASE=config['case'], CANA
                    PROGRESS_LIBRARY=str(source / 'tools/progress.sh'),
                    PHASE_LIBRARY=str(source / 'tools/phases.sh'),
                    PROGRESS_PYTHON=str(source / 'tools/progress.py'),
+                   PROGRESS_STAGE=config.get('stage', ''),
+                   PROGRESS_RESULT=str(config.get('result', '0')),
                    TERM=config.get('term', 'xterm-256color'), LC_ALL='C', LANG='C')
 environment.pop('NO_COLOR', None)
 if config.get('no_color'): environment['NO_COLOR'] = '1'
@@ -122,14 +132,16 @@ def alive(record):
     info = identity(record[1])
     return info is not None and info[0] not in ('Z', 'X') and info[2] == record[2]
 
-def frames(raw, label):
+def frames(raw, label, preparatory=False):
     text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', raw.decode('utf-8', 'replace'))
     result = []
     for line in re.split(r'[\r\n]', text):
         count = re.search(r'\[(\d+)/12\]', line)
         clock = re.search(r'\b(\d+):(\d{2})\b', line)
-        if count and clock and label in line:
-            result.append((int(count[1]), int(clock[1]) * 60 + int(clock[2])))
+        spinner = re.search('[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]', line)
+        if clock and label in line and (count or (preparatory and spinner)):
+            result.append((int(count[1]) if count else None,
+                           int(clock[1]) * 60 + int(clock[2])))
     return result
 
 data = b''
@@ -162,7 +174,10 @@ try:
             assert identity(current[1])[1] == current[0]
             fd9_seen |= pathlib.Path(f'/proc/{current[1]}/fd/9').exists()
         case = config['case']
-        observed = frames(data, 'Итоговая проверка' if case == 'count' else 'Прямые профили')
+        label = {'sni-check': 'Проверка REALITY SNI', 'preflight': 'Проверка сервера',
+                 'bootstrap': 'Подготовка установки'}.get(config.get('stage')) if case == 'prep' else None
+        observed = frames(data, label or ('Итоговая проверка' if case == 'count' else 'Прямые профили'),
+                          preparatory=(case == 'prep'))
         if case == 'orphan' and live and observed:
             os.kill(pid, signal.SIGKILL)
             owner_killed = True
@@ -177,7 +192,7 @@ try:
             ready = len({elapsed for count, elapsed in observed}) >= 2 and max(elapsed for count, elapsed in observed) >= 10
         else: ready = len({elapsed for count, elapsed in observed}) >= 2
         if ready:
-            held_counts = [count for count, elapsed in observed]
+            held_counts = [count for count, elapsed in observed if count is not None]
             held_elapsed = max((elapsed for count, elapsed in observed), default=0)
             held_seconds = time.monotonic() - started_at
             checkpoint_before = (root / 'state/direct.done').exists() if case != 'count' else False
@@ -285,9 +300,45 @@ class Progress(unittest.TestCase):
         self.assertEqual(result['valid_count'], 12)
         self.assertTrue(result['verify_replaced'])
         self.assertEqual(set(result['held_counts']), {11})
-        self.assertIn('[12/12] Итоговая проверка', result['output'])
-        self.assertRegex(result['output'], r'\[1/12\][^\r\n]*— уже завершено')
+        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 100% \[12/12\]')
+        self.assertIn('✓ Итоговая проверка', result['output'])
+        self.assertIn('✓ Подготовка Ubuntu (уже завершено)', result['output'])
+        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 8% \[1/12\]')
+        self.assertNotRegex(result['output'], r'[^\r\n]*%[^\r\n]*(?:готово|уже завершено)')
         self.assertNotRegex(result['output'], r'\[(?:1[3-9]|[2-9][0-9])/12\]')
+
+    def test_preparatory_pty_activity_and_outcomes_have_no_overall_percentage(self):
+        stages = {'sni-check': 'Проверка REALITY SNI', 'preflight': 'Проверка сервера',
+                  'bootstrap': 'Подготовка установки'}
+        outcomes = {'0': '✓ {label} — готово', 'skip': '✓ {label} — уже завершено',
+                    '1': '! {label} — остановлено'}
+        for stage, label in stages.items():
+            for code, outcome in outcomes.items():
+                with self.subTest(stage=stage, result=code):
+                    result = self.fixture('prep', stage=stage, result=code)
+                    self.assertEqual(result['code'], 0, result['output'])
+                    self.assertGreater(result['renderer_count'], 0)
+                    self.assertGreaterEqual(result['held_elapsed'], 1)
+                    self.assertEqual(result['held_counts'], [])
+                    self.assertEqual(result['valid_count'], 3)
+                    self.assertTrue(result['canary_logged'])
+                    self.assertIn(outcome.format(label=label), result['output'])
+                    self.assertNotRegex(result['output'], r'%|/12|[█░]')
+                    self.assertRegex(result['output'], r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][^\r\n]*' + label)
+                    if code == '1': self.assertNotIn('готово', result['output'])
+
+    def test_plain_preparatory_status_has_no_renderer_or_overall_percentage(self):
+        for stage, label in (('sni-check', 'Проверка REALITY SNI'),
+                             ('preflight', 'Проверка сервера'),
+                             ('bootstrap', 'Подготовка установки')):
+            with self.subTest(stage=stage):
+                result = self.fixture('prep', tty=False, stage=stage)
+                self.assertEqual(result['code'], 0, result['output'])
+                self.assertEqual(result['renderer_count'], 0)
+                self.assertEqual(result['valid_count'], 3)
+                self.assertIn(label + ' — выполняется…', result['output'])
+                self.assertIn('✓ ' + label + ' — готово', result['output'])
+                self.assertNotRegex(result['output'], r'%|/12|[█░\r\x1b]')
 
     def test_plain_pipe_has_no_renderer_and_dumb_pty_has_real_ten_second_heartbeat(self):
         pipe = self.fixture('live', tty=False)
