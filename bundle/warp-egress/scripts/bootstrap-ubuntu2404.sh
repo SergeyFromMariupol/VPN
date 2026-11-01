@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 umask 077
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly script_dir

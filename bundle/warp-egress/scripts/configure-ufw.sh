@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 umask 077
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 
 readonly before4=/etc/ufw/before.rules
 readonly before6=/etc/ufw/before6.rules

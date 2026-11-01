@@ -14,6 +14,19 @@ readonly source_root
 readonly lock="$source_root/certbot-requirements.txt"
 readonly validator="$source_root/verify-certbot.py"
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+unit_is_quiescent() {
+  local unit=$1 state
+  state=$(systemctl show "$unit" -p LoadState -p ActiveState -p MainPID) || return 1
+  state=$'\n'"$state"$'\n'
+  [[ $state == *$'\nLoadState=loaded\n'* ]] || return 1
+  case $unit in
+    *.service)
+      [[ $state == *$'\nMainPID=0\n'* &&
+         ($state == *$'\nActiveState=inactive\n'* || $state == *$'\nActiveState=failed\n'*) ]] ;;
+    *.timer) [[ $state == *$'\nActiveState=inactive\n'* ]] ;;
+    *) return 1 ;;
+  esac
+}
 [[ $# == 1 && ($1 == --apply || $1 == --check-only) ]] || die 'usage: install-certbot.sh --apply|--check-only'
 [[ $EUID == 0 ]] || die 'root is required'
 for name in python3 systemctl stat sha256sum install flock find cmp; do command -v "$name" >/dev/null; done
@@ -78,7 +91,7 @@ for path in "$VENV" "$SHIM" "$SERVICE_DIR" "$TIMER_DIR"; do
 done
 systemctl is-enabled --quiet certbot.timer || die 'base certbot.timer is not enabled'
 systemctl is-active --quiet certbot.timer || die 'base certbot.timer is not active'
-! systemctl is-active --quiet certbot.service || die 'a Certbot renewal is already active'
+unit_is_quiescent certbot.service || die 'cannot confirm Certbot renewal is stopped'
 [[ $(python3 -I -c 'import sys; print("%d.%d" % sys.version_info[:2])') == 3.12 ]] || die 'CPython 3.12 is required'
 snapshot=$(mktemp -d -p /var/backups "vpn-certbot-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 readonly snapshot
@@ -126,11 +139,15 @@ publish_shim() {
   rmdir -- "$shim_stage"
 }
 cleanup() {
-  local status=$? rollback_ok=1 path identity index
+  local status=$? rollback_ok=1 quiesced=1 path identity index
   trap - EXIT INT TERM HUP
   set +e
   if ((committed == 0)); then
-    systemctl stop certbot.timer >/dev/null 2>&1 || rollback_ok=0
+    systemctl stop certbot.timer >/dev/null 2>&1 || quiesced=0
+    unit_is_quiescent certbot.timer || quiesced=0
+    unit_is_quiescent certbot.service || quiesced=0
+    ((quiesced)) || rollback_ok=0
+    if ((quiesced)); then
     if [[ -n $shim_identity ]]; then
       if [[ ! -e $SHIM && ! -L $SHIM ]]; then :
       elif [[ -L $SHIM && $(stat -c '%d:%i' "$SHIM") == "$shim_identity" &&
@@ -164,6 +181,7 @@ cleanup() {
       fi
     done
     systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
+    fi
     if ((timer_stopped)); then systemctl start certbot.timer >/dev/null 2>&1 || rollback_ok=0; fi
     printf 'CERTBOT_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$snapshot" >&2
     ((status != 0)) || status=1
@@ -174,7 +192,8 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 timer_stopped=1
 systemctl stop certbot.timer
-! systemctl is-active --quiet certbot.service || die 'a renewal began before timer quiescence'
+unit_is_quiescent certbot.timer || die 'cannot confirm Certbot timer is stopped'
+unit_is_quiescent certbot.service || die 'cannot confirm renewal stopped after timer quiescence'
 publish_directory "$VENV" venv_identity
 python3 -I -m venv "$VENV"
 # --isolated ignores user pip configuration. Every runtime wheel and dependency

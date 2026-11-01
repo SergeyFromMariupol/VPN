@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Shared non-secret target contract. Source only from this reviewed bundle.
+# Parsed command output and Python checks must not inherit a caller's locale
+# or interpreter startup/optimization overrides. LANGUAGE also affects Python
+# gettext when LC_ALL is already C.
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 [[ ${GERMANYVPN_TARGET_CONTRACT_LOADED:-0} == 0 ]] || return 0
 GERMANYVPN_TARGET_CONTRACT_LOADED=1
 if [[ -f /etc/germanyvpn-target.env ]]; then

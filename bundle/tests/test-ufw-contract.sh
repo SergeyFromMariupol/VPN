@@ -19,10 +19,11 @@ original_mount=$(readlink /proc/self/ns/mnt)
 
 # Mounts and netfilter state are private before any UFW command runs. Binding
 # copied configuration and hiding /run also isolates persistent files and locks.
-unshare --mount --net --propagation private bash -euo pipefail -s -- \
+unshare --mount --net --propagation private bash -xEeuo pipefail -s -- \
   "$fixture" "$bundle" "$original_net" "$original_mount" <<'ISOLATED'
 fixture=$1
 bundle=$2
+trap 'printf "ERROR: isolated UFW fixture failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 [[ $(readlink /proc/self/ns/net) != "$3" && $(readlink /proc/self/ns/mnt) != "$4" ]] || exit 1
 mount --bind "$fixture/ufw" /etc/ufw
 mount --bind "$fixture/default" /etc/default
@@ -41,6 +42,39 @@ assert count == 1, 'Missing UFW IPv6 setting'
 path.write_text(text)
 PY
 ufw --force reset >/dev/null
+# UFW uses Python gettext, where LANGUAGE can override even LC_ALL=C. Bind a
+# private catalog inside this mount namespace so the check does not depend on
+# language packs installed on the runner and changes no host translation files.
+# The Ubuntu CLI calls gettext.install('ufw') without localedir. The backend
+# uses that builtins translator, whose default catalog directory is distinct
+# from the CLI's later bindtextdomain(trans_dir/messages) directory. Query the
+# system interpreter used by Ubuntu's /usr/sbin/ufw, then mask only an existing
+# canonical catalog directory inside this already-private mount namespace.
+translation_root=$(/usr/bin/python3 -c 'import gettext; print(gettext._default_localedir)')
+[[ $translation_root == /usr/share/locale && -d $translation_root &&
+   ! -L $translation_root && $(readlink -f -- "$translation_root") == "$translation_root" ]] || {
+  printf 'ERROR: unexpected UFW default catalog directory: %q\n' "$translation_root" >&2
+  exit 1
+}
+python3 "$bundle/../tests/test_locale_environment.py" --write-catalog "$fixture/ufw-locales"
+mount --bind "$fixture/ufw-locales" "$translation_root"
+export LC_ALL=C LANG=C LANGUAGE=ru
+translated_status=$(ufw status)
+[[ $translated_status == FIXTURE_TRANSLATED_INACTIVE ]] || {
+  printf 'ERROR: UFW translation control failed; catalog=%q actual=%q\n' \
+    "$translation_root" "$translated_status" >&2
+  exit 1
+}
+export TARGET_IPV4=8.8.4.4 TARGET_FQDN=8.8.4.4 TARGET_ADDRESS_MODE=ip
+export TARGET_INTERFACE=vpnfixture0 TARGET_SSH_PORT=2222 TARGET_DEVICE_LIMIT=0
+export TARGET_REALITY_SNI=max.ru TARGET_LABEL=fixture
+source "$bundle/scripts/target-contract.sh"
+normalized_status=$(ufw status)
+[[ $normalized_status == 'Status: inactive' ]] || {
+  printf 'ERROR: UFW locale normalization failed; actual=%q\n' "$normalized_status" >&2
+  exit 1
+}
+printf 'UFW_INHERITED_LANGUAGE_NORMALIZED_OK=1\n'
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 ufw default deny routed >/dev/null
