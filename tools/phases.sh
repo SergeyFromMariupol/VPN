@@ -104,8 +104,8 @@ phase() (
   else
     command_status=$?
     if declare -F installer_progress_end >/dev/null; then installer_progress_end "$name" 1 || :; fi
-    printf 'Этап %s остановлен (код %s). Закрытый журнал: %s/%s.log\nПосле диагностики: bash /opt/vpn-installer/install.sh --resume\n' \
-      "$name" "$command_status" "$state" "$name" >&2
+    printf '\nУстановка остановлена на этапе «%s» (код %s).\nЖурнал этапа: %s/%s.log\n' \
+      "$display_name" "$command_status" "$state" "$name" >&2
     return 1
   fi
 )
