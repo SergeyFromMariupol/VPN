@@ -72,6 +72,7 @@ jobs:
           "$RUNNER_TEMP/vpn-certbot/bin/python" -m pip check
           "$RUNNER_TEMP/vpn-certbot/bin/python" -I bundle/base/verify-certbot.py bundle/base/certbot-requirements.txt "$RUNNER_TEMP/vpn-certbot"
           "$RUNNER_TEMP/vpn-certbot/bin/certbot" --version
+          VPN_TEST_LOCKED_CERTBOT=1 "$RUNNER_TEMP/vpn-certbot/bin/python" -I bundle/base/test_certbot_registration.py -v
           "$RUNNER_TEMP/vpn-certbot/bin/certbot" --help all > "$RUNNER_TEMP/certbot-help.txt"
           grep -F -- '--ip-address' "$RUNNER_TEMP/certbot-help.txt"
           grep -F -- '--required-profile' "$RUNNER_TEMP/certbot-help.txt"

@@ -12,6 +12,15 @@ acme_identifier_arguments() {
   esac
 }
 
+acme_contact_arguments() {
+  local email=${ACME_EMAIL:-}
+  [[ -z $email || $email =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || return 1
+  # Certbot 5.9.0 asks when email is None, but accepts an explicit empty string
+  # and normalizes it to None in client.register before creating the account.
+  # Keep the empty argv element; no hidden registration flag is needed.
+  acme_contact=(--email "$email" --no-eff-email)
+}
+
 acme_verify_issued_certificate() {
   local lineage=$1 trust_path=${2:-/etc/ssl/certs} minimum_validity
   local certificate_public_key private_public_key
