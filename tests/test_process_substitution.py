@@ -150,7 +150,7 @@ class ProcessSubstitution(unittest.TestCase):
     def test_raw_fd_help_uses_no_archive_or_installer_lock(self):
         result, events, locked = self.startup('--help')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('interactive installation', result.stdout)
+        self.assertIn('Новая установка:', result.stdout)
         self.assertEqual(events, ['RAW'])
         self.assertFalse(locked)
 

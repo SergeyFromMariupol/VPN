@@ -7,16 +7,50 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.3'
+readonly release='v1.2.4'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
 mode=${1:-install}
-case "$mode" in install|--resume|--show-access|--verify|--help) ;; *) printf 'Unknown argument\n' >&2; exit 2;; esac
+case "$mode" in install|--resume|--show-access|--verify|--help) ;; *)
+  printf '%s\n' 'Неизвестный параметр запуска.' '' 'Справка — скопируйте и выполните команду целиком:' '' \
+    'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --help' >&2
+  exit 2;;
+esac
 if [[ $mode == --help ]]; then
-  printf '%s\n' 'VPN — Ubuntu 24.04 amd64' 'bash install.sh                 interactive installation' 'bash install.sh --resume        resume completed installation phases' 'bash install.sh --show-access   show panel/subscription credentials' 'bash install.sh --verify        verify the installed server'
+  printf '%s\n' 'VPN — Ubuntu 24.04 amd64' '' \
+    'Новая установка:' '' \
+    'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh)' '' \
+    'Продолжить прерванную установку:' '' \
+    'bash /opt/vpn-installer/install.sh --resume' '' \
+    'Показать данные панели и ссылку подписки:' '' \
+    'bash /opt/vpn-installer/install.sh --show-access' '' \
+    'Проверить установленный VPN:' '' \
+    'bash /opt/vpn-installer/install.sh --verify'
   exit 0
 fi
+
+installer_resume_hint_shown=0
+installer_resume_hint() {
+  installer_resume_hint_shown=1
+  printf '\nСкопируйте и выполните команду целиком, чтобы продолжить установку:\n\nbash %q --resume\n\n' \
+    "$destination/install.sh" >&2 || :
+}
+
+installer_resume_ready() {
+  local path permissions
+  for path in "$state" "$destination"; do
+    [[ -d $path && ! -L $path && $(stat -c '%u:%g:%a' "$path" 2>/dev/null) == 0:0:700 ]] || return 1
+  done
+  [[ -f $target_file && ! -L $target_file &&
+     $(stat -c '%u:%g:%a:%h' "$target_file" 2>/dev/null) == 0:0:600:1 ]] || return 1
+  path="$destination/install.sh"
+  [[ -f $path && ! -L $path && $(stat -c '%u:%h' "$path" 2>/dev/null) == 0:1 ]] || return 1
+  permissions=$(stat -c %a "$path" 2>/dev/null) || return 1
+  [[ $permissions =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$permissions & 8#022) == 0 ))
+}
+
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 [[ $EUID == 0 ]] || die 'Запустите от root: sudo bash install.sh'
 if [[ $mode == --show-access ]]; then
@@ -65,6 +99,11 @@ cleanup() {
     cleanup_installation_bootstrap || { ((rc)) || rc=1; }
   fi
   rm -rf -- "$task_stage"
+  # Recovery guidance must not alter the original failure/signal result. Before
+  # bootstrap commits durable source/settings there is nothing safe to resume.
+  if ((rc != 0 && installer_resume_hint_shown == 0)) && installer_resume_ready; then
+    installer_resume_hint
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -138,7 +177,11 @@ if [[ $mode == --resume ]]; then
   [[ -f $destination/SHA256SUMS ]] || die 'Отсутствует установленный bundle'
   (cd -- "$destination"; sha256sum --check --strict SHA256SUMS >/dev/null)
 else
-  [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
+  if [[ -e $state || -L $state || -e $destination || -L $destination || -e $target_file || -L $target_file ]]; then
+    printf 'Обнаружена предыдущая установка VPN.\n' >&2
+    installer_resume_hint
+    exit 1
+  fi
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
   source "$source_dir/tools/wizard.sh"
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
@@ -198,6 +241,6 @@ phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-
 phase --always verify bash "$destination/tools/verify.sh"
 printf '\nVPN установлен. Сохраните данные:\n\n'
 cat /etc/krysyuk-standalone/access.env
-printf '\nПовторный вывод: bash /opt/vpn-installer/install.sh --show-access\n'
-printf 'После reboot: bash /opt/vpn-installer/install.sh --verify\n'
+printf '\nЧтобы снова показать эти данные, выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --show-access\n'
+printf '\nДля проверки VPN после перезагрузки выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --verify\n\n'
 printf 'Проверку скорости и импорт в приложения выполните со своего подключения.\n'
