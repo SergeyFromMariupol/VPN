@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.6'
+readonly release='v1.2.7'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -17,6 +17,15 @@ case "$mode" in install|--resume|--show-access|--verify|--diagnose|--help) ;; *)
     'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --help' >&2
   exit 2;;
 esac
+
+installer_success() {
+  local green='' reset=''
+  if [[ -t 1 && ${TERM:-dumb} != dumb && -z ${NO_COLOR+x} ]]; then
+    green=$'\033[1;32m' reset=$'\033[0m'
+  fi
+  printf '\n%s✓ %s%s\n' "$green" "$1" "$reset"
+}
+
 if [[ $mode == --help ]]; then
   printf '%s\n' 'VPN — Ubuntu 24.04 amd64' '' \
     'Новая установка:' '' \
@@ -275,7 +284,7 @@ if [[ $mode == --verify ]]; then
   fi
   installer_error_context verify "$state/verify-command.log"
   bash "$destination/tools/verify.sh" >"$state/verify-command.log" 2>&1
-  printf 'Проверка установленного VPN пройдена.\n'
+  installer_success 'Проверка установленного VPN пройдена.'
   exit 0
 fi
 if [[ $mode == --resume ]]; then
@@ -374,7 +383,8 @@ fi
 # Always recheck live state, including a resume after a later phase failed.
 installer_error_context verify "$state/verify.log"
 phase --always verify bash "$destination/tools/verify.sh"
-printf '\nVPN установлен. Сохраните данные:\n\n'
+installer_success 'VPN успешно установлен!'
+printf '\nСохраните данные доступа:\n\n'
 cat /etc/krysyuk-standalone/access.env
 printf '\nЧтобы снова показать эти данные, выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --show-access\n'
 printf '\nДля проверки VPN после перезагрузки выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --verify\n\n'
