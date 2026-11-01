@@ -45,10 +45,7 @@ if [[ ${TARGET_ADDRESS_MODE:-domain} == domain ]]; then
     [[ -z $(awk '!/^;/ && NF {print}' <<<"$aaaa_answer") ]] || exit 1
   done
 fi
-[[ ${ACME_EMAIL:-} =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || {
-  printf 'ERROR: your ACME_EMAIL is required\n' >&2; exit 1;
-}
-contact=(--email "$ACME_EMAIL")
+acme_contact_arguments || { printf 'ERROR: invalid optional ACME_EMAIL\n' >&2; exit 1; }
 [[ $mode == apply ]] || { printf 'ACME_PREFLIGHT_OK=1\n'; exit 0; }
 lineage="/etc/letsencrypt/live/$TARGET_FQDN"
 [[ ! -e $lineage && ! -L $lineage ]] || { printf 'ERROR: existing certificate requires reviewed renewal\n' >&2; exit 1; }
@@ -105,7 +102,7 @@ tar --acls --xattrs --numeric-owner -cpf "$snapshot/letsencrypt-before.tar" -C /
 tar -tf "$snapshot/letsencrypt-before.tar" >/dev/null
 (cd -- "$snapshot"; sha256sum -- *.before letsencrypt-before.tar >SHA256SUMS; sha256sum -c SHA256SUMS >/dev/null)
 snapshot_ready=1
-/opt/vpn-certbot/bin/certbot certonly --standalone --non-interactive --agree-tos "${contact[@]}" \
+/opt/vpn-certbot/bin/certbot certonly --standalone --non-interactive --agree-tos "${acme_contact[@]}" \
   --server https://acme-v02.api.letsencrypt.org/directory \
   --preferred-challenges http --http-01-address "$TARGET_IPV4" "${acme_identifiers[@]}"
 acme_verify_issued_certificate "$lineage"

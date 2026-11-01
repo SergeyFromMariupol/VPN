@@ -49,6 +49,45 @@ class IdentifierArguments(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class ContactArguments(unittest.TestCase):
+    def run_arguments(self, email=None):
+        bash = os.environ.get("VPN_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("Bash is required for shell argument fixtures")
+        environment = dict(os.environ)
+        if email is None:
+            environment.pop('ACME_EMAIL', None)
+        else:
+            environment['ACME_EMAIL'] = email
+        result = subprocess.run(
+            [bash, "-c", 'source "$1"; '
+             'acme_contact_arguments || exit; printf "%s\\0" "${acme_contact[@]}"',
+             "--", (BASE / "acme-identifiers.sh").as_posix()],
+            env=environment, capture_output=True, check=False,
+        )
+        return result, result.stdout.decode().rstrip("\0").split("\0")
+
+    def test_empty_or_unset_email_is_an_explicit_empty_argv_element(self):
+        for email in (None, ""):
+            with self.subTest(email=email):
+                result, arguments = self.run_arguments(email)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(arguments, ["--email", "", "--no-eff-email"])
+
+    def test_given_email_is_preserved_and_never_shared_with_eff(self):
+        email = "Admin+vpn@example.org"
+        result, arguments = self.run_arguments(email)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments, ["--email", email, "--no-eff-email"])
+
+    def test_malformed_nonempty_email_is_rejected(self):
+        for email in ("not-email", "owner@example.org\nother@example.org", " ",
+                      "owner@example.org;id", "owner@example.org "):
+            with self.subTest(email=email):
+                result, _ = self.run_arguments(email)
+                self.assertNotEqual(result.returncode, 0)
+
+
 class IssuedCertificateIdentity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

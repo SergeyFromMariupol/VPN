@@ -15,6 +15,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+SSH_CONNECTION = '198.51.100.4 45000 8.8.4.4 2222'
 
 # Run the PTY parent as root as well: it must inspect the root0700 state that
 # the real bootstrap publishes, and remove only its private fixture afterwards.
@@ -131,7 +132,10 @@ apt-get upgrade -y --no-remove
         executable(source / 'bundle' / relative, body)
     executable(source / 'bundle/scripts/finalize-xhttp.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
-    executable(source / 'tools/verify.sh', shell + 'printf "PHASE:verify\\n" >>"$FIXTURE_ROOT/events"\n')
+    executable(source / 'tools/verify.sh', shell + '''
+printf 'PHASE:verify\\n' >>"$FIXTURE_ROOT/events"
+"$FIXTURE_PYTHON" -I -c 'import json,os,pathlib;pathlib.Path(os.environ["FIXTURE_ROOT"],"verify-inputs.json").write_text(json.dumps({k:v for k,v in os.environ.items() if k.startswith("TARGET_") or k=="ACME_EMAIL"}))'
+''')
     # The test changes only its private copy. Recompute its actual source
     # manifest so bootstrap and resume exercise real checksum verification.
     manifest = source / 'SHA256SUMS'
@@ -149,6 +153,7 @@ def environment():
         env['SSH_CONNECTION'] = settings['ssh_connection']
     if 'no_color' in settings:
         env['NO_COLOR'] = settings['no_color']
+    env.update(settings.get('caller_inputs', {}))
     return env
 
 def questionnaire_steps():
@@ -160,10 +165,6 @@ def questionnaire_steps():
     if menu[-1] == '2':
         steps.extend(('Домен VPN:', value) for value in
                      settings.get('domain_answers', [settings.get('domain', 'vpn.example.com')]))
-    steps.extend([('Ваш email', 'admin@example.com'),
-                  ('Начало названий', settings.get('label', 'Fixture VPN')),
-                  ('REALITY SNI', settings.get('sni', 'example.org')),
-                  ('Лимит IP', settings.get('limit', '0'))])
     for index, value in settings.get('override', {}).items():
         marker, _ = steps[int(index)]
         steps[int(index)] = (marker, value)
@@ -228,6 +229,16 @@ try:
     if (root / 'phase-inputs.json').exists():
         phase_inputs = json.loads((root / 'phase-inputs.json').read_text())
     if settings.get('resume') and code == 0:
+        if settings.get('saved_resume_inputs'):
+            # Model an existing installation with earlier saved parameters.
+            # Fresh defaults must never replace these on --resume.
+            text = target.read_text()
+            for key, value in settings['saved_resume_inputs'].items():
+                assert key in ('ACME_EMAIL', 'TARGET_LABEL', 'TARGET_REALITY_SNI', 'TARGET_DEVICE_LIMIT')
+                text, replaced = re.subn('^' + key + '=.*$',
+                                         lambda match: key + '=' + shlex.quote(value), text, flags=re.M)
+                assert replaced == 1
+            target.write_text(text)
         before = target.read_bytes()
         before_events = len(observed)
         env = environment()
@@ -236,9 +247,11 @@ try:
         child = subprocess.run(['/bin/bash', str(installed / 'install.sh'), '--resume'],
                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                start_new_session=True, timeout=30)
+        verify_inputs = json.loads((root / 'verify-inputs.json').read_text())
         resume = {'exit': child.returncode, 'output': (child.stdout + child.stderr).decode(),
                   'events': events.read_text().splitlines()[before_events:],
-                  'target_unchanged': target.read_bytes() == before}
+                  'target_unchanged': target.read_bytes() == before,
+                  'phase_inputs': verify_inputs}
     print(json.dumps({'exit': code, 'output': output, 'events': observed,
                       'persisted': persisted, 'phase_inputs': phase_inputs,
                       'managed': [installed.exists(), state.exists(), target.exists()],
@@ -252,7 +265,7 @@ finally:
         else: path.unlink()
     for path in root.glob('task.*'):
         if path.is_dir(): shutil.rmtree(path)
-    for path in (target, root / 'phase-inputs.json'):
+    for path in (target, root / 'phase-inputs.json', root / 'verify-inputs.json'):
         path.unlink(missing_ok=True)
 """
 
@@ -286,41 +299,54 @@ class QuestionnaireFlow(unittest.TestCase):
                                                'UNEXPECTED_MUTATION', 'NETWORK'))
                              for event in result['events']), result['events'])
 
+    def assert_wizard_labels_and_no_ip(self, result):
+        plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', result['output'])
+        self.assertIn('[Установка]', plain)
+        wizard = plain.split('[Установка]', 1)[0]
+        labels = [line.strip() for line in wizard.splitlines()]
+        self.assertIn('1. По IP-адресу', labels)
+        self.assertIn('2. По доменному имени', labels)
+        self.assertNotRegex(wizard, r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
+        for removed in ('Ваш email', 'Начало названий', 'REALITY SNI [',
+                        'Лимит IP', 'Установить VPN', 'Проверьте параметры перед запуском:'):
+            self.assertNotIn(removed, wizard)
+
     def test_eof_at_each_question_publishes_nothing(self):
-        for index in range(7):
+        # Console: port, mode, domain. SSH mode omits the port question.
+        for index in range(3):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
+        self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
+                                             address_choice='1', eof=0))
 
     def test_invalid_answers_never_bootstrap_or_start_a_phase(self):
-        # The complete validator's field matrix is covered by test_installer;
-        # here representative early, middle and last answers exercise the flow.
-        for index, value in ((0, '8444'), (2, 'bad;name.example'),
-                             (3, 'not-email'), (6, '-1')):
+        for index, value in ((0, '8444'), (2, 'bad;name.example')):
             with self.subTest(field=index):
                 self.assert_unpublished(self.fixture(override={str(index): value}))
 
-    def test_literal_answers_are_saved_before_phase_and_resume_never_prompts(self):
-        label = 'Мой "VPN" \'friend\' $HOME `literal` \\ 🇫🇷'
-        result = self.fixture(label=label, resume=True, term='xterm-256color')
+    def test_one_ssh_choice_starts_defaults_and_resume_preserves_saved_parameters(self):
+        injected = dict(ACME_EMAIL='caller@example.invalid', TARGET_LABEL='Caller VPN',
+                        TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99')
+        saved = dict(ACME_EMAIL='legacy@example.com', TARGET_LABEL='Старый VPN',
+                     TARGET_REALITY_SNI='example.net', TARGET_DEVICE_LIMIT='17')
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='', resume=True,
+                              term='xterm-256color', caller_inputs=injected, saved_resume_inputs=saved)
         self.assertEqual(result['exit'], 0, result['output'])
-        expected = dict(TARGET_ADDRESS_MODE='domain', TARGET_IPV4='8.8.4.4',
-                        TARGET_FQDN='vpn.example.com', TARGET_INTERFACE='enp1s0',
+        self.assert_wizard_labels_and_no_ip(result)
+        expected = dict(TARGET_ADDRESS_MODE='ip', TARGET_IPV4='8.8.4.4',
+                        TARGET_FQDN='8.8.4.4', TARGET_INTERFACE='enp1s0',
                         TARGET_SSH_PORT='2222', TARGET_DEVICE_LIMIT='0',
-                        TARGET_REALITY_SNI='example.org', TARGET_LABEL=label,
-                        ACME_EMAIL='admin@example.com')
+                        TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='')
         self.assertEqual(result['persisted'], expected)
         self.assertEqual({key: result['phase_inputs'].get(key) for key in expected}, expected)
         events = result['events']
-        self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(7)])
-        self.assertLess(events.index('ANSWER:6'), events.index('INPUT_VALIDATION'))
+        self.assertEqual([event for event in events if event.startswith('ANSWER:')], ['ANSWER:0'])
+        self.assertLess(events.index('ANSWER:0'), events.index('INPUT_VALIDATION'))
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('FULL_PREFLIGHT'))
         self.assertLess(events.index('FULL_PREFLIGHT'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('PHASE:base'))
         self.assertLess(events.index('PHASE:base'), events.index('APT:update'))
         self.assertIn('BASE_STDIN_EOF', events)
-        self.assertNotIn('Установить VPN', result['output'])
-        self.assertNotIn('Проверьте параметры перед запуском:', result['output'])
         self.assertIn('\x1b[', result['output'])
         self.assertIn('VPN', result['output'])
         self.assertRegex(result['output'], r'3X-?UI')
@@ -330,27 +356,34 @@ class QuestionnaireFlow(unittest.TestCase):
         resumed = result['resume']
         self.assertEqual(resumed['exit'], 0, resumed['output'])
         self.assertTrue(resumed['target_unchanged'])
+        self.assertEqual({key: resumed['phase_inputs'].get(key) for key in saved}, saved)
         self.assertEqual(resumed['events'], ['PHASE:verify'])
         self.assertNotIn('Установить VPN', resumed['output'])
         self.assertNotIn('Домен VPN', resumed['output'])
         self.assertNotIn('Выберите вариант', resumed['output'])
         self.assertNotIn('\x1b[', resumed['output'])
 
-    def test_ip_choice_and_blank_defaults_skip_domain_question(self):
-        for choice in ('1', ''):
-            with self.subTest(choice=choice):
-                result = self.fixture(address_choice=choice, port='', label='', sni='', limit='')
+    def test_domain_name_and_console_port_are_the_only_extra_questions(self):
+        for domain in (True, False):
+            with self.subTest(domain=domain):
+                values = (dict(ssh_connection=SSH_CONNECTION, address_choice='2') if domain
+                          else dict(address_choice='1', port=''))
+                result = self.fixture(**values)
                 self.assertEqual(result['exit'], 0, result['output'])
-                self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'ip')
-                self.assertEqual(result['persisted']['TARGET_FQDN'], '8.8.4.4')
-                self.assertEqual(result['persisted']['TARGET_SSH_PORT'], '22')
-                self.assertEqual(result['persisted']['TARGET_LABEL'], '🇩🇪 Германия')
+                self.assert_wizard_labels_and_no_ip(result)
+                self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain' if domain else 'ip')
+                self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com' if domain else '8.8.4.4')
+                self.assertEqual(result['persisted']['TARGET_SSH_PORT'], '2222' if domain else '22')
+                self.assertEqual(result['persisted']['TARGET_LABEL'], 'Мой VPN')
                 self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'max.ru')
                 self.assertEqual(result['persisted']['TARGET_DEVICE_LIMIT'], '0')
-                self.assertEqual(result['phase_inputs']['TARGET_ADDRESS_MODE'], 'ip')
+                self.assertEqual(result['persisted']['ACME_EMAIL'], '')
+                self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:' + str(index) for index in range(6)])
-                self.assertNotIn('Домен VPN:', result['output'])
+                                 ['ANSWER:0', 'ANSWER:1'])
+                self.assertEqual('Домен VPN:' in result['output'], domain)
+                self.assertEqual('SSH порт [22]' in result['output'], not domain)
+                self.assertLess(result['events'].index('ANSWER:1'), result['events'].index('FULL_PREFLIGHT'))
                 self.assertNotIn('\x1b[', result['output'])
 
     def test_invalid_menu_retries_and_eof_cannot_start_installation(self):
@@ -359,26 +392,15 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
         self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
         self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
-        self.assertLess(result['events'].index('ANSWER:8'), result['events'].index('FULL_PREFLIGHT'))
+        self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('FULL_PREFLIGHT'))
         self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
         self.assert_unpublished(self.fixture(domain_answers=['', None]))
 
     def test_no_color_disables_ansi_even_in_color_capable_pty(self):
-        result = self.fixture(address_choice='1', term='xterm-256color', no_color='')
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              term='xterm-256color', no_color='')
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertNotIn('\x1b[', result['output'])
-
-    def test_ssh_connection_supplies_port_and_leaves_only_five_answers(self):
-        result = self.fixture(ssh_connection='198.51.100.4 45000 8.8.4.4 2222', address_choice='1')
-        self.assertEqual(result['exit'], 0, result['output'])
-        self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(5)])
-        self.assertEqual(result['persisted']['TARGET_IPV4'], '8.8.4.4')
-        self.assertEqual(result['persisted']['TARGET_SSH_PORT'], '2222')
-        self.assertEqual(result['phase_inputs']['TARGET_SSH_PORT'], '2222')
-        self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('FULL_PREFLIGHT'))
-        self.assertNotIn('SSH порт [22]', result['output'])
-        self.assertNotIn('Установить VPN', result['output'])
 
 
 if __name__ == '__main__':

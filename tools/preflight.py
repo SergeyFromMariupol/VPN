@@ -171,7 +171,7 @@ def validate_inputs(env: dict) -> None:
         raise ValueError('SSH port conflicts with VPN services')
     if not re.fullmatch(r'0|[1-9][0-9]{0,3}|10000', env['TARGET_DEVICE_LIMIT']):
         raise ValueError('Invalid device limit')
-    if not re.fullmatch(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', env['ACME_EMAIL']):
+    if env['ACME_EMAIL'] and not re.fullmatch(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', env['ACME_EMAIL']):
         raise ValueError('Invalid ACME email')
     label = env['TARGET_LABEL']
     if not 1 <= len(label) <= 80 or any(unicodedata.category(c) == 'Cc' or c in '\u2028\u2029' for c in label):
