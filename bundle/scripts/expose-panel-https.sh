@@ -49,7 +49,7 @@ while (($#)); do
 done
 
 [[ "$EUID" -eq 0 ]] || die 'root is required'
-for command_name in awk cp curl date dirname dpkg-query find grep install ip \
+for command_name in awk cat cmp cp curl date dirname dpkg-query find grep install ip \
   mktemp nft nginx openssl python3 rm sed sha256sum sqlite3 ss stat systemctl tar ufw; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
 done
@@ -141,22 +141,48 @@ stage=$(mktemp -d -p /run panel-public.XXXXXXXX)
 committed=0
 failure_line='unknown'
 transaction_exit() {
-  local status=$?
-  trap - EXIT INT TERM HUP
-  rm -rf -- "$stage" >/dev/null 2>&1 || true
+  local status=$? rollback_ok=1 nginx_quiesced=1 enabled_after='' unit_state=''
+  trap - EXIT ERR INT TERM HUP
+  set +e
+  rm -rf -- "$stage" >/dev/null 2>&1 || rollback_ok=0
   if ((status != 0 && committed == 0)); then
     printf 'Public panel transaction failed at line %s; restoring snapshot.\n' "$failure_line" >&2
-    systemctl disable --now nginx.service >/dev/null 2>&1 || true
-    rm -f -- "$renew_hook" "$nginx_config"
-    install -o root -g root -m 0600 "$backup/access.env" "$access_file"
-    install -o root -g root -m 0640 "$backup/ufw.user.rules" /etc/ufw/user.rules
-    install -o root -g root -m 0640 "$backup/ufw.user6.rules" /etc/ufw/user6.rules
-    ufw reload >/dev/null 2>&1 || true
-    systemctl unmask nginx.service >/dev/null 2>&1 || true
-    tar --acls --xattrs --numeric-owner -xpf "$backup/nginx-before.tar" -C /
-    if grep -Fxq enabled "$backup/nginx-enabled-before.txt"; then systemctl enable nginx.service >/dev/null 2>&1 || true; fi
-    systemctl daemon-reload >/dev/null 2>&1 || true
+    if ! systemctl disable --now nginx.service >/dev/null 2>&1; then
+      nginx_quiesced=0
+    fi
+    if unit_state=$(systemctl show nginx.service -p LoadState -p ActiveState -p MainPID 2>/dev/null); then
+      unit_state=$'\n'"$unit_state"$'\n'
+      [[ $unit_state == *$'\nLoadState=loaded\n'* &&
+         $unit_state == *$'\nActiveState=inactive\n'* &&
+         $unit_state == *$'\nMainPID=0\n'* ]] || nginx_quiesced=0
+    else nginx_quiesced=0; fi
+    ((nginx_quiesced)) || rollback_ok=0
+    if ((nginx_quiesced)); then
+      rm -f -- "$renew_hook" "$nginx_config" || rollback_ok=0
+      systemctl unmask nginx.service >/dev/null 2>&1 || rollback_ok=0
+      tar --acls --xattrs --numeric-owner -xpf "$backup/nginx-before.tar" -C / || rollback_ok=0
+      if grep -Fxq enabled "$backup/nginx-enabled-before.txt"; then
+        systemctl enable nginx.service >/dev/null 2>&1 || rollback_ok=0
+      fi
+      systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
+      enabled_after=$(systemctl is-enabled nginx.service 2>/dev/null)
+      [[ $enabled_after == "$(cat "$backup/nginx-enabled-before.txt")" ]] || rollback_ok=0
+      [[ ! -e $nginx_config && ! -L $nginx_config && ! -e $renew_hook && ! -L $renew_hook ]] || rollback_ok=0
+    else
+      printf 'PANEL_ROLLBACK_NGINX_RESOURCES_RETAINED=1\n' >&2
+    fi
+    # These independent restorations must still run if an earlier command
+    # failed. Never let errexit abandon the firewall/access recovery midway.
+    install -o root -g root -m 0600 "$backup/access.env" "$access_file" || rollback_ok=0
+    install -o root -g root -m 0640 "$backup/ufw.user.rules" /etc/ufw/user.rules || rollback_ok=0
+    install -o root -g root -m 0640 "$backup/ufw.user6.rules" /etc/ufw/user6.rules || rollback_ok=0
+    ufw reload >/dev/null 2>&1 || rollback_ok=0
+    cmp -s "$backup/access.env" "$access_file" || rollback_ok=0
+    cmp -s "$backup/ufw.user.rules" /etc/ufw/user.rules || rollback_ok=0
+    cmp -s "$backup/ufw.user6.rules" /etc/ufw/user6.rules || rollback_ok=0
+    printf 'PANEL_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$backup" >&2
   fi
+  ((rollback_ok)) || status=1
   exit "$status"
 }
 trap 'failure_line=$LINENO' ERR

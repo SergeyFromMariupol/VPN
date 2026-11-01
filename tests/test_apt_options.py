@@ -34,6 +34,7 @@ class AptOptions(unittest.TestCase):
                       ('-s', 'purge', 'new-package'), ('purge', '-y', 'new-package'),
                       ('install', '-y', '--no-upgrade', '--no-remove', 'python3-venv')]
         prefix = ['noninteractive', '-o', 'DPkg::Lock::Timeout=180',
+                  '-o', 'APT::Update::Error-Mode=any',
                   '-o', 'Dpkg::Options::=--force-confdef',
                   '-o', 'Dpkg::Options::=--force-confold']
         for args in operations:

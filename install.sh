@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.4'
+readonly release='v1.1.5'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -151,20 +151,8 @@ if [[ ! -d $runtime ]]; then
 fi
 [[ ! -L $runtime && $(stat -c '%U:%G:%a' "$runtime") == root:root:700 ]] || die 'Небезопасный runtime bundle'
 (cd -- "$runtime"; sha256sum --check --strict SOURCE_SHA256SUMS >/dev/null)
-phase() {
-  local name=$1; shift
-  if [[ -f $state/$name.done ]]; then printf '✓ %s (уже завершено)\n' "$name"; return; fi
-  printf '\n→ %s\n' "$name"
-  # Private phase logs may contain intermediate paths or application output.
-  # Never print their contents automatically after a failure.
-  if "$@" >"$state/$name.log" 2>&1; then
-    date -u +%FT%TZ >"$state/$name.done"
-    printf '✓ %s\n' "$name"
-  else
-    printf 'Этап %s остановлен. Закрытый журнал: %s/%s.log\nПосле диагностики: bash /opt/vpn-installer/install.sh --resume\n' "$name" "$state" "$name" >&2
-    exit 1
-  fi
-}
+# A foreground worker owns both the child result and atomic phase checkpoint.
+source "$destination/tools/phases.sh"
 phase base bash "$runtime/base/install-pinned-base.sh" --apply
 phase certbot bash "$runtime/base/install-certbot.sh" --apply
 bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log" 2>&1
@@ -186,11 +174,7 @@ fi
 # should run its one acceptance renewal immediately.
 phase renewal certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew
 # Always recheck live state, including a resume after a later phase failed.
-printf '\n→ verify\n'
-if ! bash "$destination/tools/verify.sh" >"$state/verify.log" 2>&1; then
-  die "Проверка сервера остановлена; закрытый журнал $state/verify.log"
-fi
-date -u +%FT%TZ >"$state/verify.done"
+phase --always verify bash "$destination/tools/verify.sh"
 printf '\nVPN установлен. Сохраните данные:\n\n'
 cat /etc/krysyuk-standalone/access.env
 printf '\nПовторный вывод: bash /opt/vpn-installer/install.sh --show-access\n'

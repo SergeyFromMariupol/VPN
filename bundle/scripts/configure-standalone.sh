@@ -70,7 +70,7 @@ done
 
 [[ "$EUID" -eq 0 ]] || die 'root is required'
 
-for command_name in basename bash certbot chmod chown cp curl dig dirname find \
+for command_name in basename bash certbot chmod chown cmp cp curl dig dirname find \
   grep install ip jq mktemp nft openssl pgrep ps python3 readlink rm runuser sed seq sha256sum \
   sleep sort sqlite3 ss stat systemctl systemd-analyze tar timeout tr ufw uuidgen; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
@@ -179,30 +179,57 @@ printf 'SNAPSHOT=%s\n' "$backup"
 stage=''
 failure_line='unknown'
 transaction_exit() {
-  local status=$?
-  trap - EXIT INT TERM HUP
+  local status=$? rollback_ok=1 xui_quiesced=1 db_uid='' db_gid='' db_mode='' unit_state=''
+  trap - EXIT ERR INT TERM HUP
+  set +e
   if [[ -n "$stage" && -d "$stage" ]]; then
-    rm -rf -- "$stage" >/dev/null 2>&1 || true
+    rm -rf -- "$stage" >/dev/null 2>&1 || rollback_ok=0
   fi
   if ((status != 0)); then
     printf 'Provisioning failure line: %s\n' "$failure_line" >&2
     printf 'Provisioning failed; restoring clean x-ui/UFW state from %s\n' "$backup" >&2
-    systemctl stop x-ui.service >/dev/null 2>&1 || true
-    rm -rf -- /etc/systemd/system/x-ui.service.d "$runtime_root" "$decoy_root"
-    rm -f -- "$renew_hook"
-    rm -rf -- /etc/x-ui /usr/local/x-ui /var/lib/x-ui /var/log/x-ui
-    tar --acls --xattrs --numeric-owner -xpf "$backup/xui-trees.tar" -C /
-    install -o root -g root -m 0644 "$backup/x-ui.service" /etc/systemd/system/x-ui.service
-    IFS=: read -r db_uid db_gid db_mode <"$backup/x-ui.db.meta"
-    install -o "$db_uid" -g "$db_gid" -m "$db_mode" "$backup/x-ui.db" /etc/x-ui/x-ui.db
-    install -o root -g root -m 0644 "$backup/ufw.default" /etc/default/ufw
-    install -o root -g root -m 0640 "$backup/ufw.user.rules" /etc/ufw/user.rules
-    install -o root -g root -m 0640 "$backup/ufw.user6.rules" /etc/ufw/user6.rules
-    ufw --force disable >/dev/null 2>&1 || true
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed x-ui.service >/dev/null 2>&1 || true
-    sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' >/dev/null 2>&1 || true
+    if ! systemctl stop x-ui.service >/dev/null 2>&1; then
+      xui_quiesced=0
+    fi
+    if unit_state=$(systemctl show x-ui.service -p LoadState -p ActiveState -p MainPID 2>/dev/null); then
+      unit_state=$'\n'"$unit_state"$'\n'
+      [[ $unit_state == *$'\nLoadState=loaded\n'* &&
+         $unit_state == *$'\nActiveState=inactive\n'* &&
+         $unit_state == *$'\nMainPID=0\n'* ]] || xui_quiesced=0
+    else xui_quiesced=0; fi
+    ((xui_quiesced)) || rollback_ok=0
+    if ((xui_quiesced)); then
+      rm -rf -- /etc/systemd/system/x-ui.service.d "$runtime_root" "$decoy_root" || rollback_ok=0
+      rm -f -- "$renew_hook" || rollback_ok=0
+      rm -rf -- /etc/x-ui /usr/local/x-ui /var/lib/x-ui /var/log/x-ui || rollback_ok=0
+      tar --acls --xattrs --numeric-owner -xpf "$backup/xui-trees.tar" -C / || rollback_ok=0
+      install -o root -g root -m 0644 "$backup/x-ui.service" /etc/systemd/system/x-ui.service || rollback_ok=0
+      if IFS=: read -r db_uid db_gid db_mode <"$backup/x-ui.db.meta" &&
+         [[ $db_uid =~ ^[0-9]+$ && $db_gid =~ ^[0-9]+$ && $db_mode =~ ^[0-7]{3,4}$ ]]; then
+        install -o "$db_uid" -g "$db_gid" -m "$db_mode" "$backup/x-ui.db" /etc/x-ui/x-ui.db || rollback_ok=0
+      else rollback_ok=0; fi
+      install -o root -g root -m 0644 "$backup/ufw.default" /etc/default/ufw || rollback_ok=0
+      install -o root -g root -m 0640 "$backup/ufw.user.rules" /etc/ufw/user.rules || rollback_ok=0
+      install -o root -g root -m 0640 "$backup/ufw.user6.rules" /etc/ufw/user6.rules || rollback_ok=0
+      ufw --force disable >/dev/null 2>&1 || rollback_ok=0
+      systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
+      systemctl reset-failed x-ui.service >/dev/null 2>&1 || rollback_ok=0
+      [[ $(sqlite3 -readonly /etc/x-ui/x-ui.db 'PRAGMA quick_check;' 2>/dev/null) == ok ]] || rollback_ok=0
+      [[ $(sqlite3 -readonly /etc/x-ui/x-ui.db 'SELECT count(*) FROM inbounds;' 2>/dev/null) == 0 ]] || rollback_ok=0
+      cmp -s "$backup/x-ui.service" /etc/systemd/system/x-ui.service || rollback_ok=0
+      cmp -s "$backup/ufw.default" /etc/default/ufw || rollback_ok=0
+      cmp -s "$backup/ufw.user.rules" /etc/ufw/user.rules || rollback_ok=0
+      cmp -s "$backup/ufw.user6.rules" /etc/ufw/user6.rules || rollback_ok=0
+      [[ $(ufw status 2>/dev/null | sed -n '1p') == 'Status: inactive' ]] || rollback_ok=0
+    else
+      # Replacing SQLite/config files under a still-running x-ui is unsafe.
+      # Keep its data and current firewall until the protected snapshot can
+      # be restored after the service has really stopped.
+      printf 'STANDALONE_ROLLBACK_RUNTIME_RETAINED=1\n' >&2
+    fi
+    printf 'STANDALONE_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$backup" >&2
   fi
+  ((rollback_ok)) || status=1
   exit "$status"
 }
 trap 'failure_line=$LINENO' ERR
@@ -328,7 +355,7 @@ jq -n \
   --arg short_id "$REALITY_SHORT_ID" '
   {
     enable:false,remark:"VPN VLESS REALITY TCP 443",listen:$ip,port:443,protocol:"vless",expiryTime:0,total:0,
-    settings:{clients:[{id:$uuid,email:"germany-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · REALITY"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
+    settings:{clients:[{id:$uuid,email:"germany-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" Р’В· REALITY"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
     streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:($target+":443"),serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:1
@@ -341,7 +368,7 @@ jq -n \
   --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" '
   {
     enable:false,remark:"VPN VLESS XHTTP TLS 8443",listen:$ip,port:8443,protocol:"vless",expiryTime:0,total:0,
-    settings:{clients:[{id:$uuid,email:"germany-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · XHTTP"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
+    settings:{clients:[{id:$uuid,email:"germany-xhttp",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" Р’В· XHTTP"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
     streamSettings:{network:"xhttp",security:"tls",xhttpSettings:{path:$path,host:$fqdn,mode:"packet-up"},tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h2"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:3
@@ -354,7 +381,7 @@ jq -n \
   --arg decoy "$decoy_root" '
   {
     enable:false,remark:"VPN Hysteria2 UDP 443",listen:$ip,port:443,protocol:"hysteria",expiryTime:0,total:0,
-    settings:{version:2,clients:[{auth:$auth,email:"germany-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" · HYSTERIA2"),reset:0}]},
+    settings:{version:2,clients:[{auth:$auth,email:"germany-hysteria2",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+" Р’В· HYSTERIA2"),reset:0}]},
     streamSettings:{network:"hysteria",hysteriaSettings:{version:2,udpIdleTimeout:60,masquerade:{type:"file",dir:$decoy,url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},security:"tls",tlsSettings:{serverName:$fqdn,minVersion:"1.2",maxVersion:"1.3",cipherSuites:"",rejectUnknownSni:(env.TARGET_ADDRESS_MODE!="ip"),disableSystemRoot:false,enableSessionResumption:true,certificates:[{certificateFile:$cert,keyFile:$key,ocspStapling:0,oneTimeLoading:false,usage:"encipherment",buildChain:false}],alpn:["h3"],echServerKeys:"",settings:{fingerprint:"chrome",echConfigList:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:2
@@ -661,9 +688,9 @@ if sorted(item.scheme for item in parsed) != ["hysteria2", "vless", "vless"]:
     raise SystemExit("subscription schemes are not exactly two VLESS plus one Hysteria2")
 comments = sorted(unquote(item.fragment) for item in parsed)
 expected_comments = sorted([
-    os.environ["TARGET_LABEL"] + " · REALITY",
-    os.environ["TARGET_LABEL"] + " · XHTTP",
-    os.environ["TARGET_LABEL"] + " · HYSTERIA2",
+    os.environ["TARGET_LABEL"] + " Р’В· REALITY",
+    os.environ["TARGET_LABEL"] + " Р’В· XHTTP",
+    os.environ["TARGET_LABEL"] + " Р’В· HYSTERIA2",
 ])
 if comments != expected_comments:
     raise SystemExit("subscription display comments are not exact")

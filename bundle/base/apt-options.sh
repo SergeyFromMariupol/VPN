@@ -6,6 +6,7 @@ vpn_apt_get() {
   # Preserve locally modified conffiles, including the working SSH config.
   DEBIAN_FRONTEND=noninteractive apt-get \
     -o DPkg::Lock::Timeout=180 \
+    -o APT::Update::Error-Mode=any \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold "$@"
 }
