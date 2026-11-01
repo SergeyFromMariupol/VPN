@@ -100,7 +100,7 @@ SSH-порт берётся из текущего подключения; при
 Если в образе нет `curl`, используйте загрузку через стандартный Python 3:
 
 ```bash
-python3 -I -c 'import pathlib,urllib.request as u; o=u.build_opener(u.ProxyHandler({}),type("NoRedirect",(u.HTTPRedirectHandler,),{"redirect_request":lambda *a,**k:None})()); pathlib.Path("/root/vpn-install.sh").write_bytes(o.open("https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.2.6/install.sh",timeout=60).read(1048576))' && bash /root/vpn-install.sh
+python3 -I -c 'import pathlib,urllib.request as u; o=u.build_opener(u.ProxyHandler({}),type("NoRedirect",(u.HTTPRedirectHandler,),{"redirect_request":lambda *a,**k:None})()); pathlib.Path("/root/vpn-install.sh").write_bytes(o.open("https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.2.7/install.sh",timeout=60).read(1048576))' && bash /root/vpn-install.sh
 ```
 
 После установки терминал покажет:
@@ -327,6 +327,10 @@ jq-фильтры и проверяют URI по независимо задан
 Регрессия проверяет настоящие блоки записи direct/dual и чтение их результата
 в обоих режимах. Другие ошибки формата по-прежнему отвергаются и получают
 отдельное пояснение вместо `UNKNOWN`.
+
+В v1.2.7 успешная установка и успешная команда `--verify` отмечаются зелёным
+заголовком с галочкой. При перенаправлении вывода, `TERM=dumb` или `NO_COLOR`
+цветовые коды не добавляются. Формат реквизитов и `--show-access` сохранён.
 
 Скорость и работу у конкретного провайдера проверяют с устройства пользователя.
 Минимум 60 Мбит/с для всех шести профилей, реальные импорты в мобильные приложения
