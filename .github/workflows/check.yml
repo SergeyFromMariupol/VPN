@@ -66,8 +66,12 @@ jobs:
           sudo install -m 0755 "$rendered"/warp-egress/scripts/*.sh /usr/local/libexec/krysyuk-warp-egress/
           sudo bash "$rendered/warp-egress/tests/test-static-assets.sh"
       - name: Validate certificate-free HTTP panel with actual Nginx
+        timeout-minutes: 5
         run: |
-          sudo apt-get install -y --no-install-recommends nginx-core
+          if ! command -v nginx >/dev/null; then
+            sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 --error-on=any update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends nginx
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import subprocess, tempfile
@@ -85,7 +89,7 @@ jobs:
               config.write_text('pid ' + str(root / 'nginx.pid') + ';\n'
                                 'error_log stderr;\nevents {}\nhttp {\n'
                                 'access_log off;\n' + template + '\n}\n')
-              subprocess.run(['nginx', '-t', '-p', str(root), '-c', str(config)], check=True)
+              subprocess.run(['sudo', 'nginx', '-t', '-p', str(root), '-c', str(config)], check=True)
           print('CERTIFICATE_FREE_NGINX_CONFIG=PASS')
           PY
       - name: Install and check pinned Certbot with IP support
