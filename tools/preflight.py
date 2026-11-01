@@ -321,7 +321,13 @@ def main() -> None:
 
 if __name__ == '__main__':
     try:
-        main()
+        if sys.argv[1:] == ['--inputs-only']:
+            validate_inputs(os.environ)
+            print('INSTALL_INPUTS=VALID')
+        elif not sys.argv[1:]:
+            main()
+        else:
+            raise ValueError('usage: preflight.py [--inputs-only]')
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as error:
         print(f'PREFLIGHT_FAILED: {error}', file=sys.stderr)
         sys.exit(1)

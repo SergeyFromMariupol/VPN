@@ -199,7 +199,7 @@ python3 -I -m venv "$VENV"
 # --isolated ignores user pip configuration. Every runtime wheel and dependency
 # is pinned with an official PyPI SHA-256; source distributions are forbidden.
 "$VENV/bin/python" -I -m pip --isolated install --index-url https://pypi.org/simple \
-  --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "$lock"
+  --no-input --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "$lock"
 "$VENV/bin/python" -I "$validator" "$lock" "$VENV"
 publish_directory "$SERVICE_DIR" service_identity
 publish_directory "$TIMER_DIR" timer_identity
