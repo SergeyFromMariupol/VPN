@@ -14,12 +14,16 @@ installer_checkpoint_valid() {
 
 phase() (
   umask 077
-  local always=0 name checkpoint marker_before='' temporary='' temporary_identity=''
+  local always=0 name display_name checkpoint marker_before='' temporary='' temporary_identity=''
   local signal_status=0 command_status
   if [[ ${1:-} == --always ]]; then always=1; shift; fi
   (($# >= 2)) || return 2
   name=$1; shift
   [[ $name =~ ^[a-z][a-z0-9-]*$ ]] || return 2
+  display_name=$name
+  if declare -F _installer_progress_label >/dev/null; then
+    display_name=$(_installer_progress_label "$name") || display_name=$name
+  fi
   checkpoint="$state/$name.done"
   phase_cleanup() {
     local status=$?
@@ -31,6 +35,7 @@ phase() (
       else status=1; fi
     fi
     ((signal_status == 0)) || status=$signal_status
+    if declare -F installer_progress_stop >/dev/null; then installer_progress_stop || :; fi
     exit "$status"
   }
   trap phase_cleanup EXIT
@@ -44,7 +49,11 @@ phase() (
       return 1
     }
     marker_before=$(stat -c '%d:%i' "$checkpoint") || return 1
-    if (( !always )); then printf '✓ %s (уже завершено)\n' "$name"; return 0; fi
+    if (( !always )); then
+      printf '✓ %s (уже завершено)\n' "$display_name"
+      if declare -F installer_progress_end >/dev/null; then installer_progress_end "$name" skip || :; fi
+      return 0
+    fi
   fi
   if [[ -e $state/$name.log || -L $state/$name.log ]]; then
     [[ -f $state/$name.log && ! -L $state/$name.log &&
@@ -60,7 +69,9 @@ phase() (
   chmod 0600 "$temporary" || return 1
   date -u +%FT%TZ >"$temporary" || return 1
   ((signal_status == 0)) || return "$signal_status"
-  printf '\n→ %s\n' "$name" || return 1
+  printf '\n→ %s\n' "$display_name" || return 1
+  ((signal_status == 0)) || return "$signal_status"
+  if declare -F installer_progress_begin >/dev/null; then installer_progress_begin "$name" || :; fi
   ((signal_status == 0)) || return "$signal_status"
   # All owner answers have been collected. An unexpected child prompt must
   # receive EOF rather than silently wait while its output is in a private log.
@@ -88,9 +99,11 @@ phase() (
     trap 'signal_status=129' HUP
     trap 'signal_status=130' INT
     trap 'signal_status=143' TERM
-    printf '✓ %s\n' "$name"
+    if declare -F installer_progress_end >/dev/null; then installer_progress_end "$name" 0 || :; fi
+    printf '✓ %s\n' "$display_name"
   else
     command_status=$?
+    if declare -F installer_progress_end >/dev/null; then installer_progress_end "$name" 1 || :; fi
     printf 'Этап %s остановлен (код %s). Закрытый журнал: %s/%s.log\nПосле диагностики: bash /opt/vpn-installer/install.sh --resume\n' \
       "$name" "$command_status" "$state" "$name" >&2
     return 1
