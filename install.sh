@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.8'
+readonly release='v1.1.9'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -138,7 +138,7 @@ else
   [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
   printf '\nШаг 1/2 — параметры VPN. Сначала ответьте на все вопросы.\n'
-  printf 'Обновление Ubuntu и установка начнутся после подтверждения.\n'
+  printf 'После последнего ответа начнутся проверка сервера, обновление Ubuntu и установка.\n'
   printf 'VPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
@@ -169,18 +169,9 @@ else
   read -r -p 'Лимит IP на профиль, 0 = без лимита [0]: ' TARGET_DEVICE_LIMIT </dev/tty
   TARGET_DEVICE_LIMIT=${TARGET_DEVICE_LIMIT:-0}
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
-  # Validate the complete questionnaire without DNS or host probes. Nothing
-  # persistent is published until the owner confirms the displayed answers.
+  # After the last answer, validate inputs and the host before publishing any
+  # persistent state. No extra confirmation or interactive gate follows.
   python3 -B "$source_dir/tools/preflight.py" --inputs-only
-  printf '\nПроверьте параметры перед запуском:\n'
-  printf 'IPv4 сервера: %s\nИнтерфейс: %s\nSSH порт: %s\n' "$TARGET_IPV4" "$TARGET_INTERFACE" "$TARGET_SSH_PORT"
-  printf 'Адрес панели и подписки: %s (режим %s)\nEmail Let’s Encrypt: %s\n' "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$ACME_EMAIL"
-  printf 'Начало названий: %s\nREALITY SNI: %s\nЛимит IP на профиль: %s (0 = без лимита)\n' "$TARGET_LABEL" "$TARGET_REALITY_SNI" "$TARGET_DEVICE_LIMIT"
-  printf 'Firewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_SSH_PORT"
-  printf 'Если в панели провайдера включён отдельный firewall, разрешите эти же порты там.\n'
-  printf 'После подтверждения обновятся пакеты Ubuntu (apt-get update/upgrade), затем установится VPN.\n'
-  read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
-  [[ $answer == yes ]] || die 'Установка отменена'
   printf '\nШаг 2/2 — автоматическая установка с введёнными параметрами.\n'
   printf 'Проверка чистого сервера, адреса и TLS…\n'
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
