@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.9'
+readonly release='v1.2.0'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -137,42 +137,13 @@ if [[ $mode == --resume ]]; then
 else
   [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
-  printf '\nШаг 1/2 — параметры VPN. Сначала ответьте на все вопросы.\n'
-  printf 'После последнего ответа начнутся проверка сервера, обновление Ubuntu и установка.\n'
-  printf 'VPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
-  if [[ -n ${SSH_CONNECTION:-} ]]; then
-    read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
-    if [[ $TARGET_IPV4 == *:* ]]; then
-      # SSH may arrive over IPv6 while the public VPN endpoints use IPv4.
-      TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
-    fi
-  else
-    TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
-    read -r -p 'SSH порт [22]: ' TARGET_SSH_PORT </dev/tty
-    TARGET_SSH_PORT=${TARGET_SSH_PORT:-22}
-  fi
-  TARGET_INTERFACE=$(ip -o -4 address show | awk -v addr="$TARGET_IPV4" '{split($4,a,"/"); if(a[1]==addr) print $2}')
-  printf 'Определён IPv4 сервера: %s\n' "$TARGET_IPV4"
-  read -r -p 'Домен VPN (Enter = без домена, по IP сервера): ' TARGET_FQDN </dev/tty
-  if [[ -z $TARGET_FQDN ]]; then
-    TARGET_ADDRESS_MODE=ip
-    TARGET_FQDN=$TARGET_IPV4
-  else
-    TARGET_ADDRESS_MODE=domain
-    printf 'Для домена нужна одна A-запись на %s, без AAAA и Cloudflare Proxy.\n' "$TARGET_IPV4"
-  fi
-  read -r -p 'Ваш email для Let’s Encrypt (обязательно): ' ACME_EMAIL </dev/tty
-  read -r -p 'Начало названий профилей — страна или любое имя [🇩🇪 Германия]: ' TARGET_LABEL </dev/tty
-  TARGET_LABEL=${TARGET_LABEL:-🇩🇪 Германия}
-  read -r -p 'REALITY SNI [max.ru]: ' TARGET_REALITY_SNI </dev/tty
-  TARGET_REALITY_SNI=${TARGET_REALITY_SNI:-max.ru}
-  read -r -p 'Лимит IP на профиль, 0 = без лимита [0]: ' TARGET_DEVICE_LIMIT </dev/tty
-  TARGET_DEVICE_LIMIT=${TARGET_DEVICE_LIMIT:-0}
+  source "$source_dir/tools/wizard.sh"
+  collect_vpn_parameters "$release"
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
-  python3 -B "$source_dir/tools/preflight.py" --inputs-only
-  printf '\nШаг 2/2 — автоматическая установка с введёнными параметрами.\n'
+  python3 -B "$source_dir/tools/preflight.py" --inputs-only >/dev/null
+  wizard_section 'Установка' 'Автоматический запуск'
   printf 'Проверка чистого сервера, адреса и TLS…\n'
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
   prepare_installation_bootstrap

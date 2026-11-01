@@ -8,6 +8,7 @@ package, certificate, firewall or network is modified by these fixtures.
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Run the PTY parent as root as well: it must inspect the root0700 state that
 # the real bootstrap publishes, and remove only its private fixture afterwards.
 RUNNER = r"""
-import codecs, errno, hashlib, json, os, pathlib, pty, select, shlex, shutil
+import codecs, errno, hashlib, json, os, pathlib, pty, re, select, shlex, shutil
 import signal, subprocess, sys, termios, time
 
 settings = json.loads(sys.argv[1])
@@ -140,18 +141,35 @@ apt-get upgrade -y --no-remove
 
 def environment():
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith('TARGET_') and key not in ('SSH_CONNECTION', 'ACME_EMAIL')}
+           if not key.startswith('TARGET_') and key not in ('SSH_CONNECTION', 'ACME_EMAIL', 'NO_COLOR')}
     env.update(PATH=str(root / 'bin') + ':/usr/sbin:/usr/bin:/sbin:/bin',
-               FIXTURE_ROOT=str(root), FIXTURE_PYTHON=real_python, LC_ALL='C', LANG='C')
+               FIXTURE_ROOT=str(root), FIXTURE_PYTHON=real_python, LC_ALL='C', LANG='C',
+               TERM=settings.get('term', 'dumb'))
     if settings.get('ssh_connection'):
         env['SSH_CONNECTION'] = settings['ssh_connection']
+    if 'no_color' in settings:
+        env['NO_COLOR'] = settings['no_color']
     return env
 
-def transcript(answers, eof=None):
-    markers = ['SSH порт', 'Домен VPN', 'Ваш email', 'Начало названий',
-               'REALITY SNI', 'Лимит IP']
-    if settings.get('ssh_connection'):
-        markers = markers[1:]
+def questionnaire_steps():
+    steps = []
+    if not settings.get('ssh_connection'):
+        steps.append(('SSH порт', settings.get('port', '2222')))
+    menu = settings.get('menu_answers', [settings.get('address_choice', '2')])
+    steps.extend(('Выберите вариант [1]:', value) for value in menu)
+    if menu[-1] == '2':
+        steps.extend(('Домен VPN:', value) for value in
+                     settings.get('domain_answers', [settings.get('domain', 'vpn.example.com')]))
+    steps.extend([('Ваш email', 'admin@example.com'),
+                  ('Начало названий', settings.get('label', 'Fixture VPN')),
+                  ('REALITY SNI', settings.get('sni', 'example.org')),
+                  ('Лимит IP', settings.get('limit', '0'))])
+    for index, value in settings.get('override', {}).items():
+        marker, _ = steps[int(index)]
+        steps[int(index)] = (marker, value)
+    return steps
+
+def transcript(steps, eof=None):
     pid, descriptor = pty.fork()
     if pid == 0:
         attributes = termios.tcgetattr(0)
@@ -176,14 +194,15 @@ def transcript(answers, eof=None):
             value = decoder.decode(data)
             output += value
             buffer += value
-            if index < len(markers) and markers[index] in buffer:
-                if index == eof:
+            plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', buffer)
+            if index < len(steps) and steps[index][0] in plain:
+                if index == eof or steps[index][1] is None:
                     event('EOF:' + str(index))
                     os.write(descriptor, b'\x04')
-                    index = len(markers)
+                    index = len(steps)
                 else:
                     event('ANSWER:' + str(index))
-                    os.write(descriptor, (answers[index] + '\n').encode('utf-8'))
+                    os.write(descriptor, (steps[index][1] + '\n').encode('utf-8'))
                     index += 1
                 buffer = ''
         _, status = os.waitpid(pid, 0)
@@ -198,13 +217,7 @@ def transcript(answers, eof=None):
 
 try:
     prepare()
-    answers = ['2222', settings.get('domain', 'vpn.example.com'), 'admin@example.com',
-               settings.get('label', 'Fixture VPN'), 'example.org', '0']
-    if settings.get('ssh_connection'):
-        answers = answers[1:]
-    for index, value in settings.get('override', {}).items():
-        answers[int(index)] = value
-    code, output = transcript(answers, settings.get('eof'))
+    code, output = transcript(questionnaire_steps(), settings.get('eof'))
     observed = events.read_text().splitlines() if events.exists() else []
     persisted = {}
     phase_inputs = {}
@@ -274,21 +287,21 @@ class QuestionnaireFlow(unittest.TestCase):
                              for event in result['events']), result['events'])
 
     def test_eof_at_each_question_publishes_nothing(self):
-        for index in range(6):
+        for index in range(7):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
 
     def test_invalid_answers_never_bootstrap_or_start_a_phase(self):
         # The complete validator's field matrix is covered by test_installer;
         # here representative early, middle and last answers exercise the flow.
-        for index, value in ((0, '8444'), (1, 'bad;name.example'),
-                             (2, 'not-email'), (5, '-1')):
+        for index, value in ((0, '8444'), (2, 'bad;name.example'),
+                             (3, 'not-email'), (6, '-1')):
             with self.subTest(field=index):
                 self.assert_unpublished(self.fixture(override={str(index): value}))
 
     def test_literal_answers_are_saved_before_phase_and_resume_never_prompts(self):
         label = 'Мой "VPN" \'friend\' $HOME `literal` \\ 🇫🇷'
-        result = self.fixture(label=label, resume=True)
+        result = self.fixture(label=label, resume=True, term='xterm-256color')
         self.assertEqual(result['exit'], 0, result['output'])
         expected = dict(TARGET_ADDRESS_MODE='domain', TARGET_IPV4='8.8.4.4',
                         TARGET_FQDN='vpn.example.com', TARGET_INTERFACE='enp1s0',
@@ -299,8 +312,8 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual({key: result['phase_inputs'].get(key) for key in expected}, expected)
         events = result['events']
         self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(6)])
-        self.assertLess(events.index('ANSWER:5'), events.index('INPUT_VALIDATION'))
+                         ['ANSWER:' + str(index) for index in range(7)])
+        self.assertLess(events.index('ANSWER:6'), events.index('INPUT_VALIDATION'))
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('FULL_PREFLIGHT'))
         self.assertLess(events.index('FULL_PREFLIGHT'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('PHASE:base'))
@@ -308,22 +321,55 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('BASE_STDIN_EOF', events)
         self.assertNotIn('Установить VPN', result['output'])
         self.assertNotIn('Проверьте параметры перед запуском:', result['output'])
+        self.assertIn('\x1b[', result['output'])
+        self.assertIn('VPN', result['output'])
+        self.assertRegex(result['output'], r'3X-?UI')
+        release = re.search(r"^readonly release='([^']+)'$", (ROOT / 'install.sh').read_text(encoding='utf-8'), re.M)
+        self.assertIsNotNone(release)
+        self.assertIn(release.group(1), result['output'])
         resumed = result['resume']
         self.assertEqual(resumed['exit'], 0, resumed['output'])
         self.assertTrue(resumed['target_unchanged'])
         self.assertEqual(resumed['events'], ['PHASE:verify'])
         self.assertNotIn('Установить VPN', resumed['output'])
         self.assertNotIn('Домен VPN', resumed['output'])
+        self.assertNotIn('Выберите вариант', resumed['output'])
+        self.assertNotIn('\x1b[', resumed['output'])
 
-    def test_blank_domain_is_saved_as_ip_mode(self):
-        result = self.fixture(domain='')
+    def test_ip_choice_and_blank_defaults_skip_domain_question(self):
+        for choice in ('1', ''):
+            with self.subTest(choice=choice):
+                result = self.fixture(address_choice=choice, port='', label='', sni='', limit='')
+                self.assertEqual(result['exit'], 0, result['output'])
+                self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'ip')
+                self.assertEqual(result['persisted']['TARGET_FQDN'], '8.8.4.4')
+                self.assertEqual(result['persisted']['TARGET_SSH_PORT'], '22')
+                self.assertEqual(result['persisted']['TARGET_LABEL'], '🇩🇪 Германия')
+                self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'max.ru')
+                self.assertEqual(result['persisted']['TARGET_DEVICE_LIMIT'], '0')
+                self.assertEqual(result['phase_inputs']['TARGET_ADDRESS_MODE'], 'ip')
+                self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
+                                 ['ANSWER:' + str(index) for index in range(6)])
+                self.assertNotIn('Домен VPN:', result['output'])
+                self.assertNotIn('\x1b[', result['output'])
+
+    def test_invalid_menu_retries_and_eof_cannot_start_installation(self):
+        result = self.fixture(menu_answers=['invalid', '3', '2'])
         self.assertEqual(result['exit'], 0, result['output'])
-        self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'ip')
-        self.assertEqual(result['persisted']['TARGET_FQDN'], '8.8.4.4')
-        self.assertEqual(result['phase_inputs']['TARGET_ADDRESS_MODE'], 'ip')
+        self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
+        self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
+        self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
+        self.assertLess(result['events'].index('ANSWER:8'), result['events'].index('FULL_PREFLIGHT'))
+        self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
+        self.assert_unpublished(self.fixture(domain_answers=['', None]))
+
+    def test_no_color_disables_ansi_even_in_color_capable_pty(self):
+        result = self.fixture(address_choice='1', term='xterm-256color', no_color='')
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertNotIn('\x1b[', result['output'])
 
     def test_ssh_connection_supplies_port_and_leaves_only_five_answers(self):
-        result = self.fixture(ssh_connection='198.51.100.4 45000 8.8.4.4 2222')
+        result = self.fixture(ssh_connection='198.51.100.4 45000 8.8.4.4 2222', address_choice='1')
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
                          ['ANSWER:' + str(index) for index in range(5)])
