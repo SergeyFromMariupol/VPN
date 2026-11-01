@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.7'
+readonly release='v1.1.8'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -54,7 +54,7 @@ flock -n 9 || die 'Другая установка уже выполняется
 [[ -f /etc/os-release ]] || die 'Не найдена информация об ОС'
 source /etc/os-release
 [[ $ID == ubuntu && $VERSION_ID == 24.04 && $(dpkg --print-architecture) == amd64 ]] || die 'Нужна Ubuntu 24.04 LTS amd64'
-for cmd in python3 curl tar sha256sum ip openssl timeout; do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
+for cmd in python3 tar sha256sum ip openssl timeout; do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
 [[ $(ps -p 1 -o comm=) == systemd ]] || die 'Нужен VPS/VM с systemd'
 task_stage=$(mktemp -d /run/vpn-installer.XXXXXXXX)
 cleanup() {
@@ -73,8 +73,39 @@ trap 'exit 143' TERM
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 if [[ ! -f $source_dir/tools/preflight.py ]]; then
   printf 'Загрузка VPN %s…\n' "$release"
-  curl --disable --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 --max-time 300 \
-    "https://github.com/$repository/archive/refs/tags/$release.tar.gz" -o "$task_stage/source.tar.gz"
+  if command -v curl >/dev/null; then
+    curl --disable --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 --max-time 300 \
+      "https://github.com/$repository/archive/refs/tags/$release.tar.gz" -o "$task_stage/source.tar.gz"
+  else
+    # Ubuntu already needs Python for the installer. Fetch source with its
+    # trusted HTTPS client rather than installing curl before the questions.
+    python3 - "https://github.com/$repository/archive/refs/tags/$release.tar.gz" "$task_stage/source.tar.gz" <<'PY'
+import sys, time, urllib.parse, urllib.request
+class HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != 'https':
+            raise ValueError('HTTPS source redirect required')
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+deadline = time.monotonic() + 300
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), HTTPSOnlyRedirectHandler())
+with opener.open(sys.argv[1], timeout=30) as response, open(sys.argv[2], 'xb') as output:
+    if not response.geturl().startswith('https://'):
+        raise ValueError('HTTPS source required')
+    size = 0
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Source download deadline exceeded')
+        chunk = response.read1(65536)
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Source download deadline exceeded')
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > 32 * 1024 * 1024:
+            raise ValueError('Source archive exceeds size limit')
+        output.write(chunk)
+PY
+  fi
   # Reject traversal, links, devices and multiple archive roots before extraction.
   python3 - "$task_stage/source.tar.gz" <<'PY'
 import sys, tarfile
@@ -106,7 +137,9 @@ if [[ $mode == --resume ]]; then
 else
   [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
-  printf '\nVPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
+  printf '\nШаг 1/2 — параметры VPN. Сначала ответьте на все вопросы.\n'
+  printf 'Обновление Ubuntu и установка начнутся после подтверждения.\n'
+  printf 'VPN: REALITY + Hysteria2 + XHTTP, Cloudflare WARP и прямой выход.\n'
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
     if [[ $TARGET_IPV4 == *:* ]]; then
@@ -136,13 +169,21 @@ else
   read -r -p 'Лимит IP на профиль, 0 = без лимита [0]: ' TARGET_DEVICE_LIMIT </dev/tty
   TARGET_DEVICE_LIMIT=${TARGET_DEVICE_LIMIT:-0}
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
-  printf 'Проверка чистого сервера, адреса и TLS…\n'
-  python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
-  printf '\nСервер: %s; адрес подписки и панели: %s (режим %s).\nFirewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$TARGET_SSH_PORT"
+  # Validate the complete questionnaire without DNS or host probes. Nothing
+  # persistent is published until the owner confirms the displayed answers.
+  python3 -B "$source_dir/tools/preflight.py" --inputs-only
+  printf '\nПроверьте параметры перед запуском:\n'
+  printf 'IPv4 сервера: %s\nИнтерфейс: %s\nSSH порт: %s\n' "$TARGET_IPV4" "$TARGET_INTERFACE" "$TARGET_SSH_PORT"
+  printf 'Адрес панели и подписки: %s (режим %s)\nEmail Let’s Encrypt: %s\n' "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" "$ACME_EMAIL"
+  printf 'Начало названий: %s\nREALITY SNI: %s\nЛимит IP на профиль: %s (0 = без лимита)\n' "$TARGET_LABEL" "$TARGET_REALITY_SNI" "$TARGET_DEVICE_LIMIT"
+  printf 'Firewall Ubuntu: SSH TCP/%s, TCP 80,443,2053,2096,8443,8444 и UDP443.\n' "$TARGET_SSH_PORT"
   printf 'Если в панели провайдера включён отдельный firewall, разрешите эти же порты там.\n'
   printf 'После подтверждения обновятся пакеты Ubuntu (apt-get update/upgrade), затем установится VPN.\n'
   read -r -p 'Установить VPN на этот чистый VPS? [yes/нет]: ' answer </dev/tty
   [[ $answer == yes ]] || die 'Установка отменена'
+  printf '\nШаг 2/2 — автоматическая установка с введёнными параметрами.\n'
+  printf 'Проверка чистого сервера, адреса и TLS…\n'
+  python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
   prepare_installation_bootstrap
 fi
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
@@ -178,7 +219,7 @@ else
 fi
 # The production timer keeps Certbot's random spread; an interactive install
 # should run its one acceptance renewal immediately.
-phase renewal certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew
+phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-random-sleep-on-renew
 # Always recheck live state, including a resume after a later phase failed.
 phase --always verify bash "$destination/tools/verify.sh"
 printf '\nVPN установлен. Сохраните данные:\n\n'

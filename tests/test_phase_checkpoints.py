@@ -69,6 +69,10 @@ case $CASE in
     [[ $(cat "$state/direct.log") == failed ]]
     phase direct commit
     installer_checkpoint_valid "$state/direct.done";;
+  stdin-eof)
+    phase direct bash -c 'if IFS= read -r answer; then exit 45; fi; printf eof' <<<"late answer must not be consumed"
+    [[ $(cat "$state/direct.log") == eof ]]
+    installer_checkpoint_valid "$state/direct.done";;
   publication-helper-signal)
     date() {
       if [[ -e $state/committed ]]; then
@@ -154,6 +158,9 @@ class PhaseCheckpoints(unittest.TestCase):
 
     def test_committed_success_is_checkpointed_and_not_repeated(self):
         self.fixture('success')
+
+    def test_phase_cannot_consume_a_late_interactive_answer(self):
+        self.fixture('stdin-eof')
 
     def test_signal_after_child_commit_cannot_lose_checkpoint(self):
         for sig, status in (('HUP', 129), ('INT', 130), ('TERM', 143)):

@@ -62,7 +62,9 @@ phase() (
   ((signal_status == 0)) || return "$signal_status"
   printf '\n→ %s\n' "$name" || return 1
   ((signal_status == 0)) || return "$signal_status"
-  if "$@" >"$state/$name.log" 2>&1; then
+  # All owner answers have been collected. An unexpected child prompt must
+  # receive EOF rather than silently wait while its output is in a private log.
+  if "$@" </dev/null >"$state/$name.log" 2>&1; then
     # A terminal-group signal also reaches date/mv children. Ignore it through
     # this short publication window so those helpers cannot lose a successful
     # result. The foreground installer parent still handles cancellation and
