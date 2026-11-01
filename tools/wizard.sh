@@ -13,7 +13,7 @@ wizard_header() {
   printf '\n%b%s%b\n' "$wizard_cyan" 'VPN · 3X-UI' "$wizard_reset"
   printf '%b%s · Ubuntu 24.04%b\n' "$wizard_dim" "$1" "$wizard_reset"
   printf '%s\n' 'REALITY · Hysteria2 · XHTTP' '──────────────────────────────────────────────'
-  printf 'Выберите адрес подключения — дальше установка пойдёт автоматически.\n\n'
+  printf 'Выберите адрес подключения и SNI — дальше установка пойдёт автоматически.\n\n'
 }
 
 wizard_section() {
@@ -43,8 +43,38 @@ wizard_required() {
   done
 }
 
+wizard_probe_sni() {
+  wizard_note 'Проверка SNI…'
+  TARGET_REALITY_SNI="$TARGET_REALITY_SNI" python3 -B "$1" --check-reality-sni >/dev/null 2>&1
+}
+
+wizard_reality_sni() {
+  local verifier=$1 sni_choice
+  wizard_section 'SNI' 'REALITY'
+  printf '  %b1. По умолчанию max.ru%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b2. Свой%b\n\n' "$wizard_yellow" "$wizard_reset"
+  while true; do
+    wizard_read sni_choice 'Выберите SNI [1]: ' 1 || return 1
+    case "$sni_choice" in
+      1)
+        TARGET_REALITY_SNI=max.ru
+        if wizard_probe_sni "$verifier"; then return 0; fi
+        wizard_error 'SNI не прошёл проверку TLS 1.3, H2 и сертификата. Выберите другой.'
+        ;;
+      2)
+        while true; do
+          wizard_required TARGET_REALITY_SNI 'Свой SNI: ' || return 1
+          if wizard_probe_sni "$verifier"; then return 0; fi
+          wizard_error 'SNI не подходит: нужны TLS 1.3, H2 и доверенный сертификат. Введите другой.'
+        done
+        ;;
+      *) wizard_error 'Выберите 1 или 2.' ;;
+    esac
+  done
+}
+
 collect_vpn_parameters() {
-  local address_choice
+  local address_choice verifier=$2
   wizard_init
   wizard_header "$1"
   if [[ -n ${SSH_CONNECTION:-} ]]; then
@@ -76,9 +106,10 @@ collect_vpn_parameters() {
     esac
   done
 
-  # Personal/friends defaults; no further setup questions after address choice.
+  wizard_reality_sni "$verifier" || return 1
+
+  # Personal/friends defaults; no further setup questions after SNI validation.
   ACME_EMAIL=''
   TARGET_LABEL='Мой VPN'
-  TARGET_REALITY_SNI=max.ru
   TARGET_DEVICE_LIMIT=0
 }

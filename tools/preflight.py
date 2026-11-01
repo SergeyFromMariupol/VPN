@@ -134,6 +134,30 @@ def dns(name: str, qtype: int, resolver: str) -> list[str]:
     return results
 
 
+def validate_reality_sni(value: str) -> None:
+    if not domain(value):
+        raise ValueError('Invalid TARGET_REALITY_SNI')
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        raise ValueError('REALITY SNI must be a DNS hostname')
+    if 'cloudflare' in value:
+        raise ValueError('Cloudflare cannot be used as REALITY SNI')
+
+
+def check_reality_target(sni: str) -> None:
+    validate_reality_sni(sni)
+    probe = subprocess.run(['timeout', '20', 'openssl', 's_client', '-connect', f'{sni}:443',
+                            '-servername', sni, '-alpn', 'h2', '-tls1_3', '-verify_return_error',
+                            '-verify_hostname', sni], input='', text=True, capture_output=True,
+                           timeout=25)
+    output = probe.stdout + probe.stderr
+    if probe.returncode or 'ALPN protocol: h2' not in output or 'Verification: OK' not in output:
+        raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
+
+
 def validate_inputs(env: dict) -> None:
     address = ipaddress.IPv4Address(env['TARGET_IPV4'])
     if not address.is_global:
@@ -153,16 +177,7 @@ def validate_inputs(env: dict) -> None:
             pass
         else:
             raise ValueError('Use IP mode for an IPv4 endpoint')
-    if not domain(env['TARGET_REALITY_SNI']):
-        raise ValueError('Invalid TARGET_REALITY_SNI')
-    try:
-        ipaddress.ip_address(env['TARGET_REALITY_SNI'])
-    except ValueError:
-        pass
-    else:
-        raise ValueError('REALITY SNI must be a DNS hostname')
-    if 'cloudflare' in env['TARGET_REALITY_SNI']:
-        raise ValueError('Cloudflare cannot be used as REALITY SNI')
+    validate_reality_sni(env['TARGET_REALITY_SNI'])
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', env['TARGET_INTERFACE']):
         raise ValueError('Public interface is missing or ambiguous')
     if not re.fullmatch(r'[1-9][0-9]{0,4}', env['TARGET_SSH_PORT']) or not 1 <= int(env['TARGET_SSH_PORT']) <= 65535:
@@ -299,13 +314,7 @@ def main() -> None:
     if run('timedatectl', 'show', '-p', 'NTPSynchronized', '--value') != 'yes':
         raise ValueError('Wait for NTP synchronization before installing')
     check_endpoint_dns(os.environ)
-    sni = os.environ['TARGET_REALITY_SNI']
-    probe = subprocess.run(['timeout', '20', 'openssl', 's_client', '-connect', f'{sni}:443',
-                            '-servername', sni, '-alpn', 'h2', '-tls1_3', '-verify_return_error',
-                            '-verify_hostname', sni], input='', text=True, capture_output=True)
-    output = probe.stdout + probe.stderr
-    if probe.returncode or 'ALPN protocol: h2' not in output or 'Verification: OK' not in output:
-        raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
+    check_reality_target(os.environ['TARGET_REALITY_SNI'])
     dns_status = 'NOT_REQUIRED_IP_MODE' if os.environ.get('TARGET_ADDRESS_MODE') == 'ip' else 'PASS'
     print(f'CLEAN_HOST=PASS DNS={dns_status} REALITY_TARGET_TLS=PASS')
     print('VIRTUALIZATION=' + virtualization())
@@ -324,10 +333,13 @@ if __name__ == '__main__':
         if sys.argv[1:] == ['--inputs-only']:
             validate_inputs(os.environ)
             print('INSTALL_INPUTS=VALID')
+        elif sys.argv[1:] == ['--check-reality-sni']:
+            check_reality_target(os.environ['TARGET_REALITY_SNI'])
+            print('REALITY_TARGET_TLS=PASS')
         elif not sys.argv[1:]:
             main()
         else:
-            raise ValueError('usage: preflight.py [--inputs-only]')
+            raise ValueError('usage: preflight.py [--inputs-only|--check-reality-sni]')
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as error:
         print(f'PREFLIGHT_FAILED: {error}', file=sys.stderr)
         sys.exit(1)

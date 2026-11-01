@@ -77,8 +77,20 @@ elif [[ $* == '-o -4 address show' ]]; then
 else exit 92; fi
 ''')
     executable(binary / 'curl', shell + 'printf "NETWORK\\n" >>"$FIXTURE_ROOT/events"\nexit 93\n')
-    # Both validation invocations use the actual production CLI. The full
-    # inventory's external host/network checks are the only preflight seam.
+    # The actual SNI CLI validates input and checks a bounded external TLS
+    # probe. Only OpenSSL's network interaction is replaced by this fixture.
+    executable(binary / 'openssl', shell + '''
+printf 'SNI_TLS:%s\\n' "$TARGET_REALITY_SNI" >>"$FIXTURE_ROOT/events"
+[[ $1 == s_client && " $* " == *' -tls1_3 '* && " $* " == *' -verify_return_error '* &&
+   " $* " == *" -servername $TARGET_REALITY_SNI "* &&
+   " $* " == *" -verify_hostname $TARGET_REALITY_SNI "* && " $* " == *' -alpn h2 '* ]] || exit 95
+case ",$FIXTURE_TLS_FAIL_SNIS," in
+  *",$TARGET_REALITY_SNI,"*) printf 'fixture TLS probe rejected\\n' >&2; exit 1;;
+esac
+printf 'Protocol : TLSv1.3\\nALPN protocol: h2\\nVerification: OK\\n'
+''')
+    # All validation invocations use the actual production CLI. The full
+    # inventory's unrelated external host/network checks remain stubbed.
     executable(binary / 'python3', shell + '''
 arguments=("$@")
 while [[ ${1:-} == -B || ${1:-} == -I ]]; do shift; done
@@ -86,6 +98,9 @@ if [[ ${1:-} == */tools/preflight.py ]]; then
   script=$1; shift
   if [[ ${1:-} == --inputs-only ]]; then
     printf 'INPUT_VALIDATION\\n' >>"$FIXTURE_ROOT/events"
+  elif [[ ${1:-} == --check-reality-sni ]]; then
+    printf 'SNI_PROBE:%s\\n' "$TARGET_REALITY_SNI" >>"$FIXTURE_ROOT/events"
+    exec "$FIXTURE_PYTHON" -B "$script" --check-reality-sni
   else printf 'FULL_PREFLIGHT\\n' >>"$FIXTURE_ROOT/events"; fi
   exec "$FIXTURE_PYTHON" -B "$script" --inputs-only
 fi
@@ -148,7 +163,8 @@ def environment():
            if not key.startswith('TARGET_') and key not in ('SSH_CONNECTION', 'ACME_EMAIL', 'NO_COLOR')}
     env.update(PATH=str(root / 'bin') + ':/usr/sbin:/usr/bin:/sbin:/bin',
                FIXTURE_ROOT=str(root), FIXTURE_PYTHON=real_python, LC_ALL='C', LANG='C',
-               TERM=settings.get('term', 'dumb'))
+               TERM=settings.get('term', 'dumb'),
+               FIXTURE_TLS_FAIL_SNIS=','.join(settings.get('tls_fail_snis', [])))
     if settings.get('ssh_connection'):
         env['SSH_CONNECTION'] = settings['ssh_connection']
     if 'no_color' in settings:
@@ -165,6 +181,14 @@ def questionnaire_steps():
     if menu[-1] == '2':
         steps.extend(('Домен VPN:', value) for value in
                      settings.get('domain_answers', [settings.get('domain', 'vpn.example.com')]))
+    if 'sni_steps' in settings:
+        steps.extend(settings['sni_steps'])
+    else:
+        sni_choice = settings.get('sni_choice', '1')
+        steps.append(('Выберите SNI [1]:', sni_choice))
+        if sni_choice == '2':
+            steps.extend(('Свой SNI:', value) for value in
+                         settings.get('custom_sni_answers', ['example.org']))
     for index, value in settings.get('override', {}).items():
         marker, _ = steps[int(index)]
         steps[int(index)] = (marker, value)
@@ -306,14 +330,16 @@ class QuestionnaireFlow(unittest.TestCase):
         labels = [line.strip() for line in wizard.splitlines()]
         self.assertIn('1. По IP-адресу', labels)
         self.assertIn('2. По доменному имени', labels)
+        self.assertIn('1. По умолчанию max.ru', labels)
+        self.assertIn('2. Свой', labels)
         self.assertNotRegex(wizard, r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
         for removed in ('Ваш email', 'Начало названий', 'REALITY SNI [',
                         'Лимит IP', 'Установить VPN', 'Проверьте параметры перед запуском:'):
             self.assertNotIn(removed, wizard)
 
     def test_eof_at_each_question_publishes_nothing(self):
-        # Console: port, mode, domain. SSH mode omits the port question.
-        for index in range(3):
+        # Console: port, mode, domain, SNI choice. SSH omits the port.
+        for index in range(4):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
@@ -324,13 +350,14 @@ class QuestionnaireFlow(unittest.TestCase):
             with self.subTest(field=index):
                 self.assert_unpublished(self.fixture(override={str(index): value}))
 
-    def test_one_ssh_choice_starts_defaults_and_resume_preserves_saved_parameters(self):
+    def test_default_sni_starts_install_and_resume_preserves_saved_parameters(self):
         injected = dict(ACME_EMAIL='caller@example.invalid', TARGET_LABEL='Caller VPN',
                         TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99')
         saved = dict(ACME_EMAIL='legacy@example.com', TARGET_LABEL='Старый VPN',
                      TARGET_REALITY_SNI='example.net', TARGET_DEVICE_LIMIT='17')
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='', resume=True,
-                              term='xterm-256color', caller_inputs=injected, saved_resume_inputs=saved)
+                              sni_choice='', term='xterm-256color', caller_inputs=injected,
+                              saved_resume_inputs=saved)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assert_wizard_labels_and_no_ip(result)
         expected = dict(TARGET_ADDRESS_MODE='ip', TARGET_IPV4='8.8.4.4',
@@ -340,8 +367,10 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted'], expected)
         self.assertEqual({key: result['phase_inputs'].get(key) for key in expected}, expected)
         events = result['events']
-        self.assertEqual([event for event in events if event.startswith('ANSWER:')], ['ANSWER:0'])
-        self.assertLess(events.index('ANSWER:0'), events.index('INPUT_VALIDATION'))
+        self.assertEqual([event for event in events if event.startswith('ANSWER:')], ['ANSWER:0', 'ANSWER:1'])
+        self.assertLess(events.index('ANSWER:1'), events.index('SNI_PROBE:max.ru'))
+        self.assertLess(events.index('SNI_PROBE:max.ru'), events.index('SNI_TLS:max.ru'))
+        self.assertLess(events.index('SNI_TLS:max.ru'), events.index('INPUT_VALIDATION'))
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('FULL_PREFLIGHT'))
         self.assertLess(events.index('FULL_PREFLIGHT'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('PHASE:base'))
@@ -361,9 +390,10 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertNotIn('Установить VPN', resumed['output'])
         self.assertNotIn('Домен VPN', resumed['output'])
         self.assertNotIn('Выберите вариант', resumed['output'])
+        self.assertNotIn('Выберите SNI', resumed['output'])
         self.assertNotIn('\x1b[', resumed['output'])
 
-    def test_domain_name_and_console_port_are_the_only_extra_questions(self):
+    def test_domain_name_and_console_port_precede_default_sni_choice(self):
         for domain in (True, False):
             with self.subTest(domain=domain):
                 values = (dict(ssh_connection=SSH_CONNECTION, address_choice='2') if domain
@@ -380,10 +410,10 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['persisted']['ACME_EMAIL'], '')
                 self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:0', 'ANSWER:1'])
+                                 ['ANSWER:0', 'ANSWER:1', 'ANSWER:2'])
                 self.assertEqual('Домен VPN:' in result['output'], domain)
                 self.assertEqual('SSH порт [22]' in result['output'], not domain)
-                self.assertLess(result['events'].index('ANSWER:1'), result['events'].index('FULL_PREFLIGHT'))
+                self.assertLess(result['events'].index('ANSWER:2'), result['events'].index('SNI_PROBE:max.ru'))
                 self.assertNotIn('\x1b[', result['output'])
 
     def test_invalid_menu_retries_and_eof_cannot_start_installation(self):
@@ -392,9 +422,45 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
         self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
         self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
-        self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('FULL_PREFLIGHT'))
+        self.assertLess(result['events'].index('ANSWER:5'), result['events'].index('FULL_PREFLIGHT'))
         self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
         self.assert_unpublished(self.fixture(domain_answers=['', None]))
+
+    def test_custom_sni_retries_format_and_tls_failures_before_installation(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+                              custom_sni_answers=['failed.example.org', 'bad;name.example', 'example.org'],
+                              tls_fail_snis=['failed.example.org'])
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assert_wizard_labels_and_no_ip(result)
+        self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'example.org')
+        self.assertEqual(result['phase_inputs']['TARGET_REALITY_SNI'], 'example.org')
+        events = result['events']
+        self.assertEqual([event for event in events if event.startswith('SNI_PROBE:')],
+                         ['SNI_PROBE:failed.example.org', 'SNI_PROBE:bad;name.example', 'SNI_PROBE:example.org'])
+        self.assertEqual([event for event in events if event.startswith('SNI_TLS:')],
+                         ['SNI_TLS:failed.example.org', 'SNI_TLS:example.org'])
+        self.assertLess(events.index('SNI_TLS:example.org'), events.index('INPUT_VALIDATION'))
+        self.assertLess(events.index('INPUT_VALIDATION'), events.index('BOOTSTRAP_PUBLISH'))
+        self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('APT:update'))
+
+        # Failed default returns to its menu; a custom target can then succeed.
+        fallback = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                                sni_steps=[['Выберите SNI [1]:', '1'], ['Выберите SNI [1]:', '2'],
+                                           ['Свой SNI:', 'example.net']], tls_fail_snis=['max.ru'])
+        self.assertEqual(fallback['exit'], 0, fallback['output'])
+        self.assertEqual(fallback['persisted']['TARGET_REALITY_SNI'], 'example.net')
+        self.assertEqual([event for event in fallback['events'] if event.startswith('SNI_TLS:')],
+                         ['SNI_TLS:max.ru', 'SNI_TLS:example.net'])
+
+        rejected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+                                custom_sni_answers=['failed.example.org', None],
+                                tls_fail_snis=['failed.example.org'])
+        self.assert_unpublished(rejected)
+        blank = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+                             custom_sni_answers=['', None])
+        self.assert_unpublished(blank)
+        self.assertIn('EOF:3', blank['events'])
+        self.assertFalse(any(event.startswith('SNI_PROBE:') for event in blank['events']))
 
     def test_no_color_disables_ansi_even_in_color_capable_pty(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',

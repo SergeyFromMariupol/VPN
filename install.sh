@@ -138,7 +138,7 @@ else
   [[ ! -e $state && ! -L $state && ! -e $destination && ! -L $destination && ! -e $target_file && ! -L $target_file ]] || die 'Есть предыдущая установка; используйте --resume'
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
   source "$source_dir/tools/wizard.sh"
-  collect_vpn_parameters "$release"
+  collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
