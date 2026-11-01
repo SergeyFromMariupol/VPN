@@ -19,7 +19,7 @@ original_mount=$(readlink /proc/self/ns/mnt)
 
 # Mounts and netfilter state are private before any UFW command runs. Binding
 # copied configuration and hiding /run also isolates persistent files and locks.
-unshare --mount --net --propagation private bash -Eeuo pipefail -s -- \
+unshare --mount --net --propagation private bash -xEeuo pipefail -s -- \
   "$fixture" "$bundle" "$original_net" "$original_mount" <<'ISOLATED'
 fixture=$1
 bundle=$2
