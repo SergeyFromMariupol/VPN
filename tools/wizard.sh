@@ -44,8 +44,14 @@ wizard_required() {
 }
 
 wizard_probe_sni() {
+  local probe_status
   wizard_note 'Проверка SNI…'
-  TARGET_REALITY_SNI="$TARGET_REALITY_SNI" python3 -B "$1" --check-reality-sni >/dev/null 2>&1
+  if declare -F installer_progress_begin >/dev/null; then installer_progress_begin sni-check || :; fi
+  if TARGET_REALITY_SNI="$TARGET_REALITY_SNI" python3 -B "$1" --check-reality-sni >/dev/null 2>&1; then
+    probe_status=0
+  else probe_status=$?; fi
+  if declare -F installer_progress_end >/dev/null; then installer_progress_end sni-check "$probe_status" || :; fi
+  return "$probe_status"
 }
 
 wizard_reality_sni() {

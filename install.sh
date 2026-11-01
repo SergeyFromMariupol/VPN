@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.1'
+readonly release='v1.2.2'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -60,6 +60,7 @@ task_stage=$(mktemp -d /run/vpn-installer.XXXXXXXX)
 cleanup() {
   local rc=$?
   trap - EXIT HUP INT TERM
+  if declare -F installer_progress_stop >/dev/null; then installer_progress_stop || :; fi
   if declare -F cleanup_installation_bootstrap >/dev/null; then
     cleanup_installation_bootstrap || { ((rc)) || rc=1; }
   fi
@@ -128,6 +129,8 @@ PY
 fi
 (cd -- "$source_dir"; sha256sum --check --strict SHA256SUMS >/dev/null)
 source "$source_dir/tools/bootstrap.sh"
+source "$source_dir/tools/progress.sh"
+installer_progress_init "$task_stage" "$source_dir/tools/progress.py" || :
 if [[ $mode == --resume ]]; then
   [[ -d $state && ! -L $state && $(stat -c '%U:%G:%a' "$state") == root:root:700 ]] || die 'Нет безопасного состояния для продолжения'
   [[ -f $target_file && ! -L $target_file && $(stat -c '%U:%G:%a' "$target_file") == root:root:600 ]] || die 'Небезопасный target env'
@@ -144,9 +147,18 @@ else
   # persistent state. No extra confirmation or interactive gate follows.
   python3 -B "$source_dir/tools/preflight.py" --inputs-only >/dev/null
   wizard_section 'Установка' 'Автоматический запуск'
-  printf 'Проверка чистого сервера, адреса и TLS…\n'
-  python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
+  installer_progress_begin preflight || :
+  if python3 "$source_dir/tools/preflight.py" >"$task_stage/inventory.txt" 2>"$task_stage/preflight-error.txt"; then
+    installer_progress_end preflight 0 || :
+  else
+    preflight_status=$?
+    installer_progress_end preflight 1 || :
+    cat "$task_stage/preflight-error.txt" >&2
+    exit "$preflight_status"
+  fi
+  installer_progress_begin bootstrap || :
   prepare_installation_bootstrap
+  installer_progress_end bootstrap 0 || :
 fi
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 export TARGET_ADDRESS_MODE TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
