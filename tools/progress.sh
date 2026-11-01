@@ -29,7 +29,8 @@ _installer_progress_identity() {
 
 _installer_progress_count() {
   local active=${1-} result=${2-} name count=0
-  case $active in preflight|bootstrap|sni-check) printf 0; return 0;; esac
+  # Preparation tasks have no measurable fraction of the installation stages.
+  case $active in preflight|bootstrap|sni-check) printf '%s' -; return 0;; esac
   if [[ -n ${state-} ]] && declare -F installer_checkpoint_valid >/dev/null; then
     for name in base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal verify; do
       [[ $name != "$active" || $result == 0 || $result == skip ]] || continue
@@ -82,7 +83,11 @@ installer_progress_begin() {
   [[ -n ${installer_progress_stage-} ]] || return 0
   count=$(_installer_progress_count "$name")
   if [[ ! -t 1 ]]; then
-    printf '[%s/12] %s — выполняется…\n' "$count" "$label" || :
+    if [[ $count == - ]]; then
+      printf '%s — выполняется…\n' "$label" || :
+    else
+      printf 'Общий прогресс: %s%% [%s/12] %s — выполняется…\n' "$((count * 100 / 12))" "$count" "$label" || :
+    fi
     return 0
   fi
   [[ -d $installer_progress_stage && ! -L $installer_progress_stage &&
@@ -102,15 +107,21 @@ installer_progress_begin() {
 }
 
 installer_progress_end() {
-  local name=${1-} result=${2-1} label count outcome bar='' cell
+  local name=${1-} result=${2-1} label count outcome symbol bar='' cell
   installer_progress_stop
   label=$(_installer_progress_label "$name") || return 0
   [[ -n ${installer_progress_stage-} ]] || return 0
   count=$(_installer_progress_count "$name" "$result")
   case $result in 0) outcome='готово';; skip) outcome='уже завершено';; *) outcome='остановлено';; esac
+  if [[ $count == - ]]; then
+    case $result in 0|skip) symbol='✓';; *) symbol='!';; esac
+    printf '%s %s — %s\n' "$symbol" "$label" "$outcome" || :
+    return 0
+  fi
   for ((cell=0; cell<12; cell++)); do
     if ((cell<count)); then bar+='█'; else bar+='░'; fi
   done
-  printf '[%s] %s%% [%s/12] %s — %s\n' "$bar" "$((count * 100 / 12))" "$count" "$label" "$outcome" || :
+  # The caller prints the stage outcome separately. This is the overall count.
+  printf 'Общий прогресс: [%s] %s%% [%s/12]\n' "$bar" "$((count * 100 / 12))" "$count" || :
   return 0
 }

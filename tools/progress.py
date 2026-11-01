@@ -29,10 +29,10 @@ def main():
     if len(sys.argv) != 8:
         return
     path, identity, pid, ticks, count, label, term = sys.argv[1:]
-    if not pid.isdecimal() or not ticks.isdecimal() or not count.isdecimal():
+    if not pid.isdecimal() or not ticks.isdecimal() or not (count == '-' or count.isdecimal()):
         return
-    count = int(count)
-    if not 0 <= count <= 12 or not owner_alive(pid, ticks) or not control_alive(path, identity):
+    count = None if count == '-' else int(count)
+    if (count is not None and not 0 <= count <= 12) or not owner_alive(pid, ticks) or not control_alive(path, identity):
         return
     # A fresh open file description is essential: changing inherited stdout's
     # blocking flags would also change the installer's terminal descriptor.
@@ -62,8 +62,11 @@ def main():
                 elapsed = int(now - started)
                 clock = f'{elapsed // 60:02}:{elapsed % 60:02}'
                 spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[frame % 10]
-                bar = '█' * count + '░' * (12 - count)
-                line = f'[{bar}] {count * 100 // 12}% [{count}/12] {spinner} {label} · {clock}'
+                if count is None:
+                    line = f'{spinner} {label} · {clock}'
+                else:
+                    bar = '█' * count + '░' * (12 - count)
+                    line = f'Общий прогресс: [{bar}] {count * 100 // 12}% [{count}/12] {spinner} {label} · {clock}'
                 width = max(width, len(line))
                 if not write(line + '\n' if dumb else '\r' + line.ljust(width)):
                     break
