@@ -70,7 +70,7 @@ done
 
 [[ "$EUID" -eq 0 ]] || die 'root is required'
 
-for command_name in basename bash certbot chmod chown cmp cp curl dig dirname find \
+for command_name in basename bash chmod chown cmp cp curl dig dirname find \
   grep install ip jq mktemp nft openssl pgrep ps python3 readlink rm runuser sed seq sha256sum \
   sleep sort sqlite3 ss stat systemctl systemd-analyze tar timeout tr ufw uuidgen; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
@@ -85,6 +85,7 @@ grep -Eq "(^|[[:space:]])${XRAY_VERSION//./[.]}([[:space:]]|$)" <<<"$xray_versio
   die 'unexpected Xray version'
 unset xray_version_output
 
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 [[ -f "$letsencrypt_live/fullchain.pem" && -f "$letsencrypt_live/privkey.pem" ]] ||
   die 'Let us Encrypt certificate is missing'
 verify_target_certificate "$letsencrypt_live/fullchain.pem" ||
@@ -93,6 +94,7 @@ cert_pub=$(openssl x509 -in "$letsencrypt_live/fullchain.pem" -pubkey -noout | o
 key_pub=$(openssl pkey -in "$letsencrypt_live/privkey.pem" -pubout | openssl sha256)
 [[ "$cert_pub" == "$key_pub" ]] || die 'certificate/private-key mismatch'
 unset cert_pub key_pub
+fi
 
 if [[ $TARGET_ADDRESS_MODE == domain ]]; then
   for resolver in 1.1.1.1 9.9.9.9; do
@@ -127,8 +129,11 @@ fi
 [[ "$inbound_count" -eq 0 ]] || die 'clean zero-inbound database is required'
 systemctl is-active --quiet x-ui && die 'x-ui must be stopped before first provisioning'
 systemctl is-enabled --quiet x-ui.service || die 'x-ui must already be enabled for boot'
-systemctl is-enabled --quiet certbot.timer || die 'certbot timer must already be enabled'
-systemctl is-active --quiet certbot.timer || die 'certbot timer must already be active'
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  command -v certbot >/dev/null || die 'Certbot is missing'
+  systemctl is-enabled --quiet certbot.timer || die 'certbot timer must already be enabled'
+  systemctl is-active --quiet certbot.timer || die 'certbot timer must already be active'
+fi
 [[ ! -e "$runtime_root" ]] || die "runtime root already exists: $runtime_root"
 [[ ! -e /etc/systemd/system/x-ui.service.d ]] ||
   die 'x-ui systemd drop-in directory already exists; reviewed merge required'
@@ -158,7 +163,11 @@ cp -a /etc/ufw/user6.rules "$backup/ufw.user6.rules"
 nft -s list ruleset >"$backup/nft-before.txt"
 ip -4 route show table all >"$backup/ip4-routes-before.txt"
 ip -4 rule show >"$backup/ip4-rules-before.txt"
-tar --acls --xattrs --numeric-owner -cpf "$backup/certbot-before.tar" -C / etc/letsencrypt
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  tar --acls --xattrs --numeric-owner -cpf "$backup/certbot-before.tar" -C / etc/letsencrypt
+else
+  tar --acls --xattrs --numeric-owner -cpf "$backup/certbot-before.tar" --files-from /dev/null
+fi
 tar -tf "$backup/certbot-before.tar" >/dev/null
 tar --acls --xattrs --numeric-owner -cpf "$backup/services-before.tar" -C / etc/nginx etc/systemd/system
 tar -tf "$backup/services-before.tar" >/dev/null
@@ -253,7 +262,8 @@ subscription_path=$(random_hex 20)
 subscription_id=$(random_hex 32)
 xhttp_private_path=$(random_hex 24)
 vless_uuid=$(uuidgen | tr 'A-Z' 'a-z')
-hysteria2_auth=$(random_b64url 32)
+hysteria2_auth=''
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then hysteria2_auth=$(random_b64url 32); fi
 reality_short_id=$(random_hex 8)
 key_output=$("$xray" x25519)
 reality_private_key=$(sed -nE 's#^Private([[:space:]]+key|Key):[[:space:]]*##p' <<<"$key_output" | sed -n '1p')
@@ -268,7 +278,7 @@ unset key_output
 [[ "$subscription_id" =~ ^[a-f0-9]{64}$ ]] || die 'generated subscription ID is invalid'
 [[ "$xhttp_private_path" =~ ^[a-f0-9]{48}$ ]] || die 'generated XHTTP path is invalid'
 [[ "$vless_uuid" =~ ^[0-9a-f-]{36}$ ]] || die 'generated VLESS UUID is invalid'
-[[ "$hysteria2_auth" =~ ^[A-Za-z0-9_-]{40,128}$ ]] || die 'generated Hysteria2 auth is invalid'
+[[ $TARGET_TLS_MODE == none || "$hysteria2_auth" =~ ^[A-Za-z0-9_-]{40,128}$ ]] || die 'generated Hysteria2 auth is invalid'
 [[ "$reality_short_id" =~ ^[a-f0-9]{16}$ ]] || die 'generated REALITY short ID is invalid'
 [[ "$reality_private_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || die 'REALITY private key parse failed'
 [[ "$reality_public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || die 'REALITY public key parse failed'
@@ -291,12 +301,14 @@ install -o root -g root -m 0600 "$tmp_env" "$runtime_env"
 rm -f -- "$tmp_env"
 unset panel_password hysteria2_auth reality_private_key
 
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 tls_generation=$(mktemp -d "$runtime_root/tls-gen.XXXXXXXX")
 chown root:xui-secrets "$tls_generation"
 chmod 0750 "$tls_generation"
 install -o root -g xui-secrets -m 0640 "$letsencrypt_live/fullchain.pem" "$tls_generation/fullchain.pem"
 install -o root -g xui-secrets -m 0640 "$letsencrypt_live/privkey.pem" "$tls_generation/privkey.pem"
 ln -s -- "$(basename "$tls_generation")" "$tls_root"
+fi
 install -d -o root -g xui -m 0750 "$decoy_root"
 printf '%s\n' '<!doctype html><html><head><title>Welcome</title></head><body><h1>Welcome</h1></body></html>' \
   >"$decoy_root/index.html"
@@ -305,8 +317,10 @@ chmod 0640 "$decoy_root/index.html"
 
 # shellcheck disable=SC1090
 source "$runtime_env"
-TLS_FULLCHAIN="$tls_fullchain"
-TLS_PRIVATE_KEY="$tls_private_key"
+TLS_FULLCHAIN='' TLS_PRIVATE_KEY=''
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  TLS_FULLCHAIN="$tls_fullchain" TLS_PRIVATE_KEY="$tls_private_key"
+fi
 export SERVER_IPV4 PUBLIC_FQDN REALITY_TARGET PANEL_USERNAME PANEL_PASSWORD PANEL_BASE_PATH
 export SUBSCRIPTION_PATH SUBSCRIPTION_ID XHTTP_PRIVATE_PATH VLESS_UUID HYSTERIA2_AUTH
 export REALITY_SHORT_ID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY TLS_FULLCHAIN TLS_PRIVATE_KEY
@@ -374,7 +388,17 @@ jq -n \
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:3
   }
 ' >"$stage/xhttp.json"
+if [[ $TARGET_TLS_MODE == none ]]; then
+  jq --slurpfile reality "$stage/reality.json" '
+    .streamSettings.security="reality"
+    | .streamSettings.realitySettings=$reality[0].streamSettings.realitySettings
+    | del(.streamSettings.tlsSettings)
+    | .subSortIndex=2
+  ' "$stage/xhttp.json" >"$stage/xhttp-certless.json"
+  mv -T -- "$stage/xhttp-certless.json" "$stage/xhttp.json"
+fi
 
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 jq -n \
   --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" --arg auth "$HYSTERIA2_AUTH" \
   --arg sub "$SUBSCRIPTION_ID" --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" \
@@ -387,8 +411,13 @@ jq -n \
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:2
   }
 ' >"$stage/hysteria2.json"
+else
+  printf 'null\n' >"$stage/hysteria2.json"
+fi
 
-for json_file in "$stage/xray-global.json" "$stage/reality.json" "$stage/xhttp.json" "$stage/hysteria2.json"; do
+json_files=("$stage/xray-global.json" "$stage/reality.json" "$stage/xhttp.json")
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then json_files+=("$stage/hysteria2.json"); fi
+for json_file in "${json_files[@]}"; do
   jq --exit-status . "$json_file" >/dev/null || die "invalid generated JSON: $json_file"
 done
 
@@ -400,7 +429,8 @@ jq --slurpfile reality "$stage/reality.json" \
         elif $p.protocol == "hysteria" then .clients |= map({auth,email}) else . end) as $settings
     | ({port:$p.port,protocol:$p.protocol,settings:$settings,streamSettings:$p.streamSettings,sniffing:$p.sniffing,tag:$tag}
        + (if $p.listen == "" then {} else {listen:$p.listen} end));
-  .inbounds += [core($reality[0];"standalone-reality"),core($xhttp[0];"standalone-xhttp"),core($hysteria[0];"standalone-hysteria2")]
+  .inbounds += ([core($reality[0];"standalone-reality"),core($xhttp[0];"standalone-xhttp")]
+    + (if env.TARGET_TLS_MODE=="none" then [] else [core($hysteria[0];"standalone-hysteria2")] end))
 ' "$stage/xray-global.json" >"$stage/xray-preflight.json"
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config "$stage/xray-preflight.json" >/dev/null
 printf 'XRAY_PREFLIGHT_OK=1\n'
@@ -409,7 +439,7 @@ ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 ufw default deny routed >/dev/null
 ufw allow "$TARGET_SSH_PORT/tcp" comment 'SSH key-only' >/dev/null
-ufw allow 80/tcp comment 'ACME HTTP-01' >/dev/null
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then ufw allow 80/tcp comment 'ACME HTTP-01' >/dev/null; fi
 ufw --force enable >/dev/null
 
 # The supported CLI places password/base path in argv. On this verified clean,
@@ -496,7 +526,7 @@ api_post --output "$stage/settings-before.json" "$api_url/setting/all"
 jq --exit-status '.success == true and (.obj|type=="object")' "$stage/settings-before.json" >/dev/null
 jq --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" \
   --arg panel_path "/$PANEL_BASE_PATH/" --arg sub_path "/$SUBSCRIPTION_PATH/" \
-  --arg sub_uri "https://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
+  --arg sub_uri "$TARGET_PUBLIC_SCHEME://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
   --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" '
   .obj
   | .webListen="127.0.0.1" | .webPort=2053 | .webDomain="" | .webBasePath=$panel_path
@@ -529,7 +559,9 @@ api_get --output "$stage/inbounds-before.json" "$api_url/inbounds/list"
 jq --exit-status '.success == true and (.obj|length==0)' "$stage/inbounds-before.json" >/dev/null ||
   die 'inbound database changed during transaction'
 
-for payload in "$stage/reality.json" "$stage/xhttp.json" "$stage/hysteria2.json"; do
+inbound_payloads=("$stage/reality.json" "$stage/xhttp.json")
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then inbound_payloads+=("$stage/hysteria2.json"); fi
+for payload in "${inbound_payloads[@]}"; do
   response="$stage/add-$(basename "$payload")"
   api_post --header 'Content-Type: application/json' --data-binary "@$payload" \
     --output "$response" "$api_url/inbounds/add"
@@ -540,7 +572,9 @@ api_get --output "$stage/inbounds-added.json" "$api_url/inbounds/list"
 reality_id=$(jq -r '.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.id' "$stage/inbounds-added.json")
 xhttp_id=$(jq -r '.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.id' "$stage/inbounds-added.json")
 hysteria_id=$(jq -r '.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.id' "$stage/inbounds-added.json")
-for inbound_id in "$reality_id" "$xhttp_id" "$hysteria_id"; do
+inbound_ids=("$reality_id" "$xhttp_id")
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then inbound_ids+=("$hysteria_id"); fi
+for inbound_id in "${inbound_ids[@]}"; do
   [[ "$inbound_id" =~ ^[1-9][0-9]*$ ]] || die 'could not resolve created inbound IDs'
 done
 
@@ -567,10 +601,16 @@ add_host_group() {
 }
 
 add_host_group "$reality_id" 443 reality "$REALITY_TARGET" '' '' ''
-add_host_group "$xhttp_id" "$XHTTP_PORT" tls "$PUBLIC_FQDN" "/$XHTTP_PRIVATE_PATH" h2 "$PUBLIC_FQDN"
-add_host_group "$hysteria_id" 443 tls "$PUBLIC_FQDN" '' h3 ''
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  add_host_group "$xhttp_id" "$XHTTP_PORT" tls "$PUBLIC_FQDN" "/$XHTTP_PRIVATE_PATH" h2 "$PUBLIC_FQDN"
+  add_host_group "$hysteria_id" 443 tls "$PUBLIC_FQDN" '' h3 ''
+else
+  add_host_group "$xhttp_id" "$XHTTP_PORT" reality "$REALITY_TARGET" "/$XHTTP_PRIVATE_PATH" '' "$PUBLIC_FQDN"
+fi
 
-for inbound_id in "$reality_id" "$xhttp_id" "$hysteria_id"; do
+inbound_ids=("$reality_id" "$xhttp_id")
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then inbound_ids+=("$hysteria_id"); fi
+for inbound_id in "${inbound_ids[@]}"; do
   api_post --header 'Content-Type: application/json' --data '{"enable":true}' \
     --output "$stage/enable-${inbound_id}.json" "$api_url/inbounds/setEnable/${inbound_id}"
   jq --exit-status '.success == true' "$stage/enable-${inbound_id}.json" >/dev/null
@@ -579,14 +619,18 @@ done
 for _ in $(seq 1 30); do
   if ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; then
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
     break
   fi
   sleep 1
 done
 ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'REALITY listener is absent'
 ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" || die 'XHTTP listener is absent'
-ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'Hysteria2 listener is absent'
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'Hysteria2 listener is absent'
+else
+  ! ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'unexpected Hysteria2 listener in certificate-free mode'
+fi
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config /usr/local/x-ui/bin/config.json >/dev/null
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
 
@@ -618,8 +662,10 @@ fi
 chown root:root /etc/systemd/system/x-ui.service "$hardening_target"
 chmod 0644 /etc/systemd/system/x-ui.service "$hardening_target"
 
-runuser -u xui -- test -r "$tls_fullchain"
-runuser -u xui -- test -r "$tls_private_key"
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  runuser -u xui -- test -r "$tls_fullchain"
+  runuser -u xui -- test -r "$tls_private_key"
+fi
 runuser -u xui -- test -r "$decoy_root/index.html"
 runuser -u xui -- test -w /etc/x-ui
 runuser -u xui -- test -w /etc/x-ui/x-ui.db
@@ -634,7 +680,7 @@ for _ in $(seq 1 30); do
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:${SUBSCRIPTION_PORT}[[:space:]]" &&
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; then
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
     break
   fi
   sleep 1
@@ -655,15 +701,17 @@ done
 
 ufw allow "$SUBSCRIPTION_PORT/tcp" comment '3x-ui HTTPS subscription' >/dev/null
 ufw allow 443/tcp comment 'VLESS REALITY' >/dev/null
-ufw allow 443/udp comment 'Hysteria2' >/dev/null
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then ufw allow 443/udp comment 'Hysteria2' >/dev/null; fi
 ufw allow "$XHTTP_PORT/tcp" comment 'VLESS XHTTP TLS H2' >/dev/null
 ufw reload >/dev/null
 
-install -o root -g root -m 0750 "$renew_hook_source" "$renew_hook"
-systemctl enable --now certbot.timer >/dev/null
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  install -o root -g root -m 0750 "$renew_hook_source" "$renew_hook"
+  systemctl enable --now certbot.timer >/dev/null
+fi
 
-subscription_url="https://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-time 30 \
+subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
+curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
   --user-agent 'v2rayN/7' --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
   --output "$stage/subscription.body" "$subscription_url"
 [[ -s "$stage/subscription.body" ]] || die 'subscription body is empty'
@@ -681,17 +729,18 @@ if "://" not in text:
     padded = text + "=" * ((4 - len(text) % 4) % 4)
     text = base64.urlsafe_b64decode(padded.encode()).decode("utf-8", "strict")
 links = [line.strip() for line in text.splitlines() if line.strip()]
-if len(links) != 3:
-    raise SystemExit(f"subscription expected 3 links, got {len(links)}")
+count = int(os.environ.get("TARGET_PROTOCOL_COUNT", "3"))
+certless = os.environ.get("TARGET_TLS_MODE", "letsencrypt") == "none"
+if len(links) != count:
+    raise SystemExit(f"subscription expected {count} links, got {len(links)}")
 parsed = [urlparse(link) for link in links]
-if sorted(item.scheme for item in parsed) != ["hysteria2", "vless", "vless"]:
+if sorted(item.scheme for item in parsed) != (["vless", "vless"] if certless else ["hysteria2", "vless", "vless"]):
     raise SystemExit("subscription schemes are not exactly two VLESS plus one Hysteria2")
 comments = sorted(unquote(item.fragment) for item in parsed)
 expected_comments = sorted([
     os.environ["TARGET_LABEL"] + " \u00b7 REALITY",
     os.environ["TARGET_LABEL"] + " \u00b7 XHTTP",
-    os.environ["TARGET_LABEL"] + " \u00b7 HYSTERIA2",
-])
+] + ([] if certless else [os.environ["TARGET_LABEL"] + " \u00b7 HYSTERIA2"]))
 if comments != expected_comments:
     raise SystemExit("subscription display comments are not exact")
 fqdn = os.environ["CHECK_PUBLIC_FQDN"]
@@ -699,7 +748,7 @@ for item in parsed:
     if item.hostname != fqdn:
         raise SystemExit("subscription address is not the managed FQDN")
 vless = [item for item in parsed if item.scheme == "vless"]
-reality = [item for item in vless if parse_qs(item.query).get("security") == ["reality"]]
+reality = [item for item in vless if parse_qs(item.query).get("security") == ["reality"] and parse_qs(item.query).get("type") == ["grpc"]]
 xhttp = [item for item in vless if parse_qs(item.query).get("type") == ["xhttp"]]
 if len(reality) != 1 or reality[0].port != 443:
     raise SystemExit("REALITY link shape mismatch")
@@ -713,21 +762,25 @@ if any(reality_query.get("flow", [""])):
 if len(xhttp) != 1 or xhttp[0].port != int(os.environ["CHECK_XHTTP_PORT"]):
     raise SystemExit("XHTTP link shape mismatch")
 xhttp_query = parse_qs(xhttp[0].query)
-if xhttp_query.get("security") != ["tls"] or xhttp_query.get("alpn") != ["h2"] or xhttp_query.get("mode") != ["packet-up"]:
+if xhttp_query.get("security") != ["reality" if certless else "tls"] or (not certless and xhttp_query.get("alpn") != ["h2"]) or xhttp_query.get("mode") != ["packet-up"]:
     raise SystemExit("XHTTP TLS/H2 shape mismatch")
+if certless and (xhttp_query.get("sni") != [os.environ["CHECK_REALITY_TARGET"]] or
+                 xhttp_query.get("pbk") != [os.environ["REALITY_PUBLIC_KEY"]] or
+                 xhttp_query.get("sid") != [os.environ["REALITY_SHORT_ID"]]):
+    raise SystemExit("XHTTP REALITY identity mismatch")
 hysteria = [item for item in parsed if item.scheme == "hysteria2"]
-if len(hysteria) != 1 or hysteria[0].port != 443:
+if (certless and hysteria) or (not certless and (len(hysteria) != 1 or hysteria[0].port != 443)):
     raise SystemExit("Hysteria2 link shape mismatch")
-print("SUBSCRIPTION_SHAPE_OK=3")
+print("SUBSCRIPTION_SHAPE_OK=" + str(count))
 PY
 
 api_get --output "$stage/inbounds-final.json" "$api_url/inbounds/list"
 jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg uuid "$VLESS_UUID" \
   --arg auth "$HYSTERIA2_AUTH" --arg sub "$SUBSCRIPTION_ID" '
-  .success == true and (.obj|length==3) and ([.obj[].enable]|all)
+  .success == true and (.obj|length==((env.TARGET_PROTOCOL_COUNT // "3")|tonumber)) and ([.obj[].enable]|all)
   and ([.obj[].shareAddr]|unique==[$fqdn])
   and ([.obj[]|select(.protocol=="vless")|.settings.clients[0].id]|unique==[$uuid])
-  and ([.obj[]|select(.protocol=="hysteria")|.settings.clients[0].auth]==[$auth])
+  and ([.obj[]|select(.protocol=="hysteria")|.settings.clients[0].auth]==(if env.TARGET_TLS_MODE=="none" then [] else [$auth] end))
   and ([.obj[].settings.clients[0].subId]|unique==[$sub])
 ' "$stage/inbounds-final.json" >/dev/null
 
@@ -735,15 +788,15 @@ api_get --output "$stage/hosts-final.json" "$api_url/hosts/list"
 jq --exit-status --arg host443 "$PUBLIC_FQDN:443" \
   --arg host8443 "$PUBLIC_FQDN:$XHTTP_PORT" --arg fqdn "$PUBLIC_FQDN" \
   --arg target "$REALITY_TARGET" --arg xhttp_path "/$XHTTP_PRIVATE_PATH" '
-  ([.obj[]|select(.security=="reality")]) as $rs
-  | ([.obj[]|select(.security=="tls" and .port==8443)]) as $xs
+  ([.obj[]|select(.security=="reality" and .port==443)]) as $rs
+  | ([.obj[]|select(.port==8443 and .security==(if env.TARGET_TLS_MODE=="none" then "reality" else "tls" end))]) as $xs
   | ([.obj[]|select(.security=="tls" and .port==443)]) as $hs
-  | .success == true and (.obj|length==3)
-  and ($rs|length==1) and ($xs|length==1) and ($hs|length==1)
+  | .success == true and (.obj|length==((env.TARGET_PROTOCOL_COUNT // "3")|tonumber))
+  and ($rs|length==1) and ($xs|length==1) and ($hs|length==(if env.TARGET_TLS_MODE=="none" then 0 else 1 end))
   and ($rs[0].hosts==[$host443] and $rs[0].sni==$target and $rs[0].alpn==[])
-  and ($xs[0].hosts==[$host8443] and $xs[0].sni==$fqdn
-       and $xs[0].path==$xhttp_path and $xs[0].hostHeader==$fqdn and $xs[0].alpn==["h2"])
-  and ($hs[0].hosts==[$host443] and $hs[0].sni==$fqdn and $hs[0].alpn==["h3"])
+  and ($xs[0].hosts==[$host8443] and $xs[0].sni==(if env.TARGET_TLS_MODE=="none" then $target else $fqdn end)
+       and $xs[0].path==$xhttp_path and $xs[0].hostHeader==$fqdn and $xs[0].alpn==(if env.TARGET_TLS_MODE=="none" then [] else ["h2"] end))
+  and (if env.TARGET_TLS_MODE=="none" then true else ($hs[0].hosts==[$host443] and $hs[0].sni==$fqdn and $hs[0].alpn==["h3"]) end)
   and ([.obj[].isDisabled]|all(.==false))
 ' "$stage/hosts-final.json" >/dev/null
 

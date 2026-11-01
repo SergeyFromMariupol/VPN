@@ -83,7 +83,9 @@ case $CASE in
     : >"$FIXTURE_ROOT/started"
     kill -STOP "$BASHPID";;
   count)
-    for name in base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal; do
+    if [[ $TARGET_TLS_MODE == none ]]; then names='base direct panel nginx-restart warp dual xhttp'
+    else names='base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal'; fi
+    for name in $names; do
       phase "$name" instant
       if [[ $name == base ]]; then phase base instant; fi
     done
@@ -98,6 +100,7 @@ environment = dict(os.environ, FIXTURE_ROOT=str(root), CASE=config['case'], CANA
                    PROGRESS_PYTHON=str(source / 'tools/progress.py'),
                    PROGRESS_STAGE=config.get('stage', ''),
                    PROGRESS_RESULT=str(config.get('result', '0')),
+                   TARGET_TLS_MODE=config.get('tls_mode', 'letsencrypt'),
                    TERM=config.get('term', 'xterm-256color'), LC_ALL='C', LANG='C')
 environment.pop('NO_COLOR', None)
 if config.get('no_color'): environment['NO_COLOR'] = '1'
@@ -136,7 +139,7 @@ def frames(raw, label, preparatory=False):
     text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', raw.decode('utf-8', 'replace'))
     result = []
     for line in re.split(r'[\r\n]', text):
-        count = re.search(r'\[(\d+)/12\]', line)
+        count = re.search(r'\[(\d+)/(?:8|12)\]', line)
         clock = re.search(r'\b(\d+):(\d{2})\b', line)
         spinner = re.search('[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]', line)
         if clock and label in line and (count or (preparatory and spinner)):
@@ -187,7 +190,7 @@ try:
         elif case.startswith('killed-') and live and observed:
             os.kill(live[-1][1], signal.SIGKILL)
             killed = ready = True
-        elif case == 'count': ready = any(count == 11 for count, elapsed in observed)
+        elif case == 'count': ready = any(count == (7 if config.get('tls_mode') == 'none' else 11) for count, elapsed in observed)
         elif config.get('term') == 'dumb':
             ready = len({elapsed for count, elapsed in observed}) >= 2 and max(elapsed for count, elapsed in observed) >= 10
         else: ready = len({elapsed for count, elapsed in observed}) >= 2
@@ -328,6 +331,17 @@ class Progress(unittest.TestCase):
                     self.assertNotRegex(result['output'], r'%|/12|[█░]')
                     self.assertRegex(result['output'], r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][^\r\n]*' + label)
                     if code == '1': self.assertNotIn('готово', result['output'])
+
+    def test_certificate_free_mode_counts_eight_real_phases_and_reaches_full_bar(self):
+        result = self.fixture('count', tls_mode='none')
+        self.assertEqual(result['code'], 0, result['output'])
+        self.assertEqual(result['valid_count'], 8)
+        self.assertTrue(result['verify_replaced'])
+        self.assertEqual(set(result['held_counts']), {7})
+        self.assertIn('Общий прогресс: [████████████] 100% [8/8]', result['output'])
+        self.assertIn('Четыре профиля VPN', result['output'])
+        self.assertIn('HTTP-панель', result['output'])
+        self.assertNotIn('/12]', result['output'])
 
     def test_plain_preparatory_status_has_no_renderer_or_overall_percentage(self):
         for stage, label in (('sni-check', 'Проверка REALITY SNI'),

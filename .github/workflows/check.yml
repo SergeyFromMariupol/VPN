@@ -65,6 +65,29 @@ jobs:
           sudo install -m 0755 /bin/true /opt/krysyuk-warp-egress/bin/xray
           sudo install -m 0755 "$rendered"/warp-egress/scripts/*.sh /usr/local/libexec/krysyuk-warp-egress/
           sudo bash "$rendered/warp-egress/tests/test-static-assets.sh"
+      - name: Validate certificate-free HTTP panel with actual Nginx
+        run: |
+          sudo apt-get install -y --no-install-recommends nginx-core
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, tempfile
+          template = Path('bundle/templates/3x-ui-public-http.nginx.conf').read_text()
+          replacements = {
+              '__SERVER_IPV4__': '127.0.0.2',
+              '__PUBLIC_FQDN__': 'fixture.example.invalid',
+              '__PANEL_BASE_PATH__': 'fixture-path-for-config-validation',
+          }
+          for key, value in replacements.items():
+              template = template.replace(key, value)
+          with tempfile.TemporaryDirectory(prefix='vpn-nginx-http.') as temporary:
+              root = Path(temporary)
+              config = root / 'nginx.conf'
+              config.write_text('pid ' + str(root / 'nginx.pid') + ';\n'
+                                'error_log stderr;\nevents {}\nhttp {\n'
+                                'access_log off;\n' + template + '\n}\n')
+              subprocess.run(['nginx', '-t', '-p', str(root), '-c', str(config)], check=True)
+          print('CERTIFICATE_FREE_NGINX_CONFIG=PASS')
+          PY
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"

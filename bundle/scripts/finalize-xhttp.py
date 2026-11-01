@@ -112,6 +112,24 @@ def envfile(path):
     return parse_env(private(path))
 
 
+def tls_mode(target):
+    mode = target.get('TARGET_TLS_MODE', 'letsencrypt')
+    need(mode in ('letsencrypt', 'none'), 'TLS_MODE')
+    return mode
+
+
+def protocols(target):
+    return ('REALITY', 'HYSTERIA2', 'XHTTP') if tls_mode(target) == 'letsencrypt' else ('REALITY', 'XHTTP')
+
+
+def profile_count(target):
+    return 2 * len(protocols(target))
+
+
+def profile_roles(target):
+    return [(role, transport) for role in ('warp', 'direct') for transport in protocols(target)]
+
+
 def endpoint(target):
     """Address selection is independent of the user-visible profile prefix."""
     mode, address = target.get('TARGET_ADDRESS_MODE', 'domain'), target['TARGET_FQDN']
@@ -140,7 +158,7 @@ def profile_names(target):
          'PROFILE_LABEL')
     return [label + ' · ' + egress + ' · ' + protocol
             for egress in ('☁️ Cloudflare', '🖥️ IP сервера')
-            for protocol in ('REALITY', 'HYSTERIA2', 'XHTTP')]
+            for protocol in protocols(target)]
 
 
 @contextmanager
@@ -270,7 +288,7 @@ def direct_row_matches_feed(row, served, target):
     """3X-UI may apply the stored remark to an older link's URI fragment."""
     stored_uri = urlsplit(row['value'])
     served_uri = urlsplit(served)
-    full_name = profile_names(target)[5]
+    full_name = profile_names(target)[-1]
     old_name = target.get('TARGET_LABEL', '🇩🇪 Германия') + ' · XHTTP'
     return (row['remark'] == full_name and
             stored_uri._replace(fragment='') == served_uri._replace(fragment='') and
@@ -288,13 +306,18 @@ def decode_feed(raw, expected_count=6):
     return lines
 
 
-def native(target, secret, expected_count=6, user_agents=('v2RayTun', 'Happ', 'Karing')):
+def native(target, secret, expected_count=None, user_agents=('v2RayTun', 'Happ', 'Karing')):
     host = endpoint(target)
+    if expected_count is None:
+        expected_count = profile_count(target)
     path = '/' + secret['SUBSCRIPTION_PATH'].strip('/') + '/' + secret['SUBSCRIPTION_ID']
     feeds = []
     for ua in user_agents:
-        connection = http.client.HTTPSConnection(host, 2096, timeout=20,
-                                                 context=ssl.create_default_context())
+        if tls_mode(target) == 'none':
+            connection = http.client.HTTPConnection(host, 2096, timeout=20)
+        else:
+            connection = http.client.HTTPSConnection(host, 2096, timeout=20,
+                                                     context=ssl.create_default_context())
         try:
             connection.request('GET', path, headers={'User-Agent': ua, 'Cache-Control': 'no-cache'})
             response = connection.getresponse()
@@ -374,6 +397,17 @@ def uri_for(config, public_key, label):
             values['host'] + ':' + str(inbound['port']) + '?' + urlencode(values) + '#' + quote(label, safe=''))
 
 
+def promoted_feed(feeds, target, configs, public_key):
+    """Replace only the two XHTTP links, keeping every other URI byte-for-byte."""
+    need(len(feeds) == profile_count(target) and len(configs) == 2, 'NATIVE_PROFILE_COUNT')
+    promoted = feeds.copy()
+    for index, (role, protocol) in enumerate(profile_roles(target)):
+        if protocol == 'XHTTP':
+            promoted[index] = uri_for(configs[1 if role == 'warp' else 0], public_key,
+                                      unquote(urlsplit(feeds[index]).fragment))
+    return promoted
+
+
 def unit_bytes(conf):
     return f'''[Unit]
 Description=Independent VPN XHTTP REALITY service
@@ -432,11 +466,12 @@ with closing(sqlite3.connect('file:'+p['db']+'?mode=rw',uri=True,timeout=10)) as
 '''
 
 
-def database():
+def database(target=None):
+    count = profile_count(target or {})
     with closing(sqlite3.connect(DB.as_uri() + '?mode=ro', uri=True)) as db:
         need(db.execute('PRAGMA quick_check').fetchone() == ('ok',), 'DB_QUICK_CHECK')
-        need(db.execute('SELECT count(*) FROM clients').fetchone() == (6,) and
-             db.execute('SELECT count(*) FROM client_inbounds').fetchone() == (6,), 'DB_CLIENT_COUNT')
+        need(db.execute('SELECT count(*) FROM clients').fetchone() == (count,) and
+             db.execute('SELECT count(*) FROM client_inbounds').fetchone() == (count,), 'DB_CLIENT_COUNT')
         cols = [row[1] for row in db.execute('PRAGMA table_info(client_external_links)')]
         rows = [dict(zip(cols, row)) for row in db.execute('SELECT * FROM client_external_links ORDER BY sort_index,id')]
         inbounds = db.execute('SELECT id,port,enable FROM inbounds ORDER BY id').fetchall()
@@ -590,19 +625,21 @@ def payload(uri, warp, target, binary=XRAY):
 
 
 def validate_legacy_feed(feeds, target, secret):
-    """Verify the exact three direct profiles published before dual-egress."""
+    """Verify the exact direct profiles published before dual-egress."""
     host = endpoint(target)
     label = target['TARGET_LABEL']
     expected = {
         'reality': ('vless', 443, secret['VLESS_UUID'], label + ' · REALITY'),
-        'hysteria2': ('hysteria2', 443, secret['HYSTERIA2_AUTH'], label + ' · HYSTERIA2'),
         'xhttp': ('vless', 8443, secret['VLESS_UUID'], label + ' · XHTTP'),
     }
-    need(len(feeds) == 3 and len(set(feeds)) == 3, 'LEGACY_FEED_COUNT')
+    if tls_mode(target) == 'letsencrypt':
+        expected['hysteria2'] = ('hysteria2', 443, secret['HYSTERIA2_AUTH'], label + ' · HYSTERIA2')
+    need(len(feeds) == len(expected) and len(set(feeds)) == len(expected), 'LEGACY_FEED_COUNT')
     seen = set()
     for uri in feeds:
         parsed, values = query(uri)
-        if parsed.scheme == 'vless' and values.get('security') == 'reality':
+        if (parsed.scheme == 'vless' and values.get('security') == 'reality'
+                and values.get('type') != 'xhttp'):
             role = 'reality'
             need(values.get('type') == 'grpc' and values.get('serviceName') == 'reality-grpc'
                  and values.get('sni') == target['TARGET_REALITY_SNI']
@@ -612,16 +649,25 @@ def validate_legacy_feed(feeds, target, secret):
                  'LEGACY_REALITY_URI')
         elif parsed.scheme in ('hysteria2', 'hy2'):
             role = 'hysteria2'
+            need(role in expected, 'LEGACY_HYSTERIA_DISABLED')
             need(values.get('sni') == host and values.get('alpn') == 'h3'
                  and values.get('insecure', '0').lower() not in ('1', 'true', 'yes'),
                  'LEGACY_HYSTERIA_URI')
         elif parsed.scheme == 'vless' and values.get('type') == 'xhttp':
             role = 'xhttp'
-            need(values.get('security') == 'tls' and values.get('sni') == host
-                 and values.get('alpn') == 'h2' and values.get('host') == host
+            need(values.get('host') == host
                  and values.get('path') == '/' + secret['XHTTP_PRIVATE_PATH']
                  and values.get('mode') == 'packet-up' and values.get('flow', '') == ''
                  and values.get('insecure', '0') == '0', 'LEGACY_XHTTP_URI')
+            if tls_mode(target) == 'none':
+                need(values.get('security') == 'reality'
+                     and values.get('sni') == target['TARGET_REALITY_SNI']
+                     and values.get('pbk') == secret['REALITY_PUBLIC_KEY']
+                     and values.get('sid') == secret['REALITY_SHORT_ID']
+                     and values.get('fp') == 'chrome', 'LEGACY_XHTTP_URI')
+            else:
+                need(values.get('security') == 'tls' and values.get('sni') == host
+                     and values.get('alpn') == 'h2', 'LEGACY_XHTTP_URI')
             if 'extra' in values:
                 extra = strict_json(values['extra'])
                 need(isinstance(extra, dict) and extra.get('mode', 'packet-up') == 'packet-up',
@@ -638,6 +684,7 @@ def validate_legacy_feed(feeds, target, secret):
 
 def verify_legacy_rollback(target, secret, snapshot, baseline_feed=None):
     """Do not certify an inverse transaction until the old data plane works."""
+    count = len(protocols(target))
     need(LEGACY_BACKUP_ROOT.is_dir() and not LEGACY_BACKUP_ROOT.is_symlink() and
          snapshot.is_dir() and not snapshot.is_symlink() and
          snapshot.resolve().is_relative_to(LEGACY_BACKUP_ROOT.resolve()),
@@ -653,13 +700,14 @@ def verify_legacy_rollback(target, secret, snapshot, baseline_feed=None):
         env={**ENV, 'XRAY_LOCATION_ASSET': str(SOURCE_XRAY.parent)})
     run([sys.executable, str(Path(__file__).with_name('network-contract.py')),
          '--target-ip', target['TARGET_IPV4'], '--interface', target['TARGET_INTERFACE'],
-         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0'])
+         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0',
+         '--tls-mode', tls_mode(target)])
     with closing(sqlite3.connect(DB.as_uri() + '?mode=ro', uri=True)) as db:
         need(db.execute('PRAGMA quick_check').fetchone() == ('ok',), 'ROLLBACK_DB_CHECK')
-        need(db.execute('SELECT count(*) FROM clients').fetchone() == (3,) and
-             db.execute('SELECT count(*) FROM client_inbounds').fetchone() == (3,) and
+        need(db.execute('SELECT count(*) FROM clients').fetchone() == (count,) and
+             db.execute('SELECT count(*) FROM client_inbounds').fetchone() == (count,) and
              db.execute('SELECT count(*) FROM client_external_links').fetchone() == (0,) and
-             db.execute('SELECT count(*) FROM inbounds WHERE enable=1').fetchone() == (3,),
+             db.execute('SELECT count(*) FROM inbounds WHERE enable=1').fetchone() == (count,),
              'ROLLBACK_DB_SHAPE')
     need(run(['ip', '-4', 'route', 'show', 'table', 'all']).stdout ==
          private(snapshot / 'ip4-routes-before.txt') and
@@ -671,11 +719,11 @@ def verify_legacy_rollback(target, secret, snapshot, baseline_feed=None):
              'ROLLBACK_XHTTP_UNIT')
     for path in (*UNIT_PATHS, ROOT, CFROOT, EXECROOT):
         need(not path.exists() and not path.is_symlink(), 'ROLLBACK_XHTTP_RESOURCE')
-    feeds = native(target, secret, expected_count=3)
+    feeds = native(target, secret, expected_count=count)
     validate_legacy_feed(feeds, target, secret)
     if baseline_feed is not None:
-        need(native(target, secret, expected_count=3, user_agents=('v2rayN/7',)) ==
-             decode_feed(private(baseline_feed), expected_count=3),
+        need(native(target, secret, expected_count=count, user_agents=('v2rayN/7',)) ==
+             decode_feed(private(baseline_feed), expected_count=count),
              'ROLLBACK_FEED_BYTES')
     for uri in feeds:
         payload(uri, False, target['TARGET_IPV4'], binary=SOURCE_XRAY)
@@ -683,7 +731,7 @@ def verify_legacy_rollback(target, secret, snapshot, baseline_feed=None):
 
 def verify_xhttp_rollback(target, secret, main_before, rows, inbounds,
                           before_feed, route_before):
-    """Verify the complete dual-six state after a failed promotion."""
+    """Verify the complete dual-egress state after a failed promotion."""
     need(strict_json(RUNTIME.read_bytes()) == strict_json(main_before), 'ROLLBACK_RUNTIME')
     need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
     run(['systemctl', 'is-active', 'x-ui.service'])
@@ -691,8 +739,9 @@ def verify_xhttp_rollback(target, secret, main_before, rows, inbounds,
         env={**ENV, 'XRAY_LOCATION_ASSET': str(SOURCE_XRAY.parent)})
     run([sys.executable, str(Path(__file__).with_name('network-contract.py')),
          '--target-ip', target['TARGET_IPV4'], '--interface', target['TARGET_INTERFACE'],
-         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0'])
-    need(database() == (rows, inbounds), 'ROLLBACK_DB_SHAPE')
+         '--ssh-port', target['TARGET_SSH_PORT'], '--promoted', '0',
+         '--tls-mode', tls_mode(target)])
+    need(database(target) == (rows, inbounds), 'ROLLBACK_DB_SHAPE')
     need(routes() == route_before, 'ROLLBACK_HOST_ROUTE')
     for unit in UNITS:
         need(subprocess.run(['systemctl', 'is-active', '--quiet', unit],
@@ -701,8 +750,9 @@ def verify_xhttp_rollback(target, secret, main_before, rows, inbounds,
     for path in (*UNIT_PATHS, ROOT, CFROOT, EXECROOT):
         need(not path.exists() and not path.is_symlink(), 'ROLLBACK_XHTTP_RESOURCE')
     need(native(target, secret) == before_feed, 'ROLLBACK_FEED_BYTES')
+    need(len(before_feed) == profile_count(target), 'ROLLBACK_FEED_COUNT')
     for index, uri in enumerate(before_feed):
-        payload(uri, index < 3, target['TARGET_IPV4'], binary=SOURCE_XRAY)
+        payload(uri, index < len(protocols(target)), target['TARGET_IPV4'], binary=SOURCE_XRAY)
 
 
 def kernel_listener(pid, port):
@@ -742,6 +792,41 @@ def validate_marker(marker, target, direct_raw, warp_raw, main_raw, allow_pendin
          and marker['main_runtime_sha256'] == sha(canonical(strict_json(main_raw))), 'MARKER_CONFIG_HASH')
 
 
+def verify_published_profiles(feeds, target, secret, configs, main):
+    """Match the exact published four/six URIs to their canonical runtime roles."""
+    host = endpoint(target)
+    names = profile_names(target)
+    identities = {('warp', 'REALITY'): secret['WARP_REALITY_UUID'],
+                  ('warp', 'XHTTP'): secret['WARP_XHTTP_UUID'],
+                  ('direct', 'REALITY'): secret['VLESS_UUID'],
+                  ('direct', 'XHTTP'): secret['VLESS_UUID']}
+    if tls_mode(target) == 'letsencrypt':
+        identities.update({('warp', 'HYSTERIA2'): secret['WARP_HYSTERIA2_AUTH'],
+                           ('direct', 'HYSTERIA2'): secret['HYSTERIA2_AUTH']})
+    need(len(feeds) == len(set(feeds)) == profile_count(target), 'NATIVE_PROFILE_COUNT')
+    for index, (role, protocol) in enumerate(profile_roles(target)):
+        uri = feeds[index]
+        parsed, values = query(uri)
+        need(parsed.hostname == host and parsed.username == identities[(role, protocol)]
+             and unquote(parsed.fragment) == names[index], 'NATIVE_IDENTITY_LABEL')
+        if protocol == 'XHTTP':
+            config = configs[1 if role == 'warp' else 0]
+            need(uri == uri_for(config, public_key(config), names[index]), 'NATIVE_XHTTP_EXACT')
+        elif protocol == 'REALITY':
+            need(parsed.scheme == 'vless' and parsed.port == 443 and values.get('sni') == target['TARGET_REALITY_SNI']
+                 and values.get('type') == 'grpc' and values.get('serviceName') == 'reality-grpc'
+                 and values.get('security') == 'reality' and values.get('flow', '') == ''
+                 and values.get('pbk') == secret['REALITY_PUBLIC_KEY']
+                 and values.get('sid') == secret['REALITY_SHORT_ID'], 'NATIVE_REALITY')
+        else:
+            need(parsed.scheme in ('hysteria2', 'hy2') and parsed.port == 443
+                 and values.get('sni') == host and values.get('alpn') == 'h3'
+                 and values.get('insecure', '0') == '0', 'NATIVE_HYSTERIA')
+    connector = next(o for o in main['outbounds'] if o['tag'] == 'WARP_CF')['settings']['vnext'][0]['users'][0]['id']
+    need(not any(value in '\n'.join(feeds) for value in (connector, secret['DIRECT_SUBSCRIPTION_ID'],
+                                                       '127.0.0.1', ':24443', ':24444')), 'CONNECTOR_LEAK')
+
+
 def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
     host = endpoint(target)
     for path in (ROOT, CFROOT):
@@ -757,6 +842,11 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
     configs = [strict_json(direct_raw), strict_json(warp_raw)]
     main = strict_json(main_raw)
     need(not any(i.get('port') in (8443, 8444) for i in main['inbounds']), 'RETIRED_MAIN_LISTENER')
+    if tls_mode(target) == 'none':
+        need(not any(i.get('protocol') in ('hysteria', 'hysteria2') or
+                     i.get('streamSettings', {}).get('network') == 'hysteria' or
+                     'tlsSettings' in i.get('streamSettings', {})
+                     for i in main['inbounds']), 'UNEXPECTED_TLS_INBOUND')
     reality = [i for i in main['inbounds'] if i.get('port') == 443 and
                i.get('streamSettings', {}).get('security') == 'reality']
     need(len(reality) == 1, 'MAIN_REALITY_COUNT')
@@ -801,39 +891,18 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
                  {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'BLOCK'}], 'XHTTP_EGRESS_POLICY')
         run([str(XRAY), 'run', '-test', '-config', str(path)])
     need(configs[0]['inbounds'][0]['streamSettings'] == configs[1]['inbounds'][0]['streamSettings'], 'XHTTP_TRANSPORT_CLONE')
-    rows, inbounds = database()
-    need([r['sort_index'] for r in rows] == [-1, 0, 1, 2]
-         and len(inbounds) == 3 and sum(bool(r[2]) for r in inbounds) == 2
+    rows, inbounds = database(target)
+    count = len(protocols(target))
+    need([r['sort_index'] for r in rows] == [-1, *range(count)]
+         and len(inbounds) == count and sum(bool(r[2]) for r in inbounds) == count - 1
          and any(r[1:] == (8443, 0) for r in inbounds), 'DB_PROMOTED_SHAPE')
     feeds = native(target, secret)
     if expected is not None:
         need(feeds == expected, 'FINAL_SUBSCRIPTION_CAS')
-    names = profile_names(target)
-    expected_ids = [secret['WARP_REALITY_UUID'], secret['WARP_HYSTERIA2_AUTH'], secret['WARP_XHTTP_UUID'],
-                    secret['VLESS_UUID'], secret['HYSTERIA2_AUTH'], secret['VLESS_UUID']]
-    for index, uri in enumerate(feeds):
-        parsed, values = query(uri)
-        need(parsed.hostname == host and parsed.username == expected_ids[index]
-             and unquote(parsed.fragment) == names[index], 'NATIVE_IDENTITY_LABEL')
-        if index in (2, 5):
-            config = configs[1 if index == 2 else 0]
-            need(uri == uri_for(config, public_key(config), names[index]), 'NATIVE_XHTTP_EXACT')
-        elif index in (0, 3):
-            need(parsed.port == 443 and values.get('sni') == target['TARGET_REALITY_SNI']
-                 and values.get('type') == 'grpc' and values.get('serviceName') == 'reality-grpc'
-                 and values.get('security') == 'reality' and values.get('flow', '') == ''
-                 and values.get('pbk') == secret['REALITY_PUBLIC_KEY']
-                 and values.get('sid') == secret['REALITY_SHORT_ID'], 'NATIVE_REALITY')
-        else:
-            need(parsed.scheme in ('hysteria2', 'hy2') and parsed.port == 443
-                 and values.get('sni') == host and values.get('alpn') == 'h3'
-                 and values.get('insecure', '0') == '0', 'NATIVE_HYSTERIA')
-    connector = next(o for o in main['outbounds'] if o['tag'] == 'WARP_CF')['settings']['vnext'][0]['users'][0]['id']
-    need(not any(value in '\n'.join(feeds) for value in (connector, secret['DIRECT_SUBSCRIPTION_ID'],
-                                                       '127.0.0.1', ':24443', ':24444')), 'CONNECTOR_LEAK')
+    verify_published_profiles(feeds, target, secret, configs, main)
     if do_payload:
         for index, uri in enumerate(feeds):
-            payload(uri, index < 3, target['TARGET_IPV4'])
+            payload(uri, index < count, target['TARGET_IPV4'])
     return marker
 
 
@@ -848,25 +917,25 @@ def finalize(target, secret):
         pass
     else:
         raise RuntimeError('EXISTING_XHTTP_USER')
-    rows, inbounds = database()
-    need(len(inbounds) == 3 and all(r[2] == 1 for r in inbounds)
-         and [r['sort_index'] for r in rows] == [0, 1, 2], 'FRESH_DUAL6_REQUIRED')
+    count = len(protocols(target))
+    rows, inbounds = database(target)
+    need(len(inbounds) == count and all(r[2] == 1 for r in inbounds)
+         and [r['sort_index'] for r in rows] == list(range(count)), 'FRESH_DUAL_REQUIRED')
     old = [r for r in inbounds if r[1] == 8443]
     need(len(old) == 1, 'OLD_INBOUND')
     main_before = RUNTIME.read_bytes()
     main = strict_json(main_before)
     before_feed = native(target, secret)
-    need(direct_row_matches_feed(rows[2], before_feed[5], target), 'DIRECT_ROW_BASELINE')
+    need(len(before_feed) == profile_count(target), 'NATIVE_PROFILE_COUNT')
+    need(direct_row_matches_feed(rows[-1], before_feed[-1], target), 'DIRECT_ROW_BASELINE')
     need(sha(SOURCE_XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
     route_before = routes()
     private_key, pubkey = keypair(run([str(SOURCE_XRAY), 'x25519']).stdout)
     configs = build(main, target, private_key, secrets.token_hex(8), '/' + secrets.token_hex(32))
-    after_feed = before_feed.copy()
-    after_feed[2] = uri_for(configs[1], pubkey, unquote(urlsplit(before_feed[2]).fragment))
-    after_feed[5] = uri_for(configs[0], pubkey, unquote(urlsplit(before_feed[5]).fragment))
+    after_feed = promoted_feed(before_feed, target, configs, pubkey)
     cf_row = copy.deepcopy(rows[0])
     cf_row.pop('id')
-    cf_row.update(value=after_feed[2], remark=unquote(urlsplit(after_feed[2]).fragment), sort_index=-1,
+    cf_row.update(value=after_feed[count - 1], remark=unquote(urlsplit(after_feed[count - 1]).fragment), sort_index=-1,
                   created_at=int(time.time() * 1000), last_fetch_at=0, last_fetch_error='')
     backup = Path(tempfile.mkdtemp(prefix='vpn-fresh-xhttp-', dir='/var/backups'))
     os.chmod(backup, 0o700)
@@ -876,11 +945,14 @@ def finalize(target, secret):
             need(destination.execute('PRAGMA quick_check').fetchone() == ('ok',), 'SNAPSHOT_DB')
     os.chmod(backup / 'x-ui.db', 0o600)
     save(backup / 'main-before.json', main_before)
+    snapshot_paths = ['etc/x-ui', 'usr/local/x-ui', 'etc/krysyuk-standalone', 'etc/systemd/system',
+                      'etc/nginx', 'etc/ufw', 'etc/krysyuk-warp-egress']
+    if tls_mode(target) == 'letsencrypt':
+        snapshot_paths.append('etc/letsencrypt')
     run(['tar', '--acls', '--xattrs', '--numeric-owner',
          '--exclude=etc/x-ui/x-ui.db', '--exclude=etc/x-ui/x-ui.db-wal', '--exclude=etc/x-ui/x-ui.db-shm',
          '-cpf', str(backup / 'managed-before.tar'),
-         '-C', '/', 'etc/x-ui', 'usr/local/x-ui', 'etc/krysyuk-standalone', 'etc/systemd/system',
-         'etc/nginx', 'etc/letsencrypt', 'etc/ufw', 'etc/krysyuk-warp-egress'], timeout=120)
+         '-C', '/', *snapshot_paths], timeout=120)
     run(['tar', '-tf', str(backup / 'managed-before.tar')], timeout=60)
     save(backup / 'nft-before.txt', run(['nft', '-s', 'list', 'ruleset']).stdout)
     save(backup / 'ufw-before.txt', run(['ufw', 'show', 'added']).stdout)
@@ -934,8 +1006,8 @@ def finalize(target, secret):
         run(['systemctl', 'stop', 'x-ui.service'])
         sql_intent = True
         sql({'action': 'apply', 'expected_rows': rows, 'expected_enable': 1, 'wanted_enable': 0,
-             'inbound': old[0][0], 'direct_id': rows[2]['id'], 'direct_uri': after_feed[5],
-             'direct_label': unquote(urlsplit(after_feed[5]).fragment), 'cf_row': cf_row})
+             'inbound': old[0][0], 'direct_id': rows[-1]['id'], 'direct_uri': after_feed[-1],
+             'direct_label': unquote(urlsplit(after_feed[-1]).fragment), 'cf_row': cf_row})
         run(['systemctl', 'daemon-reload'])
         run(['systemctl', 'start', 'x-ui.service'])
         for unit in UNITS:
@@ -951,7 +1023,8 @@ def finalize(target, secret):
         need(routes() == route_before, 'MAIN_ROUTE_DRIFT')
         marker['status'] = 'committed'
         atomic_owned(MARKER, canonical(marker), created, created_versions)
-        save(backup / 'COMMITTED', b'fresh-promoted-six-native3UA-TCP-UDP-egress-pass\n')
+        save(backup / 'COMMITTED',
+             ('fresh-promoted-' + str(profile_count(target)) + '-native3UA-TCP-UDP-egress-pass\n').encode())
         print('FRESH_XHTTP_COMMITTED=1')
     except BaseException:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -960,18 +1033,18 @@ def finalize(target, secret):
             subprocess.run(['systemctl', 'disable', '--now', unit], capture_output=True, timeout=30)
         if sql_intent:
             run(['systemctl', 'stop', 'x-ui.service'])
-            current_rows, current_inbounds = database()
+            current_rows, current_inbounds = database(target)
             if current_rows != rows:
                 added = [r for r in current_rows if r['sort_index'] == -1]
                 need(len(added) == 1 and all(added[0].get(k) == v for k, v in cf_row.items()), 'ROLLBACK_FOREIGN_SQL')
                 restored = [copy.deepcopy(r) for r in current_rows if r['id'] != added[0]['id']]
                 for row in restored:
-                    if row['id'] == rows[2]['id']:
-                        need(row['value'] == after_feed[5], 'ROLLBACK_FOREIGN_DIRECT')
-                        row['value'], row['remark'] = rows[2]['value'], rows[2]['remark']
+                    if row['id'] == rows[-1]['id']:
+                        need(row['value'] == after_feed[-1], 'ROLLBACK_FOREIGN_DIRECT')
+                        row['value'], row['remark'] = rows[-1]['value'], rows[-1]['remark']
                 need(restored == rows, 'ROLLBACK_FOREIGN_ROWS')
                 sql({'action': 'rollback', 'expected_rows': current_rows, 'expected_enable': 0,
-                     'wanted_enable': 1, 'inbound': old[0][0], 'cf_id': added[0]['id'], 'old_direct': rows[2]})
+                     'wanted_enable': 1, 'inbound': old[0][0], 'cf_id': added[0]['id'], 'old_direct': rows[-1]})
             else:
                 need(current_inbounds == inbounds, 'ROLLBACK_UNKNOWN_SQL_OUTCOME')
         if rule_intent:

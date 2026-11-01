@@ -49,6 +49,28 @@ def firewall(promoted=True):
     return text
 
 
+class CertificateModeContract(unittest.TestCase):
+    def test_none_mode_accepts_only_tcp_without_acme_or_hysteria_rules(self):
+        listeners = sockets().replace(socket('udp', f'{IP}:443'), '')
+        rules = '\n'.join(line for line in firewall().splitlines()
+                          if not line.startswith(('80/tcp', '443/udp')))
+        network.validate_listeners(network.parse_ss(listeners), IP, INTERFACE, SSH, True,
+                                   tls_mode='none')
+        network.validate_ufw(rules, IP, INTERFACE, SSH, True, DEFAULTS, 'none')
+
+    def test_none_mode_rejects_hysteria_listener_and_extra_acme_rules(self):
+        with self.assertRaises(ValueError):
+            network.validate_listeners(network.parse_ss(sockets()), IP, INTERFACE, SSH, True,
+                                       tls_mode='none')
+        with self.assertRaises(ValueError):
+            network.validate_ufw(firewall(), IP, INTERFACE, SSH, True, DEFAULTS, 'none')
+
+    def test_default_letsencrypt_still_requires_hysteria(self):
+        listeners = sockets().replace(socket('udp', f'{IP}:443'), '')
+        with self.assertRaises(ValueError):
+            network.validate_listeners(network.parse_ss(listeners), IP, INTERFACE, SSH, True)
+
+
 class FirewallContract(unittest.TestCase):
     def check(self, text, promoted=True, defaults=DEFAULTS):
         network.validate_ufw(text, IP, INTERFACE, SSH, promoted, defaults)

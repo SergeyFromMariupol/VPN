@@ -53,8 +53,13 @@ backup=$(mktemp -d -p /var/backups "vpn-nginx-restart-$(date -u +%Y%m%dT%H%M%SZ)
 chmod 0700 "$backup"
 systemctl cat nginx.service >"$backup/unit.before"
 read_policy >"$backup/policy.before"
-tar --acls --xattrs --numeric-owner -cpf "$backup/system-before.tar" -C / \
-  etc/nginx etc/letsencrypt etc/x-ui usr/local/x-ui etc/systemd/system etc/ufw etc/krysyuk-standalone
+snapshot_paths=(etc/nginx etc/x-ui usr/local/x-ui etc/systemd/system etc/ufw etc/krysyuk-standalone)
+case ${TARGET_TLS_MODE:-letsencrypt} in
+  letsencrypt) snapshot_paths+=(etc/letsencrypt);;
+  none) ;;
+  *) die 'invalid certificate mode';;
+esac
+tar --acls --xattrs --numeric-owner -cpf "$backup/system-before.tar" -C / "${snapshot_paths[@]}"
 tar -tf "$backup/system-before.tar" >/dev/null
 sqlite3 -readonly /etc/x-ui/x-ui.db ".backup '$backup/x-ui.db'"
 chmod 0600 "$backup/x-ui.db"

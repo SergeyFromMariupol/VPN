@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -148,6 +149,21 @@ sys.exit(result)
         backups = list((self.root / 'backups').iterdir())
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / 'COMMITTED').is_file())
+
+    def test_certificate_free_policy_snapshots_existing_stack_without_certificate_directory(self):
+        (self.root / 'etc/letsencrypt').rmdir()
+        self.env['TARGET_TLS_MODE'] = 'none'
+        self.run_script()
+        self.run_script('--check-only')
+        backups = list((self.root / 'backups').iterdir())
+        self.assertEqual(len(backups), 1)
+        with tarfile.open(backups[0] / 'system-before.tar') as archive:
+            names = set(archive.getnames())
+        self.assertIn('etc/nginx', names)
+        self.assertIn('etc/x-ui', names)
+        self.assertNotIn('etc/letsencrypt', names)
+        self.assertFalse((self.root / 'etc/letsencrypt').exists())
+        self.assertFalse(any(call[0] in ('start', 'stop', 'restart', 'reload') for call in self.calls()))
         with sqlite3.connect(backups[0] / 'x-ui.db') as db:
             self.assertEqual(db.execute('SELECT value FROM original').fetchone(), ('preserved',))
 

@@ -159,6 +159,8 @@ def check_reality_target(sni: str) -> None:
 
 
 def validate_inputs(env: dict) -> None:
+    if env.get('TARGET_TLS_MODE', 'letsencrypt') not in ('letsencrypt', 'none'):
+        raise ValueError('Invalid certificate mode')
     address = ipaddress.IPv4Address(env['TARGET_IPV4'])
     if not address.is_global:
         raise ValueError('A directly assigned public IPv4 is required (NAT VPS unsupported)')

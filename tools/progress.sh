@@ -8,13 +8,27 @@ _installer_progress_label() {
   case ${1-} in
     base) printf 'Подготовка Ubuntu';; certbot) printf 'Подготовка HTTPS';;
     tls) printf 'Сертификат TLS';; direct) printf 'Прямые профили';;
-    panel) printf 'HTTPS-панель';; nginx-restart) printf 'Настройка Nginx';;
+    panel) if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 'HTTP-панель'; else printf 'HTTPS-панель'; fi;;
+    nginx-restart) printf 'Настройка Nginx';;
     cert-reconcile) printf 'Обновление сертификатов';; warp) printf 'Cloudflare WARP';;
-    dual) printf 'Шесть профилей VPN';; xhttp) printf 'Транспорт XHTTP';;
+    dual) if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 'Четыре профиля VPN'; else printf 'Шесть профилей VPN'; fi;;
+    xhttp) printf 'Транспорт XHTTP';;
     renewal) printf 'Проверка продления TLS';; verify) printf 'Итоговая проверка';;
     preflight) printf 'Проверка сервера';; bootstrap) printf 'Подготовка установки';;
     sni-check) printf 'Проверка REALITY SNI';; *) return 1;;
   esac
+}
+
+_installer_progress_phases() {
+  if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then
+    printf '%s\n' base direct panel nginx-restart warp dual xhttp verify
+  else
+    printf '%s\n' base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal verify
+  fi
+}
+
+_installer_progress_total() {
+  if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 8; else printf 12; fi
 }
 
 _installer_progress_identity() {
@@ -32,7 +46,7 @@ _installer_progress_count() {
   # Preparation tasks have no measurable fraction of the installation stages.
   case $active in preflight|bootstrap|sni-check) printf '%s' -; return 0;; esac
   if [[ -n ${state-} ]] && declare -F installer_checkpoint_valid >/dev/null; then
-    for name in base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal verify; do
+    for name in $(_installer_progress_phases); do
       [[ $name != "$active" || $result == 0 || $result == skip ]] || continue
       # A historical verify marker cannot replace this run's final verification.
       [[ $name != verify || ( $active == verify && $result == 0 ) ]] || continue
@@ -77,16 +91,17 @@ installer_progress_stop() {
 }
 
 installer_progress_begin() {
-  local name=${1-} label count owner ticks identity
+  local name=${1-} label count total owner ticks identity
   installer_progress_stop
   label=$(_installer_progress_label "$name") || return 0
   [[ -n ${installer_progress_stage-} ]] || return 0
   count=$(_installer_progress_count "$name")
+  total=$(_installer_progress_total)
   if [[ ! -t 1 ]]; then
     if [[ $count == - ]]; then
       printf '%s — выполняется…\n' "$label" || :
     else
-      printf 'Общий прогресс: %s%% [%s/12] %s — выполняется…\n' "$((count * 100 / 12))" "$count" "$label" || :
+      printf 'Общий прогресс: %s%% [%s/%s] %s — выполняется…\n' "$((count * 100 / total))" "$count" "$total" "$label" || :
     fi
     return 0
   fi
@@ -100,18 +115,19 @@ installer_progress_begin() {
   if [[ $identity != 0:0:600:1:* ]]; then installer_progress_stop; return 0; fi
   installer_progress_control_identity=$identity
   python3 -I -B "$installer_progress_helper" "$installer_progress_control" "$identity" \
-    "$owner" "$ticks" "$count" "$label" "${TERM:-dumb}" 9>&- </dev/null >/dev/null 2>&1 &
+    "$owner" "$ticks" "$count" "$label" "${TERM:-dumb}" "$total" 9>&- </dev/null >/dev/null 2>&1 &
   installer_progress_pid=$!
   installer_progress_child_identity=$(_installer_progress_identity "$installer_progress_pid") || installer_progress_child_identity=''
   return 0
 }
 
 installer_progress_end() {
-  local name=${1-} result=${2-1} label count outcome symbol bar='' cell
+  local name=${1-} result=${2-1} label count total outcome symbol bar='' cell
   installer_progress_stop
   label=$(_installer_progress_label "$name") || return 0
   [[ -n ${installer_progress_stage-} ]] || return 0
   count=$(_installer_progress_count "$name" "$result")
+  total=$(_installer_progress_total)
   case $result in 0) outcome='готово';; skip) outcome='уже завершено';; *) outcome='остановлено';; esac
   if [[ $count == - ]]; then
     case $result in 0|skip) symbol='✓';; *) symbol='!';; esac
@@ -119,9 +135,9 @@ installer_progress_end() {
     return 0
   fi
   for ((cell=0; cell<12; cell++)); do
-    if ((cell<count)); then bar+='█'; else bar+='░'; fi
+    if ((cell<count * 12 / total)); then bar+='█'; else bar+='░'; fi
   done
   # The caller prints the stage outcome separately. This is the overall count.
-  printf 'Общий прогресс: [%s] %s%% [%s/12]\n' "$bar" "$((count * 100 / 12))" "$count" || :
+  printf 'Общий прогресс: [%s] %s%% [%s/%s]\n' "$bar" "$((count * 100 / total))" "$count" "$total" || :
   return 0
 }
