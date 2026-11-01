@@ -11,8 +11,8 @@ target_env=/etc/germanyvpn-target.env
 [[ $(stat -c '%u' "$target_env") == 0 ]] || exit 1
 target_mode=$(stat -c '%a' "$target_env")
 (( (8#$target_mode & 8#022) == 0 )) || exit 1
-# shellcheck disable=SC1090,SC1091
 TARGET_TLS_MODE=letsencrypt
+# shellcheck disable=SC1090,SC1091
 source "$target_env"
 case $TARGET_TLS_MODE in
   letsencrypt|none) ;;
