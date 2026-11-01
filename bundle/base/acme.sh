@@ -78,8 +78,8 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-systemctl stop certbot.timer
 timer_stopped=1
+systemctl stop certbot.timer
 ! systemctl is-active --quiet certbot.service || exit 1
 tar --acls --xattrs --numeric-owner -cpf "$snapshot/letsencrypt-before.tar" -C / etc/letsencrypt
 tar -tf "$snapshot/letsencrypt-before.tar" >/dev/null

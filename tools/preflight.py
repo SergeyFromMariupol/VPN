@@ -22,6 +22,42 @@ NETWORK_SPEC.loader.exec_module(NETWORK)
 MANAGED_LOOPBACK_PORTS = frozenset((2053, 11111, 24443, 24444, 62789))
 SSHD_EXECUTABLE = '/usr/sbin/sshd'
 SYSTEMD_EXECUTABLE = '/usr/lib/systemd/systemd'
+RESERVED_PATHS = (
+    '/usr/local/x-ui', '/etc/x-ui', '/etc/nginx', '/etc/letsencrypt',
+    '/etc/krysyuk-standalone', '/etc/wireguard', '/etc/openvpn', '/var/lib/docker',
+    '/usr/sbin/policy-rc.d', '/etc/germanyvpn-xhttp-test', '/etc/germanyvpn-xhttp-warp',
+    '/var/lib/cloudflare-warp', '/opt/vpn-certbot', '/usr/local/bin/certbot',
+    '/etc/systemd/system/certbot.service.d', '/etc/systemd/system/certbot.timer.d',
+    '/etc/systemd/system/x-ui.service', '/etc/systemd/system/x-ui.service.d',
+    '/usr/local/share/krysyuk-bootstrap', '/var/lib/x-ui', '/var/log/x-ui',
+    '/var/www/krysyuk-standalone-decoy', '/etc/systemd/system/nginx.service',
+    '/etc/systemd/system/nginx.service.d',
+    '/usr/local/lib/germanyvpn-xhttp-test',
+    '/etc/systemd/system/germanyvpn-xhttp-test.service',
+    '/etc/systemd/system/germanyvpn-xhttp-warp.service',
+    '/etc/krysyuk-warp-egress', '/opt/krysyuk-warp-egress',
+    '/usr/local/libexec/krysyuk-warp-egress', '/var/lib/krysyuk-warp-egress',
+    '/var/lib/krysyuk-warp-egress-warp', '/var/log/krysyuk-warp-egress-warp',
+    '/run/krysyuk-warp-egress', '/run/krysyuk-warp-egress-warp',
+    '/etc/netns/krysyuk-warp', '/run/netns/krysyuk-warp',
+    '/var/log/cloudflare-warp', '/run/cloudflare-warp',
+    '/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg',
+    '/etc/apt/sources.list.d/cloudflare-client.list',
+    '/etc/apt/preferences.d/90-krysyuk-cloudflare-warp',
+    '/etc/apt/preferences.d/00-germanyvpn-warp-bootstrap-freeze',
+    '/etc/systemd/system/warp-svc.service',
+    '/etc/systemd/system/multi-user.target.wants/warp-svc.service',
+)
+RESERVED_IDENTITIES = ('xui', 'xui-secrets', 'xraywarp', 'xhttp-test')
+
+
+def reserved_path_conflicts(paths=RESERVED_PATHS) -> list[str]:
+    conflicts = []
+    for value in paths:
+        path = Path(value)
+        if path.exists() or path.is_symlink():
+            conflicts.append(str(path))
+    return conflicts
 
 
 def run(*args: str) -> str:
@@ -231,16 +267,7 @@ def listener_conflicts(output: str, env: dict, process_executables=None,
 
 def main() -> None:
     validate_inputs(os.environ)
-    conflicts = []
-    for name in ('/usr/local/x-ui', '/etc/x-ui', '/etc/nginx', '/etc/letsencrypt',
-                 '/etc/krysyuk-standalone', '/etc/wireguard', '/etc/openvpn',
-                 '/var/lib/docker', '/usr/sbin/policy-rc.d', '/etc/germanyvpn-xhttp-test',
-                 '/etc/germanyvpn-xhttp-warp', '/var/lib/cloudflare-warp',
-                 '/opt/vpn-certbot', '/usr/local/bin/certbot',
-                 '/etc/systemd/system/certbot.service.d', '/etc/systemd/system/certbot.timer.d'):
-        path = Path(name)
-        if path.exists() or path.is_symlink():
-            conflicts.append(name)
+    conflicts = reserved_path_conflicts()
     listeners = run('ss', '-H', '-lntup')
     conflicts.extend(listener_conflicts(listeners, os.environ))
     for command, args in (('ufw', ('status',)), ('nft', ('list', 'ruleset'))):
@@ -254,7 +281,7 @@ def main() -> None:
                     validate_ufw_saved_rules(run('ufw', 'show', 'added'))
                 except ValueError as error:
                     conflicts.append(str(error))
-    for identity in ('xui', 'xui-secrets', 'xraywarp'):
+    for identity in RESERVED_IDENTITIES:
         for database in ('passwd', 'group'):
             if subprocess.run(['getent', database, identity], stdout=subprocess.DEVNULL).returncode == 0:
                 conflicts.append(f'existing {database} {identity}')

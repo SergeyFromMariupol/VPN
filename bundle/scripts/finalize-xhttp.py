@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import unicodedata
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
@@ -143,20 +143,55 @@ def profile_names(target):
             for protocol in ('REALITY', 'HYSTERIA2', 'XHTTP')]
 
 
+@contextmanager
+def defer_interruptions():
+    """Finish a short ownership registration before normal signals can raise."""
+    if not hasattr(signal, 'pthread_sigmask'):
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK,
+                                     (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def inode(path):
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
 def save(path, raw, uid=0, gid=0, mode=0o600):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-    with os.fdopen(fd, 'wb') as stream:
-        os.fchown(stream.fileno(), uid, gid)
-        os.fchmod(stream.fileno(), mode)
-        stream.write(raw)
-        stream.flush()
-        os.fsync(stream.fileno())
+    info = os.fstat(fd)
+    identity = info.st_dev, info.st_ino
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), mode)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        # A failed write has not yet been registered by callers. Do not leave a
+        # partial canonical file that prevents rollback of its owned directory.
+        # An identical replacement made by another operation is still foreign.
+        with defer_interruptions():
+            if path.exists() or path.is_symlink():
+                current = path.lstat()
+                if (stat.S_ISREG(current.st_mode) and current.st_nlink == 1
+                        and (current.st_dev, current.st_ino) == identity):
+                    path.unlink()
+        raise
 
 
-def atomic(path, raw, expected):
+def atomic(path, raw, expected, expected_inode=None, before_replace=None):
     need(sha(path.read_bytes()) == expected, 'FILE_CAS')
     info = path.lstat()
     need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'FILE_OWNERSHIP')
+    if expected_inode is not None:
+        need((info.st_dev, info.st_ino) == expected_inode, 'FILE_INODE_CAS')
     fd, name = tempfile.mkstemp(prefix='.vpn-owned-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -166,6 +201,10 @@ def atomic(path, raw, expected):
             stream.flush()
             os.fsync(stream.fileno())
         need(sha(path.read_bytes()) == expected, 'LATE_FILE_CAS')
+        if expected_inode is not None:
+            need(inode(path) == expected_inode, 'LATE_FILE_INODE_CAS')
+        if before_replace is not None:
+            before_replace(Path(name))
         os.replace(name, path)
         directory = os.open(path.parent, os.O_DIRECTORY)
         try:
@@ -175,6 +214,48 @@ def atomic(path, raw, expected):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def create_owned_directory(path, mode, created, versions):
+    with defer_interruptions():
+        path.mkdir(mode=mode)
+        created[path] = None
+        versions[path] = {inode(path): None}
+
+
+def save_owned(path, raw, created, versions, **kwargs):
+    with defer_interruptions():
+        save(path, raw, **kwargs)
+        created[path] = sha(raw)
+        versions[path] = {inode(path): sha(raw)}
+
+
+def atomic_owned(path, raw, created, versions):
+    with defer_interruptions():
+        current = inode(path)
+        need(current in versions[path] and versions[path][current] == created[path],
+             'OWNED_FILE_INODE_CAS')
+        # os.replace can succeed before a directory fsync or signal fails.
+        # Register both complete owned generations before crossing that boundary.
+        atomic(path, raw, created[path], expected_inode=current,
+               before_replace=lambda temporary: versions[path].update({inode(temporary): sha(raw)}))
+        created[path] = sha(raw)
+
+
+def remove_owned_paths(created, versions):
+    for path in reversed(created):
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            identity = info.st_dev, info.st_ino
+            need(not path.is_symlink() and identity in versions[path], 'ROLLBACK_FOREIGN_PATH')
+            digest = versions[path][identity]
+            if digest is None:
+                need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0, 'ROLLBACK_FOREIGN_DIRECTORY')
+                path.rmdir()
+            else:
+                need(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+                     and sha(path.read_bytes()) == digest, 'ROLLBACK_FOREIGN_FILE')
+                path.unlink()
 
 
 def query(uri):
@@ -821,35 +902,33 @@ def finalize(target, secret):
     user_created = False
     user_identity = None
     created = {}
+    created_versions = {}
     rule_intent = False
     sql_intent = False
     marker = None
     try:
-        run(['useradd', '--system', '--no-create-home', '--user-group', '--home-dir', '/nonexistent',
-             '--shell', '/usr/sbin/nologin', USER])
-        user_created = True
-        record = pwd.getpwnam(USER)
-        user_identity = (record.pw_uid, record.pw_gid)
+        with defer_interruptions():
+            run(['useradd', '--system', '--no-create-home', '--user-group', '--home-dir', '/nonexistent',
+                 '--shell', '/usr/sbin/nologin', USER])
+            user_created = True
+            record = pwd.getpwnam(USER)
+            user_identity = (record.pw_uid, record.pw_gid)
         for path, mode in ((EXECROOT, 0o755), (ROOT, 0o700), (CFROOT, 0o700)):
-            path.mkdir(mode=mode)
-            created[path] = None
+            create_owned_directory(path, mode, created, created_versions)
         for name, source in [('xray', SOURCE_XRAY), ('geoip.dat', SOURCE_XRAY.parent / 'geoip.dat'),
                              ('geosite.dat', SOURCE_XRAY.parent / 'geosite.dat')]:
             path = EXECROOT / name
             raw = source.read_bytes()
-            save(path, raw, mode=0o555 if name == 'xray' else 0o444)
-            created[path] = sha(raw)
+            save_owned(path, raw, created, created_versions, mode=0o555 if name == 'xray' else 0o444)
         os.chmod(EXECROOT, 0o555)
         for config, conf, unit in zip(configs, (DIRECT_CONF, WARP_CONF), UNIT_PATHS):
             for path, raw in ((conf, canonical(config)), (unit, unit_bytes(conf))):
-                save(path, raw)
-                created[path] = sha(raw)
+                save_owned(path, raw, created, created_versions)
             run(['systemd-analyze', 'verify', str(unit)])
         marker = {'version': 2, 'target': target['TARGET_IPV4'], 'operation_id': secrets.token_hex(16),
                   'status': 'pending', 'direct_config_sha256': sha(DIRECT_CONF.read_bytes()),
                   'warp_config_sha256': sha(WARP_CONF.read_bytes()), 'main_runtime_sha256': sha(canonical(main))}
-        save(MARKER, canonical(marker))
-        created[MARKER] = sha(canonical(marker))
+        save_owned(MARKER, canonical(marker), created, created_versions)
         save(backup / 'plan.private.json', canonical({'rows': rows, 'old': old, 'feed_before': before_feed,
                                                      'feed_after': after_feed, 'operation_id': marker['operation_id']}))
         run(['systemctl', 'stop', 'x-ui.service'])
@@ -867,13 +946,11 @@ def finalize(target, secret):
              'port', '8444', 'proto', 'tcp', 'comment', 'vpn-xhttp-direct'])
         time.sleep(2)
         marker['main_runtime_sha256'] = sha(canonical(strict_json(RUNTIME.read_bytes())))
-        atomic(MARKER, canonical(marker), created[MARKER])
-        created[MARKER] = sha(canonical(marker))
+        atomic_owned(MARKER, canonical(marker), created, created_versions)
         verify(target, secret, expected=after_feed, allow_pending=True)
         need(routes() == route_before, 'MAIN_ROUTE_DRIFT')
         marker['status'] = 'committed'
-        atomic(MARKER, canonical(marker), created[MARKER])
-        created[MARKER] = sha(canonical(marker))
+        atomic_owned(MARKER, canonical(marker), created, created_versions)
         save(backup / 'COMMITTED', b'fresh-promoted-six-native3UA-TCP-UDP-egress-pass\n')
         print('FRESH_XHTTP_COMMITTED=1')
     except BaseException:
@@ -900,14 +977,7 @@ def finalize(target, secret):
         if rule_intent:
             run(['ufw', '--force', 'delete', 'allow', 'in', 'on', target['TARGET_INTERFACE'], 'to',
                  target['TARGET_IPV4'], 'port', '8444', 'proto', 'tcp', 'comment', 'vpn-xhttp-direct'])
-        for path, digest in reversed(list(created.items())):
-            if path.exists():
-                need(not path.is_symlink(), 'ROLLBACK_FOREIGN_PATH')
-                if digest is None:
-                    path.rmdir()
-                else:
-                    need(path.stat().st_uid == 0 and sha(path.read_bytes()) == digest, 'ROLLBACK_FOREIGN_FILE')
-                    path.unlink()
+        remove_owned_paths(created, created_versions)
         run(['systemctl', 'daemon-reload'])
         if user_created:
             record = pwd.getpwnam(USER)

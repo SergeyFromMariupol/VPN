@@ -1,7 +1,9 @@
 """Preflight must reject unsupported topology before installation mutates it."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +14,34 @@ SPEC.loader.exec_module(preflight)
 
 
 class Environment(unittest.TestCase):
+    def test_reserved_paths_detect_files_directories_and_dangling_links(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            file, directory, absent = (root / name for name in ('file', 'directory', 'absent'))
+            file.write_text('preserve')
+            directory.mkdir()
+            self.assertEqual(preflight.reserved_path_conflicts((file, directory, absent)),
+                             [str(file), str(directory)])
+            if hasattr(os, 'symlink'):
+                link = root / 'dangling'
+                try:
+                    link.symlink_to(absent)
+                except OSError:
+                    return
+                self.assertEqual(preflight.reserved_path_conflicts((link,)), [str(link)])
+                self.assertTrue(link.is_symlink())
+            self.assertEqual(file.read_text(), 'preserve')
+
+    def test_xhttp_and_direct_phase_conflicts_are_reserved_before_packages_change(self):
+        for path in ('/usr/local/lib/germanyvpn-xhttp-test',
+                     '/etc/systemd/system/germanyvpn-xhttp-test.service',
+                     '/etc/systemd/system/germanyvpn-xhttp-warp.service',
+                     '/etc/systemd/system/x-ui.service.d',
+                     '/var/www/krysyuk-standalone-decoy'):
+            with self.subTest(path=path):
+                self.assertIn(path, preflight.RESERVED_PATHS)
+        self.assertIn('xhttp-test', preflight.RESERVED_IDENTITIES)
+
     def test_physical_host_is_inventory_success_but_command_errors_are_not(self):
         for status, output, expected in ((0, 'kvm\n', 'kvm'), (1, 'none\n', 'none')):
             with self.subTest(status=status), patch.object(preflight.subprocess, 'run',
