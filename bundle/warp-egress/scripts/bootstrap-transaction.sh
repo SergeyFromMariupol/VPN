@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # Sourced bootstrap transaction API/state.
+case ${TARGET_TLS_MODE:-letsencrypt} in
+  letsencrypt|none) ;;
+  *) printf '%s\n' 'ERROR: unsupported certificate mode for WARP bootstrap' >&2; return 1;;
+esac
+
+bootstrap_tls_enabled() { [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; }
+
+bootstrap_snapshot_paths() {
+  printf '%s\n' usr/local/x-ui etc/x-ui etc/nginx
+  if bootstrap_tls_enabled; then printf '%s\n' etc/letsencrypt; fi
+  printf '%s\n' etc/krysyuk-standalone etc/systemd/system etc/ufw etc/default/ufw etc/apt
+}
 
 bootstrap_capture_packages() {
   dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Abbrev}\n' | LC_ALL=C sort
@@ -7,7 +19,10 @@ bootstrap_capture_packages() {
 
 bootstrap_capture_units() {
   local unit
-  for unit in x-ui.service nginx.service certbot.timer ssh.service ssh.socket; do
+  local -a units=(x-ui.service nginx.service)
+  if bootstrap_tls_enabled; then units+=(certbot.timer); fi
+  units+=(ssh.service ssh.socket)
+  for unit in "${units[@]}"; do
     printf 'UNIT=%s\n' "$unit"
     systemctl show "$unit" -p ActiveState -p SubState -p UnitFileState -p MainPID
   done
@@ -19,7 +34,10 @@ bootstrap_capture_listeners() {
 
 bootstrap_capture_app_hashes() {
   local path
-  for path in /etc/krysyuk-standalone /etc/nginx /etc/letsencrypt /usr/local/x-ui; do
+  local -a paths=(/etc/krysyuk-standalone /etc/nginx)
+  if bootstrap_tls_enabled; then paths+=(/etc/letsencrypt); fi
+  paths+=(/usr/local/x-ui)
+  for path in "${paths[@]}"; do
     find -L "$path" -type f ! -name '*.log' -print0
   done | LC_ALL=C sort -z | xargs -0 -r sha256sum
 }
@@ -41,7 +59,9 @@ bootstrap_assert_direct_unchanged() {
   cmp -s "$BT_SNAPSHOT/app-hashes-before.txt" "$BT_SNAPSHOT/app-hashes-$suffix.txt" || return 1
   [[ $(sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;') == ok ]] || return 1
   ! ip link show CloudflareWARP >/dev/null 2>&1 || return 1
-  for unit in x-ui.service nginx.service certbot.timer; do
+  local -a units=(x-ui.service nginx.service)
+  if bootstrap_tls_enabled; then units+=(certbot.timer); fi
+  for unit in "${units[@]}"; do
     systemctl is-active --quiet "$unit" || return 1
   done
 }
@@ -191,6 +211,8 @@ PY
 
 bootstrap_transaction_begin() {
   local command_name path
+  local -a direct_units=(x-ui.service nginx.service) managed_snapshot_paths=()
+  if bootstrap_tls_enabled; then direct_units+=(certbot.timer); fi
   for command_name in apt-get apt-mark awk cat cmp cp cut date diff dpkg-deb dpkg-query find flock \
     getent grep install ip jq nft python3 sha256sum sort sqlite3 ss stat systemctl tar ufw xargs; do
     command -v "$command_name" >/dev/null 2>&1 || die "bootstrap transaction tool missing: $command_name"
@@ -222,17 +244,16 @@ bootstrap_transaction_begin() {
     die 'clean-first bootstrap found prior Cloudflare APT state'
   [[ ! -L /usr/sbin/policy-rc.d && (! -e /usr/sbin/policy-rc.d || -f /usr/sbin/policy-rc.d) ]] ||
     die 'unsupported existing policy-rc.d'
-  for path in x-ui.service nginx.service certbot.timer; do
+  for path in "${direct_units[@]}"; do
     systemctl is-active --quiet "$path" || die 'direct stack must already be active'
   done
   BT_SNAPSHOT="/var/backups/krysyuk-standalone/$(date -u +%Y%m%dT%H%M%SZ)-warp-bootstrap-$$"
   install -d -o root -g root -m 0700 "$BT_SNAPSHOT"
   sqlite3 /etc/x-ui/x-ui.db ".backup '$BT_SNAPSHOT/x-ui.db'"
   [[ $(sqlite3 "$BT_SNAPSHOT/x-ui.db" 'PRAGMA quick_check;') == ok ]] || die 'SQLite bootstrap snapshot failed'
+  mapfile -t managed_snapshot_paths < <(bootstrap_snapshot_paths)
   tar --acls --xattrs --numeric-owner --exclude='etc/x-ui/x-ui.db*' \
-    -cpf "$BT_SNAPSHOT/managed-before.tar" -C / \
-    usr/local/x-ui etc/x-ui etc/nginx etc/letsencrypt etc/krysyuk-standalone \
-    etc/systemd/system etc/ufw etc/default/ufw etc/apt
+    -cpf "$BT_SNAPSHOT/managed-before.tar" -C / "${managed_snapshot_paths[@]}"
   tar -tf "$BT_SNAPSHOT/managed-before.tar" >/dev/null
   sha256sum "$BT_SNAPSHOT/managed-before.tar" "$BT_SNAPSHOT/x-ui.db" >"$BT_SNAPSHOT/SHA256SUMS"
   sha256sum --check "$BT_SNAPSHOT/SHA256SUMS" >/dev/null

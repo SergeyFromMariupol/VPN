@@ -3,6 +3,9 @@ set -Eeuo pipefail
 umask 077
 # shellcheck source=../scripts/target-contract.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)/target-contract.sh"
+if [[ $TARGET_TLS_MODE == none ]]; then
+  exec bash "$(dirname -- "${BASH_SOURCE[0]}")/postboot-certless-verify.sh" "$@"
+fi
 
 readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_FQDN="$TARGET_FQDN"

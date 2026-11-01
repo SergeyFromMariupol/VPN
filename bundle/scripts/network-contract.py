@@ -131,7 +131,9 @@ def trusted_managed_udp_owners(listeners, promoted):
 
 
 def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promoted,
-                       process_executables=None):
+                       process_executables=None, tls_mode='letsencrypt'):
+    if tls_mode not in ('letsencrypt', 'none'):
+        raise ValueError('Invalid certificate mode')
     target_ipv4 = str(ipaddress.IPv4Address(target_ipv4))
     ssh_port = int(ssh_port)
     process_executables = process_executables or {}
@@ -154,16 +156,16 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
             raise ValueError('Unexpected public listener address: ' + listener_summary(listener))
         elif listener.protocol == 'tcp' and listener.port in required_tcp:
             found_tcp.add(listener.port)
-        elif listener.protocol == 'udp' and listener.port == 443:
+        elif tls_mode == 'letsencrypt' and listener.protocol == 'udp' and listener.port == 443:
             found_udp.add(443)
         else:
             raise ValueError('Unexpected public listener port: ' + listener_summary(listener))
-    if found_tcp != required_tcp or found_udp != {443}:
+    if found_tcp != required_tcp or found_udp != ({443} if tls_mode == 'letsencrypt' else set()):
         raise ValueError('Required public listener is missing')
 
 
 def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh_port,
-                              promoted, wait_seconds=90):
+                              promoted, wait_seconds=90, tls_mode='letsencrypt'):
     """Let owned self-test UDP sessions expire; PASS still needs the exact contract.
 
     Xray's outbound UDP sockets are unconnected and therefore appear in ss -l.
@@ -179,21 +181,21 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
         dhcp_owners = trusted_process_executables(listeners)
         try:
             validate_listeners(listeners, target_ipv4, target_interface, ssh_port,
-                               promoted, dhcp_owners)
+                               promoted, dhcp_owners, tls_mode)
             return
         except ValueError as error:
             extras = [listener for listener in listeners
                       if listener.protocol == 'udp'
                       and not ipaddress.ip_address(listener.address).is_loopback
                       and not is_expected_dhcp(listener, target_interface, dhcp_owners, target_ipv4)
-                      and not (listener.address == target_ipv4 and listener.port == 443
+                      and not (tls_mode == 'letsencrypt' and listener.address == target_ipv4 and listener.port == 443
                                and listener.scope in (None, target_interface))]
             if not extras:
                 raise
             # Removing the candidate sessions must leave every required listener
             # and no other mismatch; this is only a retry eligibility check.
             validate_listeners([listener for listener in listeners if listener not in extras],
-                               target_ipv4, target_interface, ssh_port, promoted, dhcp_owners)
+                               target_ipv4, target_interface, ssh_port, promoted, dhcp_owners, tls_mode)
             owners = trusted_managed_udp_owners(extras, promoted)
             if any(not listener.pids or not set(listener.pids) <= owners for listener in extras):
                 raise error
@@ -204,7 +206,10 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
             time.sleep(min(2, remaining))
 
 
-def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaults_text):
+def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaults_text,
+                 tls_mode='letsencrypt'):
+    if tls_mode not in ('letsencrypt', 'none'):
+        raise ValueError('Invalid certificate mode')
     """Require exact rules, including direction, address scope and default policies."""
     lines = text.splitlines()
     if lines.count('Status: active') != 1:
@@ -245,8 +250,9 @@ def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaul
         if not match:
             raise ValueError('Malformed UFW rule')
         rules.append(tuple(' '.join(value.split()) for value in match.groups()))
-    baseline = [(int(ssh_port), 'tcp'), (80, 'tcp'), (443, 'tcp'),
-                (443, 'udp'), (2096, 'tcp'), (8443, 'tcp')]
+    baseline = [(int(ssh_port), 'tcp'), (443, 'tcp'), (2096, 'tcp'), (8443, 'tcp')]
+    if tls_mode == 'letsencrypt':
+        baseline.extend(((80, 'tcp'), (443, 'udp')))
     expected = set()
     for port, protocol in baseline:
         endpoint = f'{port}/{protocol}'
@@ -264,6 +270,8 @@ def main():
     parser.add_argument('--interface', required=True)
     parser.add_argument('--ssh-port', type=int, required=True)
     parser.add_argument('--promoted', choices=('0', '1'), required=True)
+    parser.add_argument('--tls-mode', choices=('letsencrypt', 'none'),
+                        default=os.environ.get('TARGET_TLS_MODE', 'letsencrypt'))
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('root is required to authenticate listener owners')
@@ -274,9 +282,9 @@ def main():
     try:
         wait_for_strict_listeners(lambda: parse_ss(output(['ss', '-H', '-lntup'])),
                                  args.target_ip, args.interface, args.ssh_port,
-                                 args.promoted == '1')
+                                 args.promoted == '1', tls_mode=args.tls_mode)
         validate_ufw(output(['ufw', 'status', 'verbose']), args.target_ip, args.interface,
-                     args.ssh_port, args.promoted == '1', Path('/etc/default/ufw').read_text())
+                     args.ssh_port, args.promoted == '1', Path('/etc/default/ufw').read_text(), args.tls_mode)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         raise SystemExit('NETWORK_CONTRACT_FAILED: ' + str(error)) from error
     print('NETWORK_CONTRACT_OK=1')

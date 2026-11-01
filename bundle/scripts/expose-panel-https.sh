@@ -60,6 +60,7 @@ done
 source "$runtime_env"
 [[ "${PANEL_BASE_PATH:-}" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || die 'panel base path is invalid'
 
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 [[ -f "$tls_fullchain" && ! -L "$tls_fullchain" ]] || die 'TLS full chain is missing or unsafe'
 [[ -f "$tls_private_key" && ! -L "$tls_private_key" ]] || die 'TLS private key is missing or unsafe'
 [[ "$(stat -c '%U:%G:%a' "$tls_private_key")" == 'root:xui-secrets:640' ]] ||
@@ -70,6 +71,7 @@ cert_pub=$(openssl x509 -in "$tls_fullchain" -pubkey -noout | openssl sha256)
 key_pub=$(openssl pkey -in "$tls_private_key" -pubout | openssl sha256)
 [[ "$cert_pub" == "$key_pub" ]] || die 'TLS certificate/private-key mismatch'
 unset cert_pub key_pub
+fi
 
 systemctl is-active --quiet x-ui.service || die 'x-ui is not active'
 systemctl is-enabled --quiet x-ui.service || die 'x-ui is not enabled'
@@ -94,6 +96,7 @@ unset backend_status
 
 bundle_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 nginx_template="$bundle_root/templates/3x-ui-public.nginx.conf"
+if [[ $TARGET_TLS_MODE == none ]]; then nginx_template="$bundle_root/templates/3x-ui-public-http.nginx.conf"; fi
 renew_hook_source="$bundle_root/templates/70-krysyuk-standalone-nginx"
 [[ -f "$nginx_template" && ! -L "$nginx_template" ]] || die 'nginx template is missing or unsafe'
 [[ -f "$renew_hook_source" && ! -L "$renew_hook_source" ]] || die 'renewal hook is missing or unsafe'
@@ -122,8 +125,9 @@ cp -a /etc/ufw/user6.rules "$backup/ufw.user6.rules"
 cp -a "$access_file" "$backup/access.env"
 tar --acls --xattrs --numeric-owner -cpf "$backup/nginx-before.tar" -C / etc/nginx
 tar -tf "$backup/nginx-before.tar" >/dev/null
-tar --acls --xattrs --numeric-owner -cpf "$backup/xui-before.tar" -C / \
-  etc/x-ui usr/local/x-ui etc/krysyuk-standalone etc/letsencrypt etc/systemd/system
+xui_snapshot_paths=(etc/x-ui usr/local/x-ui etc/krysyuk-standalone etc/systemd/system)
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then xui_snapshot_paths+=(etc/letsencrypt); fi
+tar --acls --xattrs --numeric-owner -cpf "$backup/xui-before.tar" -C / "${xui_snapshot_paths[@]}"
 tar -tf "$backup/xui-before.tar" >/dev/null
 systemctl is-enabled nginx.service >"$backup/nginx-enabled-before.txt" 2>/dev/null || true
 nft -s list ruleset >"$backup/nft-before.txt"
@@ -205,7 +209,9 @@ Path(os.environ['NGINX_RENDERED']).write_text(text)
 PY
 grep -Fq '__' "$stage/3x-ui-public.conf" && die 'unresolved nginx template placeholder'
 install -o root -g root -m 0600 "$stage/3x-ui-public.conf" "$nginx_config"
-install -o root -g root -m 0755 "$renew_hook_source" "$renew_hook"
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  install -o root -g root -m 0755 "$renew_hook_source" "$renew_hook"
+fi
 nginx -t
 
 systemctl unmask nginx.service >/dev/null
@@ -218,7 +224,7 @@ ufw allow in on "$PUBLIC_INTERFACE" to "$SERVER_IPV4" port "$PANEL_PORT" \
 ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" ||
   die 'UFW did not permit TCP/2053'
 
-panel_url="https://${PUBLIC_FQDN}:${PANEL_PORT}/${PANEL_BASE_PATH}/"
+panel_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/${PANEL_BASE_PATH}/"
 PANEL_URL="$panel_url" ACCESS_SOURCE="$access_file" ACCESS_RENDERED="$stage/access.env" python3 - <<'PY'
 import os
 from pathlib import Path
@@ -240,22 +246,22 @@ if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]"; then
   die 'nginx unexpectedly occupies public TCP/80'
 fi
 
-public_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 20 \
+public_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
   --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
   --output /dev/null --write-out '%{http_code}' "$panel_url")
 [[ "$public_status" == 200 || "$public_status" == 302 ]] ||
   die "unexpected public panel HTTPS status: $public_status"
-root_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 20 \
+root_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
   --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
   --output /dev/null --write-out '%{http_code}' \
-  "https://${PUBLIC_FQDN}:${PANEL_PORT}/")
+  "${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/")
 [[ "$root_status" == 404 ]] || die "unexpected public root HTTPS status: $root_status"
 unset public_status root_status panel_url
 
 nginx -t
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
 systemctl is-active --quiet x-ui.service
-systemctl is-active --quiet certbot.timer
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl is-active --quiet certbot.timer; fi
 
 bash "$bundle_root/tests/panel-login-acceptance.sh" >/dev/null
 touch "$backup/PROVISION_COMMITTED"

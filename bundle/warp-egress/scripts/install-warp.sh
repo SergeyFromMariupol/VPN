@@ -11,8 +11,14 @@ target_env=/etc/germanyvpn-target.env
 [[ $(stat -c '%u' "$target_env") == 0 ]] || exit 1
 target_mode=$(stat -c '%a' "$target_env")
 (( (8#$target_mode & 8#022) == 0 )) || exit 1
+TARGET_TLS_MODE=letsencrypt
 # shellcheck disable=SC1090,SC1091
 source "$target_env"
+case $TARGET_TLS_MODE in
+  letsencrypt|none) ;;
+  *) printf '%s\n' 'ERROR: unsupported saved certificate mode' >&2; exit 1;;
+esac
+export TARGET_TLS_MODE
 [[ ${TARGET_IPV4:-} == '@TARGET_IPV4@' && ${TARGET_INTERFACE:-} == '@TARGET_INTERFACE@' ]] || {
   printf '%s\n' 'ERROR: rendered WARP bundle does not match the target contract' >&2; exit 1;
 }

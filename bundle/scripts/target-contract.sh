@@ -12,10 +12,18 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
     printf 'ERROR: unsafe /etc/germanyvpn-target.env\n' >&2; return 1;
   }
   # shellcheck disable=SC1091
+  TARGET_TLS_MODE=letsencrypt
   source /etc/germanyvpn-target.env
 fi
 TARGET_FQDN=${TARGET_FQDN:?TARGET_FQDN is required}
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
+TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
+case $TARGET_TLS_MODE in
+  letsencrypt) TARGET_PUBLIC_SCHEME=https; TARGET_PROTOCOL_COUNT=3; TARGET_PROFILE_COUNT=6;;
+  none) TARGET_PUBLIC_SCHEME=http; TARGET_PROTOCOL_COUNT=2; TARGET_PROFILE_COUNT=4;;
+  *) printf 'ERROR: TARGET_TLS_MODE must be letsencrypt or none\n' >&2; return 1;;
+esac
+export TARGET_TLS_MODE TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT
 [[ $TARGET_FQDN =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && $TARGET_FQDN == *.* && $TARGET_FQDN != *..* ]] || {
   printf 'ERROR: TARGET_FQDN must be a lowercase DNS name or public IPv4\n' >&2; return 1;
 }

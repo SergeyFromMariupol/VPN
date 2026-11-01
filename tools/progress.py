@@ -26,13 +26,17 @@ def control_alive(path, identity):
 
 
 def main():
-    if len(sys.argv) != 8:
+    if len(sys.argv) not in (8, 9):
         return
-    path, identity, pid, ticks, count, label, term = sys.argv[1:]
+    path, identity, pid, ticks, count, label, term = sys.argv[1:8]
+    total = sys.argv[8] if len(sys.argv) == 9 else '12'
+    if total not in ('8', '12'):
+        return
+    total = int(total)
     if not pid.isdecimal() or not ticks.isdecimal() or not (count == '-' or count.isdecimal()):
         return
     count = None if count == '-' else int(count)
-    if (count is not None and not 0 <= count <= 12) or not owner_alive(pid, ticks) or not control_alive(path, identity):
+    if (count is not None and not 0 <= count <= total) or not owner_alive(pid, ticks) or not control_alive(path, identity):
         return
     # A fresh open file description is essential: changing inherited stdout's
     # blocking flags would also change the installer's terminal descriptor.
@@ -65,8 +69,9 @@ def main():
                 if count is None:
                     line = f'{spinner} {label} · {clock}'
                 else:
-                    bar = '█' * count + '░' * (12 - count)
-                    line = f'Общий прогресс: [{bar}] {count * 100 // 12}% [{count}/12] {spinner} {label} · {clock}'
+                    filled = count * 12 // total
+                    bar = '█' * filled + '░' * (12 - filled)
+                    line = f'Общий прогресс: [{bar}] {count * 100 // total}% [{count}/{total}] {spinner} {label} · {clock}'
                 width = max(width, len(line))
                 if not write(line + '\n' if dumb else '\r' + line.ljust(width)):
                     break

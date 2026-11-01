@@ -158,7 +158,8 @@ transaction_exit() {
         remove_managed_tree "$path" || rollback_ok=0
       done
     fi
-    systemctl disable --now certbot.timer nginx.service >/dev/null 2>&1
+    if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl disable --now certbot.timer >/dev/null 2>&1; fi
+    systemctl disable --now nginx.service >/dev/null 2>&1
     # Keep the temporary package start prohibition until rollback finishes.
     if ((apt_attempted)); then
       rollback_packages || rollback_ok=0
@@ -241,9 +242,10 @@ ss -H -lnt | grep -Eq "(:|\\])${TARGET_SSH_PORT}[[:space:]]" || die 'SSH listene
 dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Status}\n' >"$backup/package-versions.after-os-upgrade"
 touch "$backup/OS_UPGRADE_COMMITTED"
 base_packages=(
-  ca-certificates certbot curl dnsutils gnupg iproute2 jq nftables nginx openssl \
+  ca-certificates curl dnsutils gnupg iproute2 jq nftables nginx openssl \
   python3 python3-bcrypt python3-venv shellcheck sqlite3 tar tcpdump ufw unzip uuid-runtime xz-utils
 )
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then base_packages+=(certbot); fi
 vpn_apt_get -s --no-upgrade --no-remove --no-install-recommends install "${base_packages[@]}" >"$backup/apt-install-plan.txt"
 # --no-upgrade protects explicitly requested packages, but APT may still need
 # newer versions of dependencies already on an older Ubuntu cloud image (for
@@ -322,11 +324,13 @@ chmod 0600 "$backup/initial-x-ui.db"
 sqlite3 "$backup/initial-x-ui.db" 'PRAGMA quick_check;' | grep -qx ok
 
 restore_start_policy
-systemctl enable --now certbot.timer >/dev/null
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl enable --now certbot.timer >/dev/null; fi
 systemctl is-enabled --quiet x-ui.service
 ! systemctl is-active --quiet x-ui.service || die 'x-ui must remain stopped'
-systemctl is-enabled --quiet certbot.timer
-systemctl is-active --quiet certbot.timer
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  systemctl is-enabled --quiet certbot.timer
+  systemctl is-active --quiet certbot.timer
+fi
 ! systemctl is-active --quiet nginx.service || die 'nginx must remain stopped'
 for port in 80 443 2053 2096 8443; do
   ! ss -H -lnt | grep -Eq "(:|\\])${port}[[:space:]]" || die "unexpected final TCP/$port listener"

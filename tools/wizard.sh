@@ -13,7 +13,7 @@ wizard_header() {
   printf '\n%b%s%b\n' "$wizard_cyan" 'VPN · 3X-UI' "$wizard_reset"
   printf '%b%s · Ubuntu 24.04%b\n' "$wizard_dim" "$1" "$wizard_reset"
   printf '%s\n' 'REALITY · Hysteria2 · XHTTP' '──────────────────────────────────────────────'
-  printf 'Выберите адрес подключения и SNI — дальше установка пойдёт автоматически.\n\n'
+  printf 'Выберите адрес подключения, режим сертификата и SNI — дальше установка пойдёт автоматически.\n\n'
 }
 
 wizard_section() {
@@ -80,7 +80,7 @@ wizard_reality_sni() {
 }
 
 collect_vpn_parameters() {
-  local address_choice verifier=$2
+  local address_choice certificate_choice verifier=$2
   wizard_init
   wizard_header "$1"
   if [[ -n ${SSH_CONNECTION:-} ]]; then
@@ -112,6 +112,20 @@ collect_vpn_parameters() {
     esac
   done
 
+  wizard_section 'TLS' 'Сертификат и число профилей'
+  printf 'С Let’s Encrypt: 6 профилей — REALITY, Hysteria2 и XHTTP; панель и подписка по HTTPS.\n'
+  printf 'Без сертификата: 4 профиля — REALITY и XHTTP; панель и подписка по HTTP.\n'
+  printf 'HTTP не защищает пароль панели и ключи подписки при передаче.\n\n'
+  printf '  %b1. Let’s Encrypt — 6 профилей, HTTPS%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b2. Без сертификата — 4 профиля, HTTP%b\n\n' "$wizard_yellow" "$wizard_reset"
+  while true; do
+    wizard_read certificate_choice 'Выберите режим сертификата [1]: ' 1 || return 1
+    case "$certificate_choice" in
+      1) TARGET_TLS_MODE=letsencrypt; break;;
+      2) TARGET_TLS_MODE=none; break;;
+      *) wizard_error 'Выберите 1 или 2.';;
+    esac
+  done
   wizard_reality_sni "$verifier" || return 1
 
   # Personal/friends defaults; no further setup questions after SNI validation.

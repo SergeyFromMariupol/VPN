@@ -28,7 +28,7 @@ REAL_BUILD_OPENER = urllib.request.build_opener
 
 def embedded_python():
     source = (ROOT / 'install.sh').read_text(encoding='utf-8')
-    marker = '"https://github.com/$repository/archive/refs/tags/$release.tar.gz" "$task_stage/source.tar.gz" <<\'PY\'\n'
+    marker = '"https://github.com/$repository/archive/refs/tags/$release.tar.gz" "$task_stage/source.tar.gz" 2>"$task_stage/download.log" <<\'PY\'\n'
     begin = source.index(marker) + len(marker)
     return source[begin:source.index('\nPY\n', begin)]
 

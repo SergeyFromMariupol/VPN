@@ -22,7 +22,13 @@ panel_base=${PANEL_URL%/}/
 panel_path=$(PANEL_BASE="$panel_base" python3 - <<'PY'
 import os
 import urllib.parse
-value = urllib.parse.urlsplit(os.environ["PANEL_BASE"]).path
+p = urllib.parse.urlsplit(os.environ["PANEL_BASE"])
+expected_scheme = 'http' if os.environ.get('TARGET_TLS_MODE', 'letsencrypt') == 'none' else 'https'
+if p.scheme != expected_scheme or p.hostname != os.environ['TARGET_FQDN'] or p.port != 2053:
+    raise SystemExit('PANEL_ADDRESS_CONTRACT')
+if p.username is not None or p.password is not None or p.query or p.fragment:
+    raise SystemExit('PANEL_ADDRESS_CONTRACT')
+value = p.path
 if not value.startswith('/') or not value.endswith('/') or value == '/':
     raise SystemExit(1)
 print(value, end='')
@@ -58,14 +64,16 @@ test_login() {
   local host_header=$3
   local protocol=$4
   rm -f -- "$stage/cookies" "$stage/body"
-  curl --proto "=$protocol" --fail --silent --show-error --max-time 30 \
+  printf 'url = "%scsrf-token"\n' "$base" >"$stage/get.curl.conf"
+  chmod 0600 "$stage/get.curl.conf"
+  curl --noproxy '*' --proxy '' --proto "=$protocol" --fail --silent --show-error --max-time 30 \
     --header "Host: $host_header" --cookie-jar "$stage/cookies" \
-    --output "$stage/csrf.json" "${base}csrf-token"
+    --output "$stage/csrf.json" --config "$stage/get.curl.conf"
   local csrf_token
   csrf_token=$(jq --exit-status --raw-output '.obj|select(type=="string" and length>=16)' "$stage/csrf.json")
   write_post_config "$stage/post.curl.conf" "$base" "$host_header" "$csrf_token"
   local status
-  status=$(curl --proto "=$protocol" --config "$stage/post.curl.conf")
+  status=$(curl --noproxy '*' --proxy '' --proto "=$protocol" --config "$stage/post.curl.conf")
   [[ "$status" == 200 ]]
   jq --exit-status '.success==true' "$stage/body" >/dev/null
   unset csrf_token
@@ -81,5 +89,5 @@ p = urllib.parse.urlsplit(os.environ["PANEL_BASE"])
 print(p.netloc, end='')
 PY
 )
-test_login PUBLIC "$panel_base" "$public_host" https
+test_login PUBLIC "$panel_base" "$public_host" "$TARGET_PUBLIC_SCHEME"
 printf 'PANEL_LOGIN_ACCEPTANCE_OK=1\n'

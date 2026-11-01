@@ -104,11 +104,28 @@ class ResumeGuidance(unittest.TestCase):
             guard = resume_validation[1].split('\nelse\n', 1)[1].split(
                 '  [[ -r /dev/tty ]]', 1)[0]
             self.assertIn('installer_resume_hint', guard)
+            verify_start = source.index('\nif [[ $mode == --verify ]]; then') + 1
+            verify_end = source.index('\nfi\n', verify_start) + len('\nfi\n')
+            verify_branch = source[verify_start:verify_end]
             driver = (preamble + '\ntask_stage="' + str(root / 'owned/task') + '"\n' +
                       cleanup + '\ncase $TEST_ACTION in\n'
                       '  success) exit 0;;\n'
                       '  error) exit 42;;\n'
                       '  HUP|INT|TERM) kill -s "$TEST_ACTION" "$BASHPID"; exit 97;;\n'
+                      '  classified|stale|rollback|unavailable-rollback)\n'
+                      '    installer_error_reporter="' + str(ROOT / 'tools/errors.py') + '"\n'
+                      '    if [[ $TEST_ACTION == stale ]]; then\n'
+                      '      printf "too many certificates (5) already issued for this exact set of identifiers; retry after 2026-11-02 08:11:35 UTC\\n" >"$state/tls.log"\n'
+                      '    fi\n'
+                      '    installer_error_context tls "$state/tls.log"\n'
+                      '    if [[ $TEST_ACTION == stale ]]; then kill -INT "$BASHPID"; exit 97; fi\n'
+                      '    printf "too many certificates (5) already issued for this exact set of identifiers; retry after 2026-11-02 08:11:35 UTC\\n" >"$state/tls.log"\n'
+                      '    if [[ $TEST_ACTION == rollback || $TEST_ACTION == unavailable-rollback ]]; then printf "ACME_ROLLBACK_OK=0\\n" >>"$state/tls.log"; fi\n'
+                      '    if [[ $TEST_ACTION == unavailable-rollback ]]; then installer_error_reporter=""; kill -INT "$BASHPID"; exit 97; fi\n'
+                      '    exit 42;;\n'
+                      '  verify-unsafe)\n'
+                      '    ln -s keep "$state/verify-command.log"\n'
+                      '    mode=--verify\n' + verify_branch + '\nexit 96;;\n'
                       '  rerun)\n' + guard + '\nexit 96;;\n'
                       '  *) exit 98;;\nesac\n')
             (root / 'driver.sh').write_text(driver, encoding='utf-8')
@@ -136,7 +153,7 @@ class ResumeGuidance(unittest.TestCase):
 
     def test_cleanup_preserves_failure_status_and_only_offers_saved_installation(self):
         for context, action, code, hint in (
-                ('saved', 'error', 42, True), ('saved', 'success', 0, False),
+                ('saved', 'error', 42, False), ('saved', 'success', 0, False),
                 ('missing', 'error', 42, False), ('missing', 'success', 0, False)):
             with self.subTest(context=context, action=action):
                 result, command = self.fixture(action, context)
@@ -149,7 +166,7 @@ class ResumeGuidance(unittest.TestCase):
                 with self.subTest(signal=action, context=context):
                     result, command = self.fixture(action, context)
                     self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                    self.assert_hint(result, command, context == 'saved')
+                    self.assert_hint(result, command, False)
 
     def test_unsafe_or_incomplete_saved_context_does_not_advertise_resume(self):
         for context in ('state-mode', 'destination-mode', 'target-mode', 'target-hardlink',
@@ -165,6 +182,31 @@ class ResumeGuidance(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assert_hint(result, command, True)
         self.assertNotIn('используйте --resume', result.stderr)
+
+    def test_current_attempt_is_explained_without_reusing_stale_logs_or_hiding_rollback(self):
+        current, command = self.fixture('classified')
+        self.assertEqual(current.returncode, 42, current.stderr)
+        self.assertIn('02.11.2026', current.stderr)
+        self.assertIn('08:11:35 UTC', current.stderr)
+        self.assertEqual(current.stderr.splitlines().count(command), 1)
+        stale, command = self.fixture('stale')
+        self.assertEqual(stale.returncode, 130, stale.stderr)
+        self.assertNotIn('02.11.2026', stale.stderr)
+        self.assertEqual(stale.stderr.splitlines().count(command), 1)
+        rollback, command = self.fixture('rollback')
+        self.assertEqual(rollback.returncode, 42, rollback.stderr)
+        self.assertNotIn(command, rollback.stderr)
+        self.assertIn('--diagnose', rollback.stderr)
+        unavailable, command = self.fixture('unavailable-rollback')
+        self.assertEqual(unavailable.returncode, 130, unavailable.stderr)
+        self.assertNotIn(command, unavailable.stderr)
+        self.assertIn('stat -- ', unavailable.stderr)
+
+    def test_verify_does_not_overwrite_a_link_to_existing_saved_data(self):
+        result, command = self.fixture('verify-unsafe')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('Небезопасный журнал проверки VPN', result.stderr)
+        self.assertNotIn(command, result.stderr)
 
 
 if __name__ == '__main__':
