@@ -41,6 +41,22 @@ assert count == 1, 'Missing UFW IPv6 setting'
 path.write_text(text)
 PY
 ufw --force reset >/dev/null
+# UFW uses Python gettext, where LANGUAGE can override even LC_ALL=C. Bind a
+# private catalog inside this mount namespace so the check does not depend on
+# language packs installed on the runner and changes no host translation files.
+translation_root=$(python3 -c 'import ufw.common; print(ufw.common.trans_dir)')
+[[ $translation_root == /usr/share/ufw && -d $translation_root && ! -L $translation_root ]]
+cp -a "$translation_root" "$fixture/ufw-share"
+python3 "$bundle/../tests/test_locale_environment.py" --write-catalog "$fixture/ufw-share/messages"
+mount --bind "$fixture/ufw-share" "$translation_root"
+export LC_ALL=C LANG=C LANGUAGE=ru
+[[ $(ufw status) == FIXTURE_TRANSLATED_INACTIVE ]]
+export TARGET_IPV4=8.8.4.4 TARGET_FQDN=8.8.4.4 TARGET_ADDRESS_MODE=ip
+export TARGET_INTERFACE=vpnfixture0 TARGET_SSH_PORT=2222 TARGET_DEVICE_LIMIT=0
+export TARGET_REALITY_SNI=max.ru TARGET_LABEL=fixture
+source "$bundle/scripts/target-contract.sh"
+[[ $(ufw status) == 'Status: inactive' ]]
+printf 'UFW_INHERITED_LANGUAGE_NORMALIZED_OK=1\n'
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 ufw default deny routed >/dev/null

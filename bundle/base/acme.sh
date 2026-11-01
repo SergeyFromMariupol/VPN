@@ -4,6 +4,19 @@ set -Eeuo pipefail
 umask 077
 source_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly source_root
+unit_is_quiescent() {
+  local unit=$1 state
+  state=$(systemctl show "$unit" -p LoadState -p ActiveState -p MainPID) || return 1
+  state=$'\n'"$state"$'\n'
+  [[ $state == *$'\nLoadState=loaded\n'* ]] || return 1
+  case $unit in
+    *.service)
+      [[ $state == *$'\nMainPID=0\n'* &&
+         ($state == *$'\nActiveState=inactive\n'* || $state == *$'\nActiveState=failed\n'*) ]] ;;
+    *.timer) [[ $state == *$'\nActiveState=inactive\n'* ]] ;;
+    *) return 1 ;;
+  esac
+}
 source "$source_root/../scripts/target-contract.sh"
 source "$source_root/acme-identifiers.sh"
 mode=check
@@ -15,7 +28,7 @@ for name in certbot dig ip sqlite3 systemctl openssl tar ss flock; do command -v
 [[ -z $(ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -vF " $TARGET_IPV4/") ]]
 ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -Fq " $TARGET_IPV4/"
 systemctl is-enabled --quiet x-ui.service
-! systemctl is-active --quiet x-ui.service || {
+unit_is_quiescent x-ui.service || {
   printf 'ERROR: x-ui must be stopped before ACME bootstrap\n' >&2; exit 1;
 }
 [[ $(sqlite3 -readonly /etc/x-ui/x-ui.db 'select count(*) from inbounds;') == 0 ]]
@@ -50,7 +63,7 @@ exec 9>"$acme_lock_root/bootstrap.lock"
 flock -n 9 || { printf 'ERROR: another certificate bootstrap is active\n' >&2; exit 1; }
 systemctl is-enabled --quiet certbot.timer
 systemctl is-active --quiet certbot.timer
-! systemctl is-active --quiet certbot.service || exit 1
+unit_is_quiescent certbot.service || exit 1
 snapshot="/var/backups/krysyuk-standalone/$(date -u +%Y%m%dT%H%M%SZ)-acme-$$"
 install -d -o root -g root -m 0700 "$snapshot"
 systemctl show certbot.service certbot.timer >"$snapshot/unit-state.before"
@@ -63,15 +76,21 @@ cleanup() {
   set +e
   rollback_ok=1
   if ((committed == 0 && snapshot_ready)); then
+    quiesced=1
+    systemctl stop certbot.timer >/dev/null 2>&1 || quiesced=0
+    unit_is_quiescent certbot.timer || quiesced=0
+    unit_is_quiescent certbot.service || quiesced=0
     # Preserve failure state privately, then restore the exact saved tree.
     # No unknown certificate/account path is recursively removed.
-    if mv -- /etc/letsencrypt "$snapshot/letsencrypt-failed"; then
+    if ((quiesced)) && mv -- /etc/letsencrypt "$snapshot/letsencrypt-failed"; then
       tar --acls --xattrs --numeric-owner -xpf "$snapshot/letsencrypt-before.tar" -C / || rollback_ok=0
     else rollback_ok=0; fi
-    printf 'ACME_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$snapshot" >&2
   fi
   if ((timer_stopped)); then
     systemctl start certbot.timer >/dev/null 2>&1 || { rollback_ok=0; ((status != 0)) || status=1; }
+  fi
+  if ((committed == 0 && snapshot_ready)); then
+    printf 'ACME_ROLLBACK_OK=%s SNAPSHOT=%s\n' "$rollback_ok" "$snapshot" >&2
   fi
   ((rollback_ok)) || { printf 'ERROR: certificate recovery needs the protected snapshot\n' >&2; ((status != 0)) || status=1; }
   exit "$status"
@@ -80,7 +99,8 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 timer_stopped=1
 systemctl stop certbot.timer
-! systemctl is-active --quiet certbot.service || exit 1
+unit_is_quiescent certbot.timer || exit 1
+unit_is_quiescent certbot.service || exit 1
 tar --acls --xattrs --numeric-owner -cpf "$snapshot/letsencrypt-before.tar" -C / etc/letsencrypt
 tar -tf "$snapshot/letsencrypt-before.tar" >/dev/null
 (cd -- "$snapshot"; sha256sum -- *.before letsencrypt-before.tar >SHA256SUMS; sha256sum -c SHA256SUMS >/dev/null)

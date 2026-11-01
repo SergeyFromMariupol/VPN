@@ -16,6 +16,19 @@ readonly marker="$root/tls-deployed.sha256"
 readonly lineage="/etc/letsencrypt/live/$TARGET_FQDN"
 readonly service_source="$source_root/../templates/vpn-cert-reconcile.service"
 readonly timer_source="$source_root/../templates/vpn-cert-reconcile.timer"
+unit_is_quiescent() {
+  local unit=$1 state
+  state=$(systemctl show "$unit" -p LoadState -p ActiveState -p MainPID) || return 1
+  state=$'\n'"$state"$'\n'
+  [[ $state == *$'\nLoadState=loaded\n'* ]] || return 1
+  case $unit in
+    *.service)
+      [[ $state == *$'\nMainPID=0\n'* &&
+         ($state == *$'\nActiveState=inactive\n'* || $state == *$'\nActiveState=failed\n'*) ]] ;;
+    *.timer) [[ $state == *$'\nActiveState=inactive\n'* ]] ;;
+    *) return 1 ;;
+  esac
+}
 for name in bash basename cmp dirname flock install mktemp mv openssl rmdir sha256sum stat systemctl tar; do command -v "$name" >/dev/null; done
 for path in "$service_source" "$timer_source"; do [[ -f $path && ! -L $path ]] || exit 1; done
 [[ -f $hook && ! -L $hook && $(stat -c '%u:%g:%a:%h' "$hook") == 0:0:750:1 ]] || exit 1
@@ -23,7 +36,7 @@ for path in "$service_source" "$timer_source"; do [[ -f $path && ! -L $path ]] |
 systemctl is-active --quiet x-ui.service
 systemctl is-active --quiet nginx.service
 systemctl is-active --quiet certbot.timer
-! systemctl is-active --quiet certbot.service
+unit_is_quiescent certbot.service
 
 expected_hash=$(sha256sum "$lineage/fullchain.pem"); expected_hash=${expected_hash%% *}
 [[ $expected_hash =~ ^[a-f0-9]{64}$ ]] || exit 1
@@ -106,18 +119,24 @@ cleanup() {
   trap - EXIT INT TERM HUP
   set +e
   if ((committed == 0)); then
+    # Preflight may have cached a not-found unit before its file was published.
+    # Reload owned files before asking systemd to stop and read them back.
+    if owned_unit "$timer" || owned_unit "$service"; then
+      systemctl daemon-reload >/dev/null 2>&1 || quiesced=0
+    fi
     if [[ -e $timer || -L $timer ]]; then
       if owned_unit "$timer"; then
-        systemctl disable --now vpn-cert-reconcile.timer >/dev/null 2>&1 || rollback_ok=0
-        if systemctl is-active --quiet vpn-cert-reconcile.timer; then rollback_ok=0; quiesced=0; fi
+        systemctl disable --now vpn-cert-reconcile.timer >/dev/null 2>&1 || quiesced=0
+        unit_is_quiescent vpn-cert-reconcile.timer || quiesced=0
       else rollback_ok=0; quiesced=0; fi
     fi
     if [[ -e $service || -L $service ]]; then
       if owned_unit "$service"; then
-        systemctl stop vpn-cert-reconcile.service >/dev/null 2>&1 || rollback_ok=0
-        if systemctl is-active --quiet vpn-cert-reconcile.service; then rollback_ok=0; quiesced=0; fi
+        systemctl stop vpn-cert-reconcile.service >/dev/null 2>&1 || quiesced=0
+        unit_is_quiescent vpn-cert-reconcile.service || quiesced=0
       else rollback_ok=0; quiesced=0; fi
     fi
+    ((quiesced)) || rollback_ok=0
     if ((quiesced)); then
     for path in "$service" "$timer"; do
       if [[ -e $path || -L $path ]]; then
@@ -158,7 +177,8 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 certbot_timer_stopped=1
 systemctl stop certbot.timer
-! systemctl is-active --quiet certbot.service
+unit_is_quiescent certbot.timer
+unit_is_quiescent certbot.service
 publish_units
 systemctl daemon-reload
 systemctl start vpn-cert-reconcile.service

@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 umask 077
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly script_dir
@@ -74,43 +76,78 @@ done
 snapshot_complete=0
 committed=0
 resume_original_runtime() {
+  local failed=0
   if grep -Fxq active "$backup_dir/service-active-before" 2>/dev/null; then
-    systemctl start krysyuk-warp-health.service >/dev/null 2>&1 || true
+    systemctl start krysyuk-warp-health.service >/dev/null 2>&1 || failed=1
   fi
   if grep -Fxq active "$backup_dir/timer-active-before" 2>/dev/null; then
-    systemctl start krysyuk-warp-health.timer >/dev/null 2>&1 || true
+    systemctl start krysyuk-warp-health.timer >/dev/null 2>&1 || failed=1
   fi
+  return "$failed"
+}
+quiesce_health_units() {
+  local unit state stop_status
+  for unit in krysyuk-warp-health.timer krysyuk-warp-health.service; do
+    stop_status=0
+    systemctl stop "$unit" >/dev/null 2>&1 || stop_status=$?
+    state=$(systemctl show "$unit" -p LoadState -p ActiveState -p MainPID 2>/dev/null) || return 1
+    # On the first deployment these exact units do not exist yet. Only an
+    # explicit missing/inactive read-back makes a failed stop harmless.
+    if grep -Fxq 'LoadState=not-found' <<<"$state"; then
+      grep -Fxq 'ActiveState=inactive' <<<"$state" || return 1
+      continue
+    fi
+    (( stop_status == 0 )) || return 1
+    grep -Eq '^LoadState=(loaded|masked)$' <<<"$state" || return 1
+    grep -Eq '^ActiveState=(inactive|failed)$' <<<"$state" || return 1
+    if [[ $unit == *.service ]]; then
+      grep -Fxq 'MainPID=0' <<<"$state" || return 1
+    fi
+  done
 }
 rollback() {
-  local target restore_root
-  systemctl stop krysyuk-warp-health.timer krysyuk-warp-health.service >/dev/null 2>&1 || true
-  systemctl disable krysyuk-warp-health.timer >/dev/null 2>&1 || true
+  local target restore_root rollback_ok=1
+  # A live probe can write the state files while they are being restored. An
+  # unavailable bus or incomplete read-back cannot prove that it stopped.
+  if ! quiesce_health_units; then
+    printf '%s\n' 'WARP_HEALTH_ROLLBACK_RESOURCES_RETAINED=1' >&2
+    return 1
+  fi
+  systemctl disable krysyuk-warp-health.timer >/dev/null 2>&1 || rollback_ok=0
   for target in "${targets[@]}"; do
-    rm -f -- "$target"
+    rm -f -- "$target" || rollback_ok=0
   done
   if [[ -d "$backup_dir/rootfs" ]]; then
     while IFS= read -r -d '' restore_root; do
-      cp -a -- "$restore_root" /
+      cp -a -- "$restore_root" / || rollback_ok=0
     done < <(find "$backup_dir/rootfs" -mindepth 1 -maxdepth 1 -print0)
+  else
+    rollback_ok=0
   fi
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  if grep -Fxq enabled "$backup_dir/timer-enabled-before" 2>/dev/null; then
-    systemctl enable krysyuk-warp-health.timer >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=0
+  # Do not activate an incompletely restored script or timer after an I/O
+  # failure. Continue all file recovery first, then report the exact outcome.
+  if (( rollback_ok == 1 )); then
+    if grep -Fxq enabled "$backup_dir/timer-enabled-before" 2>/dev/null; then
+      systemctl enable krysyuk-warp-health.timer >/dev/null 2>&1 || rollback_ok=0
+    fi
+    resume_original_runtime || rollback_ok=0
   fi
-  resume_original_runtime
+  (( rollback_ok == 1 ))
 }
 on_exit() {
-  local rc=$?
+  local rc=$? rollback_ok=1
   trap - EXIT HUP INT TERM
   if (( committed == 0 )); then
-    clear_uncommitted_warp_phase_marker || true
+    clear_uncommitted_warp_phase_marker || rollback_ok=0
     if (( snapshot_complete == 1 )); then
-      rollback
-      printf 'WARP_HEALTH_AUTO_ROLLBACK=1 backup=%s\n' "$backup_dir" >&2
+      rollback || rollback_ok=0
+      printf 'WARP_HEALTH_AUTO_ROLLBACK_OK=%s backup=%s\n' "$rollback_ok" "$backup_dir" >&2
     else
-      resume_original_runtime
+      resume_original_runtime || rollback_ok=0
       printf '%s\n' 'WARP_HEALTH_DEPLOY_ABORTED_BEFORE_SNAPSHOT=1' >&2
     fi
+    if (( rollback_ok == 0 && rc == 0 )); then rc=1; fi
   fi
   exit "$rc"
 }
@@ -119,9 +156,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-systemctl stop krysyuk-warp-health.timer krysyuk-warp-health.service >/dev/null 2>&1 || true
-if systemctl is-active --quiet krysyuk-warp-health.timer || \
-   systemctl is-active --quiet krysyuk-warp-health.service; then
+if ! quiesce_health_units; then
   echo 'ERROR: failed to quiesce the WARP health timer/service' >&2
   exit 1
 fi

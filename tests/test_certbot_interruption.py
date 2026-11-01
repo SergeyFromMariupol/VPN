@@ -89,8 +89,19 @@ case "$1:$2" in
   is-enabled:certbot.timer) exit 0;;
   is-active:certbot.service) exit 3;;
   is-active:certbot.timer) test ! -e "$VPN_TEST_STOPPED"; exit $?;;
-  stop:certbot.timer) : >"$VPN_TEST_STOPPED"; inject stop-timer; exit 0;;
+  stop:certbot.timer)
+    if [ -e "$VPN_TEST_FIRED" ] && [ "$VPN_TEST_FAULT" = quiesce-stop ]; then exit 1; fi
+    : >"$VPN_TEST_STOPPED"; inject stop-timer; exit 0;;
   start:certbot.timer) rm -f "$VPN_TEST_STOPPED"; exit 0;;
+  show:certbot.service|show:certbot.timer)
+    if [ -e "$VPN_TEST_FIRED" ] && [ "$VPN_TEST_FAULT" = quiesce-readback ]; then exit 1; fi
+    printf 'LoadState=loaded\n'
+    if [ "$2" = certbot.timer ] && [ ! -e "$VPN_TEST_STOPPED" ]; then
+      printf 'ActiveState=active\n'
+    else printf 'ActiveState=inactive\n'; fi
+    if [ -e "$VPN_TEST_FIRED" ] && [ "$VPN_TEST_FAULT" = quiesce-orphan ] && [ "$2" = certbot.service ]; then
+      printf 'MainPID=321\n'
+    else printf 'MainPID=0\n'; fi;;
   show:-p)
     case "$3" in
       ExecStart) printf '%s/bin/certbot -q renew\\n' "$VPN_TEST_VENV";;
@@ -132,7 +143,8 @@ case "$last" in
   "$VPN_TEST_VENV") inject venv;;
   "$VPN_TEST_SERVICE") inject service;;
   "$VPN_TEST_TIMER") inject timer;;
-  "$VPN_TEST_SHIM") inject shim;;
+  "$VPN_TEST_SHIM")
+    case "$VPN_TEST_FAULT" in quiesce-*) inject "$VPN_TEST_FAULT";; *) inject shim;; esac;;
 esac
 ''')
         (self.bin / 'ln').write_text('#!/bin/sh\n' + inject + f'''
@@ -210,6 +222,20 @@ esac
         self.assertTrue(self.shim.is_symlink())
         self.assertEqual(self.shim.readlink(), self.venv / 'bin/certbot')
         self.assertFalse(self.stopped.exists())
+
+    def test_unconfirmed_renewal_stop_retains_published_runtime(self):
+        for fault in ('quiesce-stop', 'quiesce-readback', 'quiesce-orphan'):
+            with self.subTest(fault=fault):
+                self.setUp()
+                result = self.run_installer(fault)
+                self.assertTrue(self.fired.exists(), result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('CERTBOT_ROLLBACK_OK=0', result.stderr)
+                self.assertTrue(self.venv.is_dir())
+                self.assertTrue(self.service.is_dir())
+                self.assertTrue(self.timer.is_dir())
+                self.assertTrue(self.shim.is_symlink())
+                self.assertFalse(any((self.root / 'backups').glob('*/venv.failed')))
 
 
 if __name__ == '__main__':

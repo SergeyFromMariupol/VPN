@@ -62,13 +62,13 @@ def reserved_path_conflicts(paths=RESERVED_PATHS) -> list[str]:
 
 def run(*args: str) -> str:
     return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=20,
-                                   env=dict(os.environ, LC_ALL='C')).strip()
+                                   env=dict(os.environ, LC_ALL='C', LANG='C', LANGUAGE='C')).strip()
 
 
 def virtualization() -> str:
     # systemd-detect-virt reports a normal physical host as "none" with status 1.
     result = subprocess.run(('systemd-detect-virt',), text=True, capture_output=True,
-                            timeout=20, env=dict(os.environ, LC_ALL='C'))
+                            timeout=20, env=dict(os.environ, LC_ALL='C', LANG='C', LANGUAGE='C'))
     value = result.stdout.strip()
     if result.returncode == 0 or (result.returncode == 1 and value == 'none'):
         return value

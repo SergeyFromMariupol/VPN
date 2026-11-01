@@ -2,9 +2,12 @@
 # VPN installer for a clean Ubuntu 24.04 amd64 VPS.
 set -Eeuo pipefail
 umask 077
+# Keep parsed command output stable even in a translated root session.
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.1.5'
+readonly release='v1.1.6'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -80,10 +83,13 @@ with tarfile.open(sys.argv[1]) as archive:
     roots = set()
     for member in archive:
         path = PurePosixPath(member.name)
-        assert not path.is_absolute() and '..' not in path.parts
-        assert member.isfile() or member.isdir()
+        if path.is_absolute() or '..' in path.parts:
+            raise ValueError('Unsafe archive member path')
+        if not (member.isfile() or member.isdir()):
+            raise ValueError('Only regular files and directories are allowed')
         roots.add(path.parts[0])
-    assert len(roots) == 1
+    if len(roots) != 1:
+        raise ValueError('Expected exactly one archive root')
 PY
   mkdir "$task_stage/source"
   tar -xzf "$task_stage/source.tar.gz" --strip-components=1 -C "$task_stage/source"

@@ -267,7 +267,7 @@ def main():
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('root is required to authenticate listener owners')
-    environment = dict(os.environ, LC_ALL='C')
+    environment = dict(os.environ, LC_ALL='C', LANG='C', LANGUAGE='C')
     def output(command):
         return subprocess.run(command, check=True, text=True, capture_output=True,
                               env=environment, timeout=30).stdout

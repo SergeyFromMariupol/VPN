@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import re
 
 SOURCE = Path(__file__).resolve().parents[1] / 'bundle/base/install-cert-reconcile.sh'
 
@@ -29,6 +30,9 @@ class ReconcileInstaller(unittest.TestCase):
         source = SOURCE.read_text(encoding='utf-8')
         begin = source.index("unit_stage=''") if "unit_stage=''" in source else source.index('cleanup() {')
         functions = source[begin:source.index('\ntrap cleanup EXIT', begin)]
+        helper = re.search(r'(?ms)^unit_is_quiescent\(\) \{.*?^\}', source)
+        if helper:
+            functions = helper.group() + '\n' + functions
         if 'publish_units() {' in functions:
             operation = 'publish_units\n'
         else:
@@ -52,6 +56,22 @@ committed=0
 certbot_timer_stopped=1
 systemctl() {
   printf '%s\n' "$*" >>"$FIXTURE_ROOT/calls"
+  case "$TEST_FAULT:$1:${2:-}" in
+    reload-failure:daemon-reload:) return 1;;
+    timer-stop:disable:--now|service-stop:stop:vpn-cert-reconcile.service) return 1;;
+    timer-readback:show:vpn-cert-reconcile.timer|service-readback:show:vpn-cert-reconcile.service) return 1;;
+  esac
+  if [[ $1 == daemon-reload ]]; then : >"$FIXTURE_ROOT/reloaded"; fi
+  if [[ $1 == show ]]; then
+    if [[ -e $FIXTURE_ROOT/reloaded ]]; then printf 'LoadState=loaded\n'
+    else printf 'LoadState=not-found\n'; fi
+    printf 'ActiveState=inactive\n'
+    if [[ $TEST_FAULT == service-orphan && $2 == vpn-cert-reconcile.service ]]; then
+      printf 'MainPID=321\n'
+    elif [[ $TEST_FAULT != service-missing-pid || $2 != vpn-cert-reconcile.service ]]; then
+      printf 'MainPID=0\n'
+    fi
+  fi
   if [[ $1 == is-active && ${@: -1} != certbot.timer ]]; then return 3; fi
 }
 install() {
@@ -77,7 +97,14 @@ mv() {
 ''' + functions + r'''
 trap cleanup EXIT
 trap 'exit 143' TERM
-''' + operation + '\ncommitted=1\n'
+''' + operation + r'''
+case $TEST_FAULT in
+  reload-failure|timer-stop|service-stop|timer-readback|service-readback|service-orphan|service-missing-pid)
+    printf '%s\n' "$expected_hash" >"$marker"
+    exit 37;;
+esac
+committed=1
+'''
         return subprocess.run(['bash', '-s'], input=script, text=True,
                               env=dict(os.environ, FIXTURE_ROOT=str(self.root), TEST_FAULT=fault),
                               capture_output=True, timeout=15)
@@ -111,6 +138,20 @@ trap 'exit 143' TERM
         self.assertNotIn('stop vpn-cert-reconcile.service', calls)
         self.assertNotIn('disable --now vpn-cert-reconcile.timer', calls)
         self.assertIn('CERT_RECONCILE_ROLLBACK_OK=0', result.stderr)
+
+    def test_unconfirmed_quiescence_preserves_units_and_current_marker(self):
+        for fault in ('reload-failure', 'timer-stop', 'service-stop', 'timer-readback',
+                      'service-readback', 'service-orphan', 'service-missing-pid'):
+            with self.subTest(fault=fault):
+                self.setUp()
+                result = self.run_publication(fault)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('CERT_RECONCILE_ROLLBACK_OK=0', result.stderr)
+                self.assertEqual(self.service.read_bytes(), self.service_source.read_bytes())
+                self.assertEqual(self.timer.read_bytes(), self.timer_source.read_bytes())
+                self.assertEqual((self.root / 'runtime/marker').read_text(), 'fixture\n')
+                self.assertFalse((self.root / 'backup/vpn-cert-reconcile.service.failed').exists())
+                self.assertFalse((self.root / 'backup/vpn-cert-reconcile.timer.failed').exists())
 
 
 if __name__ == '__main__':

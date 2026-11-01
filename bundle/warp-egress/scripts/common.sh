@@ -3,6 +3,8 @@
 
 set -Eeuo pipefail
 umask 077
+export LC_ALL=C LANG=C LANGUAGE=C
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 
 readonly WARP_EGRESS_ENV=/etc/krysyuk-warp-egress/warp-egress.env
 readonly WARP_EGRESS_NL_CLIENT_ENV=/etc/krysyuk-warp-egress/warp-egress-nl-client.env
