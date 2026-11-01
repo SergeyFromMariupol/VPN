@@ -142,8 +142,8 @@ else
   export TARGET_ADDRESS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
-  python3 -B "$source_dir/tools/preflight.py" --inputs-only
-  printf '\nШаг 2/2 — автоматическая установка с введёнными параметрами.\n'
+  python3 -B "$source_dir/tools/preflight.py" --inputs-only >/dev/null
+  wizard_section 'Установка' 'Автоматический запуск'
   printf 'Проверка чистого сервера, адреса и TLS…\n'
   python3 "$source_dir/tools/preflight.py" | tee "$task_stage/inventory.txt"
   prepare_installation_bootstrap
