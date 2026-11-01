@@ -494,7 +494,7 @@ class QuestionnaireFlow(unittest.TestCase):
         blank = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
                              custom_sni_answers=['', None])
         self.assert_unpublished(blank)
-        self.assertIn('EOF:3', blank['events'])
+        self.assertIn('EOF:4', blank['events'])
         self.assertFalse(any(event.startswith('SNI_PROBE:') for event in blank['events']))
 
     def test_no_color_disables_ansi_even_in_color_capable_pty(self):

@@ -48,6 +48,8 @@ class ErrorClassification(unittest.TestCase):
         self.assertIn('UTC', output)
         self.assertIn('2026', output)
         self.assertIn('bash /opt/vpn-installer/install.sh --resume', output.splitlines())
+        self.assertNotIn('--diagnose', output)
+        self.assertNotIn('systemctl', output)
         self.assert_private(output)
 
     def test_other_ca_limits_never_claim_the_exact_identifier_quota(self):

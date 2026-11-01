@@ -286,6 +286,7 @@ if [[ $mode == --resume ]]; then
 else
   if [[ -e $state || -L $state || -e $destination || -L $destination || -e $target_file || -L $target_file ]]; then
     printf 'Обнаружена предыдущая установка VPN.\n' >&2
+    printf 'Продолжение использует сохранённые настройки. Режим сертификата выбирается при новой установке.\n' >&2
     installer_resume_hint
     exit 1
   fi

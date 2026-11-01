@@ -374,6 +374,8 @@ def _destination(value):
 
 
 def _check_command(stage, issue):
+    if issue['code'] in ('ACME_EXACT_RATE_LIMIT', 'ACME_RATE_LIMIT'):
+        return None
     if issue['code'] in ('PACKAGE_STATE', 'PACKAGE_INTERRUPTED', 'PACKAGE_LOCK'):
         return 'dpkg --audit'
     if issue['code'] == 'DISK_FULL':
@@ -434,13 +436,16 @@ def render(issue, stage, status=1, can_resume=False, destination='/opt/vpn-insta
     if check:
         lines.extend(('', 'Проверка без изменения настроек — скопируйте команду целиком:', '', check))
     if can_resume:
-        lines.extend(('', 'Безопасная диагностика — скопируйте команду целиком:', '', command + ' --diagnose'))
+        if error_code not in ('ACME_EXACT_RATE_LIMIT', 'ACME_RATE_LIMIT') or not retry:
+            lines.extend(('', 'Безопасная диагностика — скопируйте команду целиком:', '', command + ' --diagnose'))
         if issue.get('resume') and (error_code not in ('ACME_EXACT_RATE_LIMIT', 'ACME_RATE_LIMIT') or retry):
             instruction = ('После указанного времени и устранения причины скопируйте команду целиком:'
                            if retry else 'После устранения причины скопируйте команду целиком:')
             lines.extend(('', instruction, '', command + ' --resume'))
     elif stage in EARLY_STAGES and issue.get('resume'):
         lines.extend(('', 'После устранения причины запустите установщик полной командой:', '', LAUNCH))
+    elif error_code in ('ACME_EXACT_RATE_LIMIT', 'ACME_RATE_LIMIT') and retry:
+        lines.append('Сохранённый срок ограничения указан выше; новые запросы до этого срока не помогут.')
     else:
         lines.extend(('', 'Сначала разберите причину по безопасной проверке выше. '
                       'Не удаляйте файлы установки и защищённые снимки.'))
