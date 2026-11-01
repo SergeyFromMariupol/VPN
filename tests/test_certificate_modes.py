@@ -8,8 +8,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import sqlite3
 import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -115,6 +118,46 @@ def create_database(path, settings):
 
 
 class CertificateModeFinalizer(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('VPN_TEST_BASH') or shutil.which('bash'),
+                         'Bash is required to execute the actual environment writers')
+    def test_production_direct_and_dual_writers_roundtrip_through_the_finalizer_parser(self):
+        direct_source = (ROOT / 'bundle/scripts/configure-standalone.sh').read_text(encoding='utf-8')
+        direct_start = direct_source.index("printf '%s\\n' \\\n", direct_source.index('tmp_env=$(mktemp'))
+        direct_end = direct_source.index('\ninstall -o root -g root -m 0600 "$tmp_env"', direct_start)
+        direct_writer = direct_source[direct_start:direct_end]
+        self.assertEqual(direct_writer.count('>"$tmp_env"'), 1)
+        direct_writer = direct_writer.replace('>"$tmp_env"', '')
+
+        dual_source = (ROOT / 'bundle/scripts/enable-dual-egress.sh').read_text(encoding='utf-8')
+        dual_start = dual_source.index("printf '\\nDUAL_EGRESS_SCHEMA=1")
+        dual_end = dual_source.index('\nunset VLESS_UUID HYSTERIA2_AUTH', dual_start)
+        dual_writer = dual_source[dual_start:dual_end]
+        self.assertEqual(dual_writer.count('>>"$stage/server.env.intended"'), 1)
+        dual_writer = dual_writer.replace('>>"$stage/server.env.intended"', '')
+
+        for mode in ('none', 'letsencrypt'):
+            with self.subTest(mode=mode):
+                values = dict(panel_username='fixture-user', panel_password='fixture-password',
+                              panel_base_path='fixture-panel', subscription_path='fixture-subscription',
+                              subscription_id='fixture-id', xhttp_private_path='fixture-xhttp',
+                              vless_uuid=DIRECT, hysteria2_auth='' if mode == 'none' else 'C' * 64,
+                              reality_short_id=SHORT_ID, reality_private_key='A' * 43,
+                              reality_public_key=PUBLIC_KEY, direct_subscription_id='D' * 64,
+                              warp_reality_uuid=WARP_REALITY, warp_xhttp_uuid=WARP_XHTTP,
+                              warp_hysteria_auth='' if mode == 'none' else 'E' * 64)
+                script = ('set -Eeuo pipefail\n' + '\n'.join(
+                    key + '=' + shlex.quote(value) for key, value in values.items()) + '\n' +
+                    direct_writer + '\n' + dual_writer + '\n')
+                process = subprocess.run([os.environ.get('VPN_TEST_BASH') or shutil.which('bash'), '-s'],
+                                         input=script.encode(), capture_output=True, timeout=10)
+                self.assertEqual(process.returncode, 0, process.stderr.decode(errors='replace'))
+                saved = FINAL.parse_env(process.stdout)
+                self.assertEqual(saved['HYSTERIA2_AUTH'], values['hysteria2_auth'])
+                self.assertEqual(saved['WARP_HYSTERIA2_AUTH'], values['warp_hysteria_auth'])
+                self.assertEqual(saved['REALITY_PRIVATE_KEY'], values['reality_private_key'])
+                self.assertEqual(saved['WARP_XHTTP_UUID'], WARP_XHTTP)
+                self.assertEqual(saved['DUAL_EGRESS_SCHEMA'], '1')
+
     def test_none_has_four_exact_ordered_names_and_legacy_defaults_to_six(self):
         none = ['Тест · ☁️ Cloudflare · REALITY', 'Тест · ☁️ Cloudflare · XHTTP',
                 'Тест · 🖥️ IP сервера · REALITY', 'Тест · 🖥️ IP сервера · XHTTP']

@@ -321,6 +321,18 @@ class FinalizerTests(unittest.TestCase):
                 self.assertEqual(configs, module.build(self.main, {**target, 'TARGET_LABEL': 'Другое имя'},
                                                       'A' * 43, '0123456789abcdef', '/fixture-path'))
 
+    def test_environment_parser_accepts_bare_and_quoted_empty_assignments(self):
+        raw = b"HYSTERIA2_AUTH=\nWARP_HYSTERIA2_AUTH=''\nOPTIONAL=\"\"\n"
+        self.assertEqual(module.parse_env(raw),
+                         {'HYSTERIA2_AUTH': '', 'WARP_HYSTERIA2_AUTH': '', 'OPTIONAL': ''})
+
+    def test_empty_assignment_support_does_not_relax_malformed_environment_rejection(self):
+        for raw in (b'lower=', b'=value', b'NAME', b'NAME=two words', b'NAME= ',
+                    b'NAME=\x00', b'NAME=\'\x1b\'', b'NAME="unterminated',
+                    b'NAME=\nNAME=value\n'):
+            with self.subTest(case=repr(raw)), self.assertRaisesRegex(RuntimeError, 'ENV_SHAPE'):
+                module.parse_env(raw)
+
     def test_environment_parser_preserves_shell_quoted_labels_and_rejects_controls(self):
         label = '''  Свой VPN ' " \\ $HOME ${TOKEN} $(command) `literal` = # 🛰️  '''
         raw = ('TARGET_LABEL=' + shlex.quote(label) + '\nTARGET_ADDRESS_MODE=ip\n' +

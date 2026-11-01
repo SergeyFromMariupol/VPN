@@ -99,7 +99,7 @@ def parse_env(raw):
             key, value = line.split('=', 1)
             need(re.fullmatch('[A-Z][A-Z0-9_]*', key) and key not in out, 'ENV_SHAPE')
             try:
-                parts = shlex.split(value)
+                parts = [''] if value == '' else shlex.split(value)
             except ValueError:
                 raise RuntimeError('ENV_SHAPE') from None
             need(len(parts) == 1 and not any(unicodedata.category(c) == 'Cc' for c in parts[0]),

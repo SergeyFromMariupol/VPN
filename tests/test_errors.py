@@ -125,6 +125,7 @@ class ErrorClassification(unittest.TestCase):
             ('warp', 'host warp-svc must remain inactive', 'WARP_ISOLATION'),
             ('dual', 'subscription profile mismatch', 'SUBSCRIPTION_MISMATCH'),
             ('xhttp', 'FRESH_XHTTP_FAILED=URI_CLIENT_TIMEOUT', 'XHTTP_TEST_FAILED'),
+            ('xhttp', 'FRESH_XHTTP_FAILED=ENV_SHAPE', 'XHTTP_ENV_FORMAT'),
         )
         for stage, text, expected in cases:
             with self.subTest(stage=stage, expected=expected):
