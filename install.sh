@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.9'
+readonly release='v1.2.10'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -298,12 +298,13 @@ if [[ $mode == --resume ]]; then
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
   source "$target_file"
+  [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Сохранён режим без сертификата; этот установщик продолжает только HTTPS-установки'
   [[ -f $destination/SHA256SUMS ]] || die 'Отсутствует установленный bundle'
   (cd -- "$destination"; sha256sum --check --strict SHA256SUMS >/dev/null)
 else
   if [[ -e $state || -L $state || -e $destination || -L $destination || -e $target_file || -L $target_file ]]; then
     printf 'Обнаружена предыдущая установка VPN.\n' >&2
-    printf 'Продолжение использует сохранённые настройки. Режим сертификата выбирается при новой установке.\n' >&2
+    printf 'Продолжение использует сохранённые настройки. Новая установка всегда использует Let’s Encrypt и HTTPS.\n' >&2
     installer_resume_hint
     exit 1
   fi
@@ -334,10 +335,9 @@ TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
-[[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
+[[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Новая установка требует Let’s Encrypt и HTTPS'
 [[ $TARGET_EGRESS_MODE == warp || $TARGET_EGRESS_MODE == direct || $TARGET_EGRESS_MODE == both ]] || die 'Небезопасный режим выхода'
 [[ $TARGET_PROFILE_SET == basic || $TARGET_PROFILE_SET == dpi || $TARGET_PROFILE_SET == all ]] || die 'Небезопасный набор профилей'
-[[ $TARGET_TLS_MODE != none || $TARGET_PROFILE_SET == basic ]] || die 'Расширенный набор требует доверенный сертификат'
 export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
@@ -353,19 +353,17 @@ fi
 source "$destination/tools/phases.sh"
 installer_error_context base "$state/base.log"
 phase base bash "$runtime/base/install-pinned-base.sh" --apply
-if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  installer_error_context certbot "$state/certbot.log"
-  phase certbot bash "$runtime/base/install-certbot.sh" --apply
-  installer_error_context certbot "$state/certbot-check.log"
-  bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log" 2>&1
-  installer_error_context tls "$state/tls.log"
-  if [[ ! -f $state/tls.done &&
-        (-e /etc/letsencrypt/.vpn-acme-bootstrap-commit ||
-         -L /etc/letsencrypt/.vpn-acme-bootstrap-commit) ]]; then
-    phase tls bash "$runtime/base/acme.sh" --verify-committed
-  else
-    phase tls bash "$runtime/base/acme.sh" --apply
-  fi
+installer_error_context certbot "$state/certbot.log"
+phase certbot bash "$runtime/base/install-certbot.sh" --apply
+installer_error_context certbot "$state/certbot-check.log"
+bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log" 2>&1
+installer_error_context tls "$state/tls.log"
+if [[ ! -f $state/tls.done &&
+      (-e /etc/letsencrypt/.vpn-acme-bootstrap-commit ||
+       -L /etc/letsencrypt/.vpn-acme-bootstrap-commit) ]]; then
+  phase tls bash "$runtime/base/acme.sh" --verify-committed
+else
+  phase tls bash "$runtime/base/acme.sh" --apply
 fi
 installer_error_context direct "$state/direct.log"
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
@@ -373,17 +371,15 @@ installer_error_context panel "$state/panel.log"
 phase panel bash "$runtime/scripts/expose-panel-https.sh" --apply
 installer_error_context nginx-restart "$state/nginx-restart.log"
 phase nginx-restart bash "$runtime/base/install-nginx-restart.sh" --apply
-if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  installer_error_context cert-reconcile "$state/cert-reconcile.log"
-  if [[ ! -f $state/cert-reconcile.done &&
-        (-e /etc/systemd/system/vpn-cert-reconcile.service ||
-         -L /etc/systemd/system/vpn-cert-reconcile.service ||
-         -e /etc/systemd/system/vpn-cert-reconcile.timer ||
-         -L /etc/systemd/system/vpn-cert-reconcile.timer) ]]; then
-    phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --check-only
-  else
-    phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
-  fi
+installer_error_context cert-reconcile "$state/cert-reconcile.log"
+if [[ ! -f $state/cert-reconcile.done &&
+      (-e /etc/systemd/system/vpn-cert-reconcile.service ||
+       -L /etc/systemd/system/vpn-cert-reconcile.service ||
+       -e /etc/systemd/system/vpn-cert-reconcile.timer ||
+       -L /etc/systemd/system/vpn-cert-reconcile.timer) ]]; then
+  phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --check-only
+else
+  phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
 fi
 if [[ $TARGET_EGRESS_MODE == direct ]]; then
   installer_error_context xhttp "$state/xhttp.log"
@@ -430,10 +426,8 @@ if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
 fi
 # The production timer keeps Certbot's random spread; an interactive install
 # should run its one acceptance renewal immediately.
-if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  installer_error_context renewal "$state/renewal.log"
-  phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-random-sleep-on-renew
-fi
+installer_error_context renewal "$state/renewal.log"
+phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-random-sleep-on-renew
 # Always recheck live state, including a resume after a later phase failed.
 installer_error_context verify "$state/verify.log"
 phase --always verify bash "$destination/tools/verify.sh"

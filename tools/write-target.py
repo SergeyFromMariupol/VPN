@@ -12,14 +12,12 @@ def write_target(destination: Path, env: dict) -> None:
     env = dict(env, TARGET_TLS_MODE=env.get('TARGET_TLS_MODE', 'letsencrypt'),
                TARGET_EGRESS_MODE=env.get('TARGET_EGRESS_MODE', 'both'),
                TARGET_PROFILE_SET=env.get('TARGET_PROFILE_SET', 'basic'))
-    if env['TARGET_TLS_MODE'] not in ('letsencrypt', 'none'):
-        raise ValueError('Invalid certificate mode')
+    if env['TARGET_TLS_MODE'] != 'letsencrypt':
+        raise ValueError('New installations require Let\'s Encrypt')
     if env['TARGET_EGRESS_MODE'] not in ('warp', 'direct', 'both'):
         raise ValueError('Invalid egress mode')
     if env['TARGET_PROFILE_SET'] not in ('basic', 'dpi', 'all'):
         raise ValueError('Invalid profile set')
-    if env['TARGET_TLS_MODE'] == 'none' and env['TARGET_PROFILE_SET'] != 'basic':
-        raise ValueError('Expanded profile sets require Let\'s Encrypt')
     label = env['TARGET_LABEL']
     if not isinstance(label, str) or not label.strip():
         raise ValueError('Invalid profile name')

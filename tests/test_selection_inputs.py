@@ -45,9 +45,10 @@ class SelectionInputs(unittest.TestCase):
                         self.assertEqual(set(stored), set(TARGET.KEYS))
                         self.assertEqual({key: shlex.split(stored[key])[0] for key in stored}, values)
 
-    def test_certless_basic_and_legacy_defaults(self):
-        values = inputs(TARGET_TLS_MODE='none')
+    def test_legacy_missing_fields_default_to_letsencrypt_and_basic(self):
+        values = inputs()
         PREFLIGHT.validate_inputs(values)
+        values.pop('TARGET_TLS_MODE')
         values.pop('TARGET_EGRESS_MODE')
         values.pop('TARGET_PROFILE_SET')
         PREFLIGHT.validate_inputs(values)
@@ -55,6 +56,7 @@ class SelectionInputs(unittest.TestCase):
             path = Path(directory) / 'target.env'
             TARGET.write_target(path, values)
             stored = dict(line.split('=', 1) for line in path.read_text().splitlines())
+            self.assertEqual(shlex.split(stored['TARGET_TLS_MODE']), ['letsencrypt'])
             self.assertEqual(shlex.split(stored['TARGET_EGRESS_MODE']), ['both'])
             self.assertEqual(shlex.split(stored['TARGET_PROFILE_SET']), ['basic'])
 
@@ -62,6 +64,7 @@ class SelectionInputs(unittest.TestCase):
         for changes in (dict(TARGET_EGRESS_MODE='invalid'),
                         dict(TARGET_PROFILE_SET='invalid'),
                         dict(TARGET_LABEL='   '),
+                        dict(TARGET_TLS_MODE='none'),
                         dict(TARGET_TLS_MODE='none', TARGET_PROFILE_SET='dpi'),
                         dict(TARGET_TLS_MODE='none', TARGET_PROFILE_SET='all')):
             with self.subTest(changes=changes):
