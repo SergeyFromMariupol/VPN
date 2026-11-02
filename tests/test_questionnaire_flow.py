@@ -150,6 +150,8 @@ apt-get upgrade -y --no-remove
         executable(source / 'bundle' / relative, body)
     executable(source / 'bundle/scripts/finalize-xhttp.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
+    executable(source / 'bundle/scripts/finalize-direct-xhttp.py',
+               'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
     executable(source / 'bundle/portfolio/install.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:portfolio-runtime\\n")\n')
     executable(source / 'tools/portfolio_publish.py',
