@@ -155,14 +155,19 @@ def normalized_portfolio_ports(ports):
 
 
 def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promoted,
-                       process_executables=None, tls_mode='letsencrypt', portfolio_ports=None):
+                       process_executables=None, tls_mode='letsencrypt', portfolio_ports=None,
+                       egress_mode='both'):
     if tls_mode not in ('letsencrypt', 'none'):
         raise ValueError('Invalid certificate mode')
+    if egress_mode not in ('warp', 'direct', 'both'):
+        raise ValueError('Invalid egress mode')
     target_ipv4 = str(ipaddress.IPv4Address(target_ipv4))
     ssh_port = int(ssh_port)
     process_executables = process_executables or {}
     portfolio_ports = normalized_portfolio_ports(portfolio_ports)
-    required_tcp = {ssh_port, 443, 2053, 2096, 8443}
+    required_tcp = {ssh_port, 443, 2053, 2096}
+    if not promoted or egress_mode != 'direct':
+        required_tcp.add(8443)
     if promoted:
         required_tcp.add(8444)
     required_tcp.update(port for port, protocol in portfolio_ports.items() if protocol == 'tcp')
@@ -194,7 +199,7 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
 
 def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh_port,
                               promoted, wait_seconds=90, tls_mode='letsencrypt',
-                              portfolio_ports=None):
+                              portfolio_ports=None, egress_mode='both'):
     """Let owned self-test UDP sessions expire; PASS still needs the exact contract.
 
     Xray's outbound UDP sockets are unconnected and therefore appear in ss -l.
@@ -213,7 +218,8 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
         dhcp_owners = trusted_process_executables(listeners)
         try:
             validate_listeners(listeners, target_ipv4, target_interface, ssh_port,
-                               promoted, dhcp_owners, tls_mode, portfolio_ports)
+                               promoted, dhcp_owners, tls_mode, portfolio_ports,
+                               egress_mode)
             return
         except ValueError as error:
             extras = [listener for listener in listeners
@@ -228,7 +234,7 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
             # and no other mismatch; this is only a retry eligibility check.
             validate_listeners([listener for listener in listeners if listener not in extras],
                                target_ipv4, target_interface, ssh_port, promoted, dhcp_owners,
-                               tls_mode, portfolio_ports)
+                               tls_mode, portfolio_ports, egress_mode)
             owners = trusted_managed_udp_owners(extras, promoted, bool(portfolio_ports))
             if any(not listener.pids or not set(listener.pids) <= owners for listener in extras):
                 raise error
@@ -240,9 +246,11 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
 
 
 def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaults_text,
-                 tls_mode='letsencrypt', portfolio_ports=None):
+                 tls_mode='letsencrypt', portfolio_ports=None, egress_mode='both'):
     if tls_mode not in ('letsencrypt', 'none'):
         raise ValueError('Invalid certificate mode')
+    if egress_mode not in ('warp', 'direct', 'both'):
+        raise ValueError('Invalid egress mode')
     portfolio_ports = normalized_portfolio_ports(portfolio_ports)
     """Require exact rules, including direction, address scope and default policies."""
     lines = text.splitlines()
@@ -284,7 +292,9 @@ def validate_ufw(text, target_ipv4, target_interface, ssh_port, promoted, defaul
         if not match:
             raise ValueError('Malformed UFW rule')
         rules.append(tuple(' '.join(value.split()) for value in match.groups()))
-    baseline = [(int(ssh_port), 'tcp'), (443, 'tcp'), (2096, 'tcp'), (8443, 'tcp')]
+    baseline = [(int(ssh_port), 'tcp'), (443, 'tcp'), (2096, 'tcp')]
+    if not promoted or egress_mode != 'direct':
+        baseline.append((8443, 'tcp'))
     if tls_mode == 'letsencrypt':
         baseline.extend(((80, 'tcp'), (443, 'udp')))
     expected = set()
@@ -309,6 +319,8 @@ def main():
     parser.add_argument('--promoted', choices=('0', '1'), required=True)
     parser.add_argument('--tls-mode', choices=('letsencrypt', 'none'),
                         default=os.environ.get('TARGET_TLS_MODE', 'letsencrypt'))
+    parser.add_argument('--egress-mode', choices=('warp', 'direct', 'both'),
+                        default=os.environ.get('TARGET_EGRESS_MODE', 'both'))
     parser.add_argument('--portfolio-state', type=Path)
     args = parser.parse_args()
     if os.geteuid() != 0:
@@ -335,10 +347,11 @@ def main():
         wait_for_strict_listeners(lambda: parse_ss(output(['ss', '-H', '-lntup'])),
                                  args.target_ip, args.interface, args.ssh_port,
                                  args.promoted == '1', tls_mode=args.tls_mode,
-                                 portfolio_ports=portfolio_ports)
+                                 portfolio_ports=portfolio_ports,
+                                 egress_mode=args.egress_mode)
         validate_ufw(output(['ufw', 'status', 'verbose']), args.target_ip, args.interface,
                      args.ssh_port, args.promoted == '1', Path('/etc/default/ufw').read_text(),
-                     args.tls_mode, portfolio_ports)
+                     args.tls_mode, portfolio_ports, args.egress_mode)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         raise SystemExit('NETWORK_CONTRACT_FAILED: ' + str(error)) from error
     print('NETWORK_CONTRACT_OK=1')

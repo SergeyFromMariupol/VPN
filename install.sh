@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.8'
+readonly release='v1.2.9'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -359,7 +359,13 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   installer_error_context certbot "$state/certbot-check.log"
   bash "$runtime/base/install-certbot.sh" --check-only >"$state/certbot-check.log" 2>&1
   installer_error_context tls "$state/tls.log"
-  phase tls bash "$runtime/base/acme.sh" --apply
+  if [[ ! -f $state/tls.done &&
+        (-e /etc/letsencrypt/.vpn-acme-bootstrap-commit ||
+         -L /etc/letsencrypt/.vpn-acme-bootstrap-commit) ]]; then
+    phase tls bash "$runtime/base/acme.sh" --verify-committed
+  else
+    phase tls bash "$runtime/base/acme.sh" --apply
+  fi
 fi
 installer_error_context direct "$state/direct.log"
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
@@ -369,25 +375,52 @@ installer_error_context nginx-restart "$state/nginx-restart.log"
 phase nginx-restart bash "$runtime/base/install-nginx-restart.sh" --apply
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   installer_error_context cert-reconcile "$state/cert-reconcile.log"
-  phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
+  if [[ ! -f $state/cert-reconcile.done &&
+        (-e /etc/systemd/system/vpn-cert-reconcile.service ||
+         -L /etc/systemd/system/vpn-cert-reconcile.service ||
+         -e /etc/systemd/system/vpn-cert-reconcile.timer ||
+         -L /etc/systemd/system/vpn-cert-reconcile.timer) ]]; then
+    phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --check-only
+  else
+    phase cert-reconcile bash "$runtime/base/install-cert-reconcile.sh" --apply
+  fi
 fi
-installer_error_context warp "$state/warp.log"
-phase warp bash "$runtime/warp-egress/scripts/install-warp.sh"
-installer_error_context dual "$state/dual.log"
-phase dual env CONFIRM_STANDALONE_DUAL_EGRESS="ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" bash "$runtime/scripts/enable-dual-egress.sh" --apply
-installer_error_context xhttp "$state/xhttp.log"
-if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]]; then
-  # A process may have exited after committing the transaction, before the
-  # outer phase marker was written. Accept only a fully verified committed state.
-  phase xhttp python3 "$runtime/scripts/finalize-xhttp.py" --verify
+if [[ $TARGET_EGRESS_MODE == direct ]]; then
+  installer_error_context xhttp "$state/xhttp.log"
+  if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]]; then
+    # Recover a committed transaction whose outer phase checkpoint was not
+    # written. The direct marker and real payload must both verify.
+    if [[ -f $state/portfolio-publish.done ]]; then
+      phase xhttp python3 "$runtime/scripts/finalize-direct-xhttp.py" --verify-selected
+    else
+      phase xhttp python3 "$runtime/scripts/finalize-direct-xhttp.py" --verify
+    fi
+  else
+    phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-DIRECT-XHTTP python3 "$runtime/scripts/finalize-direct-xhttp.py" --apply
+  fi
 else
-  phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
+  installer_error_context warp "$state/warp.log"
+  phase warp bash "$runtime/warp-egress/scripts/install-warp.sh"
+  installer_error_context dual "$state/dual.log"
+  phase dual env CONFIRM_STANDALONE_DUAL_EGRESS="ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" bash "$runtime/scripts/enable-dual-egress.sh" --apply
+  installer_error_context xhttp "$state/xhttp.log"
+  if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]]; then
+    # A process may have exited after committing the transaction, before the
+    # outer phase marker was written. Accept only a fully verified committed state.
+    phase xhttp python3 "$runtime/scripts/finalize-xhttp.py" --verify
+  else
+    phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
+  fi
 fi
 if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
   # The established six/four profile gate runs before the selected portfolio
   # changes subscription rows. It cannot be used after filtering or expansion.
   installer_error_context baseline-verify "$state/baseline-verify.log"
-  phase baseline-verify bash "$runtime/tests/postboot-verify.sh" --live
+  if [[ $TARGET_EGRESS_MODE == direct ]]; then
+    phase baseline-verify python3 "$runtime/scripts/finalize-direct-xhttp.py" --verify
+  else
+    phase baseline-verify bash "$runtime/tests/postboot-verify.sh" --live
+  fi
   if [[ $TARGET_PROFILE_SET != basic ]]; then
     installer_error_context portfolio-runtime "$state/portfolio-runtime.log"
     phase portfolio-runtime python3 -I -B "$runtime/portfolio/install.py" --apply

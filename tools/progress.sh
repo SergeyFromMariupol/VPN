@@ -24,7 +24,13 @@ _installer_progress_label() {
 
 _installer_progress_phases() {
   local -a phases
-  if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then
+  if [[ ${TARGET_EGRESS_MODE:-both} == direct ]]; then
+    if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then
+      phases=(base direct panel nginx-restart xhttp)
+    else
+      phases=(base certbot tls direct panel nginx-restart cert-reconcile xhttp)
+    fi
+  elif [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then
     phases=(base direct panel nginx-restart warp dual xhttp)
   else
     phases=(base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp)

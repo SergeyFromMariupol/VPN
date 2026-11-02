@@ -20,25 +20,28 @@ PUBLISH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PUBLISH)
 
 
-def fixture(certless=False):
+def fixture(certless=False, egress='both'):
     protocols = ('REALITY', 'XHTTP') if certless else ('REALITY', 'HYSTERIA2', 'XHTTP')
     target = {'TARGET_TLS_MODE': 'none' if certless else 'letsencrypt',
-              'TARGET_EGRESS_MODE': 'both', 'TARGET_PROFILE_SET': 'basic',
+              'TARGET_EGRESS_MODE': egress, 'TARGET_PROFILE_SET': 'basic',
               'TARGET_LABEL': 'Personal VPN'}
-    emails = ([f'germany-warp-{item.lower()}' for item in protocols] +
+    emails = ([f'germany-{item.lower()}' for item in protocols] if egress == 'direct' else
+              [f'germany-warp-{item.lower()}' for item in protocols] +
               [f'germany-{item.lower()}' for item in protocols])
     clients = [{'id': index + 1, 'email': email} for index, email in enumerate(emails)]
     joins = [{'client_id': index + 1, 'inbound_id': index % len(protocols) + 1,
               'flow_override': '', 'created_at': 1000 + index}
              for index in range(len(emails))]
+    external_profiles = ([('🖥️ IP сервера', 'XHTTP')] if egress == 'direct' else
+                         [('☁️ Cloudflare', 'XHTTP')] +
+                         [('🖥️ IP сервера', protocol) for protocol in protocols])
     external = [{'id': index + 1, 'client_id': 1, 'kind': 'link',
                  'value': f'vless://fixture@vpn.example.com:{8443 + index}#{index}',
-                 'remark': target['TARGET_LABEL'] + ' · ' + egress + ' · ' + protocol,
+                 'remark': target['TARGET_LABEL'] + ' · ' + row_egress + ' · ' + protocol,
                  'enable': 1, 'expiry_time': 0, 'name_prefix': '',
-                 'sort_index': index - 1, 'created_at': index + 1000}
-                for index, (egress, protocol) in enumerate(
-                    [('☁️ Cloudflare', 'XHTTP')] +
-                    [('🖥️ IP сервера', protocol) for protocol in protocols])]
+                 'sort_index': index if egress == 'direct' else index - 1,
+                 'created_at': index + 1000}
+                for index, (row_egress, protocol) in enumerate(external_profiles)]
     names = PUBLISH.baseline_names(target)
     initial = [f'vless://fixture@vpn.example.com:{443 + index}#{name}'
                for index, name in enumerate(names)]
@@ -163,8 +166,7 @@ class PortfolioPublication(unittest.TestCase):
         for certless in (False, True):
             for egress in ('warp', 'direct', 'both'):
                 with self.subTest(certless=certless, egress=egress):
-                    target, data, initial = fixture(certless)
-                    target['TARGET_EGRESS_MODE'] = egress
+                    target, data, initial = fixture(certless, egress)
                     result = PUBLISH.plan(data, target, [], initial)
                     count = 2 if certless else 3
                     expected = count * (2 if egress == 'both' else 1)
@@ -172,21 +174,20 @@ class PortfolioPublication(unittest.TestCase):
                     self.assertEqual(len(result['names']), expected)
                     self.assertEqual(len(result['after']['joins']), count if egress != 'both' else count * 2)
                     self.assertEqual(len(result['after']['external']),
-                                     count + 1 if egress == 'both' else
-                                     1 if egress == 'warp' else count)
-                    self.assertEqual(len(result['delete_joins']), count if egress != 'both' else 0)
+                                     count + 1 if egress == 'both' else 1)
+                    self.assertEqual(len(result['delete_joins']), count if egress == 'warp' else 0)
+                    self.assertEqual(len(result['delete_external']), count if egress == 'warp' else 0)
                     self.assertIn(1, [row['id'] for row in data['clients']])
 
     def test_append_order_and_cas_restore(self):
-        target, data, initial = fixture()
-        target['TARGET_EGRESS_MODE'] = 'direct'
+        target, data, initial = fixture(egress='direct')
         extras = [{'id': 'trial-one', 'remark': 'Personal VPN · IP · Variant One',
                    'uri': 'vless://fixture@vpn.example.com:30000#VariantOne'},
                   {'id': 'trial-two', 'remark': 'Personal VPN · IP · Variant Two',
                    'uri': 'vless://fixture@vpn.example.com:30001#VariantTwo'}]
         plan = PUBLISH.plan(data, target, extras, initial)
         self.assertEqual([row['sort_index'] for row in plan['insert_external']], [3, 4])
-        self.assertEqual(len(plan['after']['external']), 5)
+        self.assertEqual(len(plan['after']['external']), 3)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'x-ui.db'
             create_db(path, data)
@@ -217,6 +218,27 @@ class PortfolioPublication(unittest.TestCase):
             self.assertEqual(restored.returncode, 0, restored.stderr.decode())
             self.assertEqual(json.loads(worker(path, 'read').stdout)['external'], data['external'])
             self.assertEqual(json.loads(worker(path, 'read').stdout)['joins'], data['joins'])
+
+    def test_direct_only_expanded_counts_keep_one_subscription_owner(self):
+        for profile_set, expected in (('dpi', 49), ('all', 73)):
+            with self.subTest(profile_set=profile_set):
+                target, data, initial = fixture(egress='direct')
+                target['TARGET_PROFILE_SET'] = profile_set
+                extras = [
+                    {'id': row['id'], 'remark': row['name'],
+                     'uri': ('vless://fixture@vpn.example.com:' +
+                             str(30000 + row['port_offset']) + '#' +
+                             quote(row['name'], safe=''))}
+                    for row in PUBLISH.selected_recipe(target)]
+                intended = PUBLISH.plan(data, target, extras, initial)
+                self.assertEqual(len(intended['names']), expected)
+                self.assertEqual(intended['names'][:len(initial)],
+                                 PUBLISH.baseline_names(target))
+                self.assertFalse(intended['delete_joins'])
+                self.assertFalse(intended['delete_external'])
+                self.assertEqual(len(intended['after']['external']), 1 + len(extras))
+                self.assertEqual({row['client_id'] for row in intended['after']['external']},
+                                 {data['clients'][0]['id']})
 
 
 if __name__ == '__main__':

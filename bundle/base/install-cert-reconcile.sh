@@ -16,6 +16,7 @@ readonly marker="$root/tls-deployed.sha256"
 readonly lineage="/etc/letsencrypt/live/$TARGET_FQDN"
 readonly service_source="$source_root/../templates/vpn-cert-reconcile.service"
 readonly timer_source="$source_root/../templates/vpn-cert-reconcile.timer"
+readonly reconcile_source="$source_root/reconcile-tls.sh"
 unit_is_quiescent() {
   local unit=$1 state
   state=$(systemctl show "$unit" -p LoadState -p ActiveState -p MainPID) || return 1
@@ -30,7 +31,10 @@ unit_is_quiescent() {
   esac
 }
 for name in bash basename cmp dirname flock install mktemp mv openssl rmdir sha256sum stat systemctl tar; do command -v "$name" >/dev/null; done
-for path in "$service_source" "$timer_source"; do [[ -f $path && ! -L $path ]] || exit 1; done
+for path in "$service_source" "$timer_source" "$reconcile_source"; do
+  [[ -f $path && ! -L $path && $(stat -c %u "$path") == 0 ]] || exit 1
+done
+bash -n "$reconcile_source"
 [[ -f $hook && ! -L $hook && $(stat -c '%u:%g:%a:%h' "$hook") == 0:0:750:1 ]] || exit 1
 [[ -d $root && ! -L $root && -L $root/tls ]] || exit 1
 systemctl is-active --quiet x-ui.service

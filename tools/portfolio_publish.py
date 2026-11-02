@@ -351,18 +351,23 @@ def uri_signature(uri):
 def baseline_names(target):
     protocols = ('REALITY', 'HYSTERIA2', 'XHTTP') if target['TARGET_TLS_MODE'] == 'letsencrypt' else ('REALITY', 'XHTTP')
     label = target['TARGET_LABEL']
-    return ([label + ' · ☁️ Cloudflare · ' + protocol for protocol in protocols] +
-            [label + ' · 🖥️ IP сервера · ' + protocol for protocol in protocols])
+    direct = [label + ' · 🖥️ IP сервера · ' + protocol for protocol in protocols]
+    if target['TARGET_EGRESS_MODE'] == 'direct':
+        return direct
+    return [label + ' · ☁️ Cloudflare · ' + protocol for protocol in protocols] + direct
 
 
 def baseline_db(data, target):
     protocols = ('reality', 'hysteria2', 'xhttp') if target['TARGET_TLS_MODE'] == 'letsencrypt' else ('reality', 'xhttp')
-    emails = ([f'germany-warp-{item}' for item in protocols] +
+    direct_only = target['TARGET_EGRESS_MODE'] == 'direct'
+    emails = ([f'germany-{item}' for item in protocols] if direct_only else
+              [f'germany-warp-{item}' for item in protocols] +
               [f'germany-{item}' for item in protocols])
     clients = data['clients']
     need(len(clients) == len(emails) and len({row['email'] for row in clients}) == len(emails) and
          {row['email'] for row in clients} == set(emails), 'BASE_CLIENTS')
-    owners = [row['id'] for row in clients if row['email'] == OWNER_EMAIL]
+    owner_email = 'germany-reality' if direct_only else OWNER_EMAIL
+    owners = [row['id'] for row in clients if row['email'] == owner_email]
     need(len(owners) == 1, 'BASE_OWNER')
     owner = owners[0]
     by_id = {row['id']: row['email'] for row in clients}
@@ -370,9 +375,12 @@ def baseline_db(data, target):
     need(len(joins) == len(emails) and all('client_id' in row and 'inbound_id' in row and
          row['client_id'] in by_id for row in joins) and
          {by_id[row['client_id']] for row in joins} == set(emails), 'BASE_JOINS')
-    expected_external = [( -1, target['TARGET_LABEL'] + ' · ☁️ Cloudflare · XHTTP')]
-    expected_external.extend((index, target['TARGET_LABEL'] + ' · 🖥️ IP сервера · ' + protocol)
-                             for index, protocol in enumerate(protocol.upper() for protocol in protocols))
+    if direct_only:
+        expected_external = [(0, target['TARGET_LABEL'] + ' · 🖥️ IP сервера · XHTTP')]
+    else:
+        expected_external = [(-1, target['TARGET_LABEL'] + ' · ☁️ Cloudflare · XHTTP')]
+        expected_external.extend((index, target['TARGET_LABEL'] + ' · 🖥️ IP сервера · ' + protocol)
+                                 for index, protocol in enumerate(protocol.upper() for protocol in protocols))
     external = data['external']
     need(len(external) == len(expected_external), 'BASE_EXTERNAL_COUNT')
     for row, (sort_index, remark) in zip(external, expected_external):
@@ -439,10 +447,9 @@ def plan(data, target, extras, initial):
     names = baseline_names(target)
     need(len(initial) == len(names) and [uri_name(uri) for uri in initial] == names,
          'BASE_PUBLIC_ORDER')
-    count = len(names) // 2
     mode = target['TARGET_EGRESS_MODE']
-    baseline = (initial if mode == 'both' else
-                initial[:count] if mode == 'warp' else initial[count:])
+    count = len(names) // 2
+    baseline = initial[:count] if mode == 'warp' else initial
     selected_names = [uri_name(uri) for uri in baseline] + [entry['remark'] for entry in extras]
     selected_uris = baseline + [entry['uri'] for entry in extras]
     need(len(selected_uris) == len(set(selected_uris)) and
@@ -453,9 +460,7 @@ def plan(data, target, extras, initial):
         if (mode == 'direct' and by_id[row['client_id']].startswith('germany-warp-')) or
            (mode == 'warp' and not by_id[row['client_id']].startswith('germany-warp-'))]
     delete_external = ([row['id'] for row in data['external'] if row['sort_index'] >= 0]
-                       if mode == 'warp' else
-                       [row['id'] for row in data['external'] if row['sort_index'] == -1]
-                       if mode == 'direct' else [])
+                       if mode == 'warp' else [])
     max_id = max(row['id'] for row in data['external'])
     now = int(time.time() * 1000)
     insert_external = [
@@ -544,11 +549,12 @@ def verify_public(state, target, url):
 
 
 def restore_prepared(state, target):
+    baseline_mode = 'direct' if target['TARGET_EGRESS_MODE'] == 'direct' else 'both'
     current = db_read()
     present = {'joins': current['joins'], 'external': current['external']}
     if present == state['before']:
         restart_xui(target)
-        wait_native_runtime(target, mode='both')
+        wait_native_runtime(target, mode=baseline_mode)
         state_write({**state, 'status': 'rolled_back'})
         return
     need(present == state['after'], 'RECOVERY_FOREIGN_DRIFT')
@@ -562,7 +568,7 @@ def restore_prepared(state, target):
                'restore_joins': restore_joins, 'restore_external': restore_external}
     need(db_worker('restore', payload) == b'OK', 'ROLLBACK_WORKER')
     restart_xui(target)
-    wait_native_runtime(target, mode='both')
+    wait_native_runtime(target, mode=baseline_mode)
     current = db_read()
     need({'joins': current['joins'], 'external': current['external']} == state['before'],
          'ROLLBACK_READBACK')

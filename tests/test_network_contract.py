@@ -72,6 +72,32 @@ class CertificateModeContract(unittest.TestCase):
 
 
 class PortfolioPortContract(unittest.TestCase):
+    def test_promoted_direct_only_has_no_public_8443_or_warp_rule(self):
+        for tls_mode in ('letsencrypt', 'none'):
+            with self.subTest(tls_mode=tls_mode):
+                direct_sockets = sockets().replace(socket('tcp', f'{IP}:8443'), '')
+                direct_rules = '\n'.join(line for line in firewall().splitlines()
+                                         if not line.startswith('8443/tcp'))
+                if tls_mode == 'none':
+                    direct_sockets = direct_sockets.replace(socket('udp', f'{IP}:443'), '')
+                    direct_rules = '\n'.join(line for line in direct_rules.splitlines()
+                                             if not line.startswith(('80/tcp', '443/udp')))
+                network.validate_listeners(network.parse_ss(direct_sockets), IP, INTERFACE,
+                                           SSH, True, tls_mode=tls_mode, egress_mode='direct')
+                network.validate_ufw(direct_rules, IP, INTERFACE, SSH, True, DEFAULTS,
+                                     tls_mode=tls_mode, egress_mode='direct')
+                for changed in (direct_sockets + socket('tcp', f'{IP}:8443'),
+                                direct_sockets.replace(socket('tcp', f'{IP}:8444'), '')):
+                    with self.assertRaises(ValueError):
+                        network.validate_listeners(network.parse_ss(changed), IP,
+                                                   INTERFACE, SSH, True, tls_mode=tls_mode,
+                                                   egress_mode='direct')
+                with self.assertRaises(ValueError):
+                    network.validate_ufw(direct_rules + '\n' +
+                                         '8443/tcp ALLOW IN Anywhere # stale\n', IP,
+                                         INTERFACE, SSH, True, DEFAULTS,
+                                         tls_mode=tls_mode, egress_mode='direct')
+
     def test_selected_extra_ports_are_exact_and_publicly_scoped(self):
         extra = {'30000': 'tcp', '30001': 'udp'}
         listeners = sockets() + socket('tcp', f'{IP}:30000') + socket('udp', f'{IP}:30001')

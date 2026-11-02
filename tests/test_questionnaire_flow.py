@@ -150,6 +150,8 @@ apt-get upgrade -y --no-remove
         executable(source / 'bundle' / relative, body)
     executable(source / 'bundle/scripts/finalize-xhttp.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
+    executable(source / 'bundle/scripts/finalize-direct-xhttp.py',
+               'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
     executable(source / 'bundle/portfolio/install.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:portfolio-runtime\\n")\n')
     executable(source / 'tools/portfolio_publish.py',
@@ -349,9 +351,9 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('[Установка]', plain)
         wizard = plain.split('[Установка]', 1)[0]
         labels = [line.strip() for line in wizard.splitlines()]
-        self.assertIn('1. Только Cloudflare WARP', labels)
-        self.assertIn('2. Только IP сервера', labels)
-        self.assertIn('3. Оба варианта', labels)
+        self.assertIn('1. Использовать CloudFlare WARP', labels)
+        self.assertIn('2. Не использовать CloudFlare WARP', labels)
+        self.assertIn('3. Оба варианта профилей', labels)
         self.assertIn('1. По IP-адресу', labels)
         self.assertIn('2. По доменному имени', labels)
         self.assertIn('1. По умолчанию max.ru', labels)
