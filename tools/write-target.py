@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import shlex
 import sys
-import unicodedata
 
 KEYS = ('TARGET_ADDRESS_MODE', 'TARGET_TLS_MODE', 'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET',
         'TARGET_IPV4', 'TARGET_FQDN', 'TARGET_INTERFACE', 'TARGET_SSH_PORT',
@@ -22,9 +21,7 @@ def write_target(destination: Path, env: dict) -> None:
     if env['TARGET_TLS_MODE'] == 'none' and env['TARGET_PROFILE_SET'] != 'basic':
         raise ValueError('Expanded profile sets require Let\'s Encrypt')
     label = env['TARGET_LABEL']
-    if (not isinstance(label, str) or not 1 <= len(label) <= 80 or
-            not label.strip() or
-            any(unicodedata.category(char) in {'Cc', 'Zl', 'Zp'} for char in label)):
+    if not isinstance(label, str) or not label.strip():
         raise ValueError('Invalid profile name')
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
