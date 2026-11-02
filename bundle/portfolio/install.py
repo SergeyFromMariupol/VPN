@@ -41,6 +41,7 @@ STATE = ROOT / "state.json"
 UNIT_NAME = "germanyvpn-portfolio.service"
 UNIT = Path("/etc/systemd/system") / UNIT_NAME
 HOOK = Path("/etc/letsencrypt/renewal-hooks/deploy/80-germanyvpn-portfolio")
+TLS_MARKER = ROOT / "tls-deployed.sha256"
 ACCOUNT = "vpnportfolio"
 XRAY = Path("/usr/local/lib/germanyvpn-xhttp-test/xray")
 ASSETS = XRAY.parent
@@ -222,11 +223,42 @@ def hook_bytes(info):
          "PORTFOLIO_RENEWAL_LINEAGE")
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
-[[ ${{RENEWED_LINEAGE:-}} == {lineage} ]] || exit 0
-systemctl is-active --quiet {UNIT_NAME} || exit 0
+umask 077
+lineage={lineage}
+root={ROOT}
+marker={TLS_MARKER}
+[[ ${{RENEWED_LINEAGE:-}} == "$lineage" ]] || exit 0
+[[ -d $root && ! -L $root && $(stat -c '%u:%g:%a' "$root") == 0:0:700 ]] || exit 1
+lock=/run/vpn-portfolio-tls.lock
+if [[ -e $lock || -L $lock ]]; then
+  [[ -f $lock && ! -L $lock && $(stat -c '%u:%g:%a:%h' "$lock") == 0:0:600:1 ]] || exit 1
+fi
+exec 9>"$lock"
+flock -w 120 9
+cmp -s "$lineage/fullchain.pem" {TLS_CERT}
+cmp -s "$lineage/privkey.pem" {TLS_KEY}
+expected=$(sha256sum "$lineage/fullchain.pem"); expected=${{expected%% *}}
+[[ $expected =~ ^[a-f0-9]{{64}}$ ]] || exit 1
+if [[ -e $marker || -L $marker ]]; then
+  [[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a:%h' "$marker") == 0:0:600:1 ]] || exit 1
+  if [[ $(cat "$marker") == "$expected" ]] && systemctl is-active --quiet {UNIT_NAME}; then
+    exit 0
+  fi
+fi
 {XRAY} run -test -config {CONF}
 systemctl restart {UNIT_NAME}
 systemctl is-active --quiet {UNIT_NAME}
+cmp -s "$lineage/fullchain.pem" {TLS_CERT}
+cmp -s "$lineage/privkey.pem" {TLS_KEY}
+current=$(sha256sum "$lineage/fullchain.pem"); current=${{current%% *}}
+[[ $current == "$expected" ]] || exit 1
+stage=$(mktemp "$root/.tls-deployed.XXXXXXXX")
+trap 'rm -f -- "$stage"' EXIT
+printf '%s\\n' "$expected" >"$stage"
+chmod 0600 "$stage"
+mv -Tf -- "$stage" "$marker"
+[[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a:%h' "$marker") == 0:0:600:1 &&
+   $(cat "$marker") == "$expected" ]]
 """.encode("utf-8")
 
 
@@ -281,7 +313,10 @@ def read_state():
          isinstance(state.get("uid"), int) and
          isinstance(state.get("profile_count"), int) and
          isinstance(state.get("ports"), dict) and
-         isinstance(state.get("backup"), str), "PORTFOLIO_STATE")
+         isinstance(state.get("backup"), str) and
+         isinstance(state.get("tls_initial_sha256"), str) and
+         re.fullmatch(r"[a-f0-9]{64}", state["tls_initial_sha256"]),
+         "PORTFOLIO_STATE")
     return state
 
 
@@ -412,6 +447,12 @@ def verify(info, state, *, allow_pending=False):
          sha(HOOK.read_bytes()) == state["hook_sha256"] and
          sha(XRAY.read_bytes()) == XRAY_SHA256,
          "PORTFOLIO_FILE_DRIFT")
+    expected_tls_hash = sha(TLS_CERT.read_bytes())
+    need(TLS_CERT.read_bytes() ==
+         (Path("/etc/letsencrypt/live") / info["TARGET_FQDN"] /
+          "fullchain.pem").read_bytes() and
+         private(TLS_MARKER) == (expected_tls_hash + "\n").encode(),
+         "PORTFOLIO_TLS_DEPLOYMENT")
     manifest = json.loads(private(LINKS))
     expected_rows = rows_for(info)
     expected_ports = {entry["id"]: PORT_BASE + entry["port_offset"]
@@ -444,8 +485,11 @@ def verify(info, state, *, allow_pending=False):
                  unquote(parsed.fragment) == recipe["name"],
                  "PORTFOLIO_SHARE_URI")
     config = json.loads(private(CONF))
+    selected_outbounds = ({"DIRECT", "BLOCK"} if info["TARGET_EGRESS_MODE"] == "direct"
+                          else {"DIRECT", "BLOCK", "WARP_CF"})
     need({inbound["port"] for inbound in config["inbounds"]} ==
          {int(port) for port in state["ports"]} and
+         {outbound["tag"] for outbound in config["outbounds"]} == selected_outbounds and
          [rule["outboundTag"] for rule in config["routing"]["rules"][4:-1]] ==
          [link["egress"] for link in manifest["entries"]] and
          config["routing"]["rules"][-1]["outboundTag"] == "BLOCK",
@@ -514,6 +558,11 @@ def rollback(info, state):
             need(not path.is_symlink() and sha(path.read_bytes()) == digest,
                  "PORTFOLIO_ROLLBACK_CAS")
             path.unlink()
+    if TLS_MARKER.exists() or TLS_MARKER.is_symlink():
+        marker = private(TLS_MARKER)
+        need(marker == (state["tls_initial_sha256"] + "\n").encode(),
+             "PORTFOLIO_ROLLBACK_TLS_MARKER")
+        TLS_MARKER.unlink()
     command(["systemctl", "daemon-reload"])
     if ACCOUNT in [entry.pw_name for entry in pwd.getpwall()]:
         need(pwd.getpwnam(ACCOUNT).pw_uid == state["uid"],
@@ -549,6 +598,7 @@ def apply(info):
          "PORTFOLIO_BASELINE_NOT_COMMITTED")
     need(sha(XRAY.read_bytes()) == XRAY_SHA256 and
          TLS_CERT.is_file() and TLS_KEY.is_file(), "PORTFOLIO_PINNED_BASE")
+    tls_initial_sha256 = sha(TLS_CERT.read_bytes())
     rows = rows_for(info)
     main = json.loads(MAIN.read_bytes())
     config, manifest, networks = build(info, main, rows,
@@ -581,6 +631,7 @@ def apply(info):
              "backup": str(backup), "uid": uid,
              "config_sha256": sha(config_raw), "links_sha256": sha(links_raw),
              "unit_sha256": sha(unit_raw), "hook_sha256": sha(hook_raw),
+             "tls_initial_sha256": tls_initial_sha256,
              "ufw_before": before_ufw, "routes_before": before_routes}
     try:
         ROOT.mkdir(mode=0o700)
@@ -598,6 +649,8 @@ def apply(info):
         command(["systemd-analyze", "verify", str(UNIT)])
         command(["systemctl", "daemon-reload"])
         command(["systemctl", "enable", "--now", UNIT_NAME], timeout=90)
+        command(["env", "RENEWED_LINEAGE=/etc/letsencrypt/live/" +
+                 info["TARGET_FQDN"], "/bin/bash", str(HOOK)], timeout=180)
         for rule in rules_for(info, ports):
             command(["ufw", *rule], timeout=30)
         verify(info, state, allow_pending=True)

@@ -36,8 +36,13 @@ def build(target: dict, main: dict, rows: list[dict], shared_factory,
                  isinstance(entry["port_offset"], int) and
                  0 <= entry["port_offset"] <= MAX_PORT_OFFSET
                  for entry in extras), "PORTFOLIO_RECIPE_SHAPE")
+    selected_egress = {entry["egress"] for entry in extras}
+    uses_warp = "warp" in selected_egress
     expected = {item["tag"]: item for item in main["outbounds"]}
-    _require({"DIRECT", "BLOCK", "WARP_CF"} <= set(expected),
+    required_outbounds = {"DIRECT", "BLOCK"}
+    if uses_warp:
+        required_outbounds.add("WARP_CF")
+    _require(required_outbounds <= set(expected),
              "PORTFOLIO_BASE_OUTBOUNDS")
     direct = copy.deepcopy(expected["DIRECT"])
     direct_rules = direct.get("settings", {}).get("finalRules", [])
@@ -48,16 +53,18 @@ def build(target: dict, main: dict, rows: list[dict], shared_factory,
              direct_rules[1] == {"action": "allow"} and
              expected["BLOCK"].get("protocol") == "blackhole",
              "PORTFOLIO_DIRECT_GUARD")
-    _require(expected["WARP_CF"].get("protocol") == "vless" and
-             expected["WARP_CF"].get("settings", {}).get("vnext", [{}])[0].get("address") == "127.0.0.1" and
-             expected["WARP_CF"]["settings"]["vnext"][0].get("port") == 24443,
-             "PORTFOLIO_WARP_CONNECTOR")
+    if uses_warp:
+        _require(expected["WARP_CF"].get("protocol") == "vless" and
+                 expected["WARP_CF"].get("settings", {}).get("vnext", [{}])[0].get("address") == "127.0.0.1" and
+                 expected["WARP_CF"]["settings"]["vnext"][0].get("port") == 24443,
+                 "PORTFOLIO_WARP_CONNECTOR")
     address = target["TARGET_IPV4"]
     blocked = direct["settings"]["finalRules"][0].setdefault("ip", [])
     if address + "/32" not in blocked:
         blocked.append(address + "/32")
-    outbounds = [direct, copy.deepcopy(expected["BLOCK"]),
-                 copy.deepcopy(expected["WARP_CF"])]
+    outbounds = [direct, copy.deepcopy(expected["BLOCK"])]
+    if uses_warp:
+        outbounds.append(copy.deepcopy(expected["WARP_CF"]))
     groups: dict[int, list[dict]] = {}
     for entry in extras:
         groups.setdefault(entry["port_offset"], []).append(entry)

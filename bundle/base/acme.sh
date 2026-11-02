@@ -24,11 +24,43 @@ unit_is_quiescent() {
 source "$source_root/../scripts/target-contract.sh"
 source "$source_root/acme-identifiers.sh"
 mode=check
-case ${1:---check-only} in --check-only) ;; --apply) mode=apply;; *) exit 2;; esac
+case ${1:---check-only} in
+  --check-only) ;;
+  --apply) mode=apply ;;
+  --verify-committed) mode=verify-committed ;;
+  *) exit 2 ;;
+esac
 [[ $EUID == 0 ]] || exit 1
-for name in certbot dig ip sqlite3 systemctl openssl tar ss flock; do command -v "$name" >/dev/null; done
+for name in certbot cmp dig ip sqlite3 systemctl openssl tar ss flock sha256sum sync; do command -v "$name" >/dev/null; done
 "$source_root/install-certbot.sh" --check-only
 [[ $(command -v certbot) == /usr/local/bin/certbot ]] || { printf 'ERROR: unexpected Certbot command\n' >&2; exit 1; }
+readonly commit_marker=/etc/letsencrypt/.vpn-acme-bootstrap-commit
+readonly lineage="/etc/letsencrypt/live/$TARGET_FQDN"
+acme_commit_payload() {
+  local fullchain_hash cert_hash key_hash
+  fullchain_hash=$(sha256sum "$lineage/fullchain.pem"); fullchain_hash=${fullchain_hash%% *}
+  cert_hash=$(sha256sum "$lineage/cert.pem"); cert_hash=${cert_hash%% *}
+  key_hash=$(sha256sum "$lineage/privkey.pem"); key_hash=${key_hash%% *}
+  [[ $fullchain_hash =~ ^[a-f0-9]{64}$ && $cert_hash =~ ^[a-f0-9]{64}$ &&
+     $key_hash =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf 'VPN_ACME_BOOTSTRAP_V1\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$TARGET_IPV4" "$TARGET_FQDN" "$TARGET_ADDRESS_MODE" \
+    "$fullchain_hash" "$cert_hash" "$key_hash"
+}
+if [[ $mode == verify-committed ]]; then
+  [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]] || acme_fail ACME_COMMIT_MODE
+  [[ -f $commit_marker && ! -L $commit_marker &&
+     $(stat -c '%u:%g:%a:%h' "$commit_marker") == 0:0:600:1 ]] || acme_fail ACME_COMMIT_MARKER
+  [[ -d $lineage && ! -L $lineage ]] || acme_fail ACME_COMMIT_LINEAGE
+  acme_verify_issued_certificate "$lineage" || acme_fail ACME_COMMIT_CERT
+  verify_target_certificate "$lineage/fullchain.pem" || acme_fail ACME_COMMIT_CERT
+  cmp -s "$commit_marker" <(acme_commit_payload) || acme_fail ACME_COMMIT_MISMATCH
+  systemctl is-enabled --quiet certbot.timer || acme_fail ACME_COMMIT_TIMER
+  systemctl is-active --quiet certbot.timer || acme_fail ACME_COMMIT_TIMER
+  unit_is_quiescent certbot.service || acme_fail ACME_COMMIT_RENEWAL_BUSY
+  printf 'ACME_COMMITTED_OK=1\n'
+  exit 0
+fi
 [[ -z $(ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -vF " $TARGET_IPV4/") ]] || acme_fail ACME_IP_ADDRESS
 ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -Fq " $TARGET_IPV4/" || acme_fail ACME_IP_ADDRESS
 systemctl is-enabled --quiet x-ui.service || acme_fail ACME_XUI_STATE
@@ -51,8 +83,8 @@ if [[ ${TARGET_ADDRESS_MODE:-domain} == domain ]]; then
 fi
 acme_contact_arguments || { printf 'ERROR: invalid optional ACME_EMAIL\n' >&2; acme_fail ACME_CONTACT; }
 [[ $mode == apply ]] || { printf 'ACME_PREFLIGHT_OK=1\n'; exit 0; }
-lineage="/etc/letsencrypt/live/$TARGET_FQDN"
 [[ ! -e $lineage && ! -L $lineage ]] || { printf 'ERROR: existing certificate requires reviewed renewal\n' >&2; acme_fail ACME_EXISTING_CERT; }
+[[ ! -e $commit_marker && ! -L $commit_marker ]] || acme_fail ACME_EXISTING_COMMIT
 ! ss -H -lnt | grep -Eq '(:|\])80[[:space:]]' || acme_fail ACME_PORT80
 readonly acme_lock_root=/run/vpn-acme-bootstrap
 if [[ ! -e $acme_lock_root && ! -L $acme_lock_root ]]; then mkdir -m 0700 "$acme_lock_root"; fi
@@ -70,6 +102,7 @@ install -d -o root -g root -m 0700 "$snapshot"
 systemctl show certbot.service certbot.timer >"$snapshot/unit-state.before"
 systemctl cat certbot.service certbot.timer >"$snapshot/units.before"
 committed=0
+commit_stage=''
 timer_stopped=0
 snapshot_ready=0
 cleanup() {
@@ -110,9 +143,25 @@ snapshot_ready=1
   --server https://acme-v02.api.letsencrypt.org/directory \
   --preferred-challenges http --http-01-address "$TARGET_IPV4" "${acme_identifiers[@]}"
 acme_verify_issued_certificate "$lineage" || acme_fail ACME_CERT_VERIFY
+verify_target_certificate "$lineage/fullchain.pem" || acme_fail ACME_CERT_VERIFY
 systemctl enable --now certbot.timer >/dev/null
 systemctl is-enabled --quiet certbot.timer || acme_fail ACME_TIMER
 systemctl is-active --quiet certbot.timer || acme_fail ACME_TIMER
+# Publish the owner-bound receipt only after Certbot and the renewal timer are
+# verified. It lets --resume accept this exact certificate after a crash in the
+# short interval before the outer phase checkpoint is written.
+commit_stage=$(mktemp /etc/letsencrypt/.vpn-acme-bootstrap-commit.XXXXXXXX)
+commit_stage_identity=$(stat -c '%d:%i' "$commit_stage")
+acme_commit_payload >"$commit_stage" || acme_fail ACME_COMMIT_PAYLOAD
+chmod 0600 "$commit_stage"
+sync -f "$commit_stage"
+mv -nT -- "$commit_stage" "$commit_marker" || acme_fail ACME_COMMIT_PUBLISH
+[[ -f $commit_marker && ! -L $commit_marker &&
+   $(stat -c '%u:%g:%a:%h' "$commit_marker") == 0:0:600:1 &&
+   $(stat -c '%d:%i' "$commit_marker") == "$commit_stage_identity" ]] || acme_fail ACME_COMMIT_MARKER
+commit_stage=''
+cmp -s "$commit_marker" <(acme_commit_payload) || acme_fail ACME_COMMIT_MISMATCH
+sync -f /etc/letsencrypt
 # The entrypoint already persisted the full validated target contract,
 # including label and ACME contact. Do not truncate it at this phase.
 touch "$snapshot/COMMITTED"

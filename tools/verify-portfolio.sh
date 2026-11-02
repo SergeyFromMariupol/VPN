@@ -7,14 +7,25 @@ readonly bundle=/var/lib/vpn-installer/bundle
 source "$bundle/scripts/target-contract.sh"
 [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]] || exit 1
 
-for unit in x-ui nginx krysyuk-warp-netns.service \
-  krysyuk-warp-netns-daemon.service krysyuk-warp-netns-configure.service \
-  krysyuk-warp-egress-guard.service krysyuk-xray-warp-egress.service \
-  krysyuk-warp-egress.socket krysyuk-warp-bridge.socket krysyuk-warp-health.timer \
-  germanyvpn-xhttp-test.service germanyvpn-xhttp-warp.service; do
+units=(x-ui nginx germanyvpn-xhttp-test.service)
+if [[ $TARGET_EGRESS_MODE != direct ]]; then
+  units+=(krysyuk-warp-netns.service krysyuk-warp-netns-daemon.service
+    krysyuk-warp-netns-configure.service krysyuk-warp-egress-guard.service
+    krysyuk-xray-warp-egress.service krysyuk-warp-egress.socket
+    krysyuk-warp-bridge.socket krysyuk-warp-health.timer
+    germanyvpn-xhttp-warp.service)
+fi
+for unit in "${units[@]}"; do
   systemctl is-active --quiet "$unit"
   systemctl is-enabled --quiet "$unit"
 done
+if [[ $TARGET_EGRESS_MODE == direct ]]; then
+  for unit in krysyuk-xray-warp-egress.service krysyuk-warp-netns.service \
+    germanyvpn-xhttp-warp.service; do
+    ! systemctl is-active --quiet "$unit"
+  done
+  ! ss -H -lnt | grep -Eq '127[.]0[.]0[.]1:24443[[:space:]]'
+fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   bash "$bundle/base/install-certbot.sh" --check-only
   bash "$bundle/base/install-cert-reconcile.sh" --check-only
@@ -35,7 +46,11 @@ printf '%s  %s\n' \
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin \
   /usr/local/x-ui/bin/xray-linux-amd64 run -test \
   -config /usr/local/x-ui/bin/config.json >/dev/null 2>&1
-for config in /etc/germanyvpn-xhttp-test/config.json /etc/germanyvpn-xhttp-warp/config.json; do
+configs=(/etc/germanyvpn-xhttp-test/config.json)
+if [[ $TARGET_EGRESS_MODE != direct ]]; then
+  configs+=(/etc/germanyvpn-xhttp-warp/config.json)
+fi
+for config in "${configs[@]}"; do
   XRAY_LOCATION_ASSET=/usr/local/lib/germanyvpn-xhttp-test \
     /usr/local/lib/germanyvpn-xhttp-test/xray run -test -config "$config" >/dev/null 2>&1
 done
@@ -46,12 +61,17 @@ if [[ $TARGET_ADDRESS_MODE == domain ]]; then
   done
 fi
 bash "$bundle/tests/panel-login-acceptance.sh" >/dev/null
-for warp_test in test-smoke.sh test-main-route-isolation.sh test-e2e-local.sh test-invalid.sh; do
-  bash "/opt/krysyuk-warp-egress/tests/$warp_test" >/dev/null
-done
+if [[ $TARGET_EGRESS_MODE == direct ]]; then
+  python3 -I -B "$bundle/scripts/finalize-direct-xhttp.py" --verify-selected
+else
+  for warp_test in test-smoke.sh test-main-route-isolation.sh test-e2e-local.sh test-invalid.sh; do
+    bash "/opt/krysyuk-warp-egress/tests/$warp_test" >/dev/null
+  done
+fi
 
 network_args=(--target-ip "$TARGET_IPV4" --interface "$TARGET_INTERFACE"
-  --ssh-port "$TARGET_SSH_PORT" --promoted 1 --tls-mode "$TARGET_TLS_MODE")
+  --ssh-port "$TARGET_SSH_PORT" --promoted 1 --tls-mode "$TARGET_TLS_MODE"
+  --egress-mode "$TARGET_EGRESS_MODE")
 if [[ $TARGET_PROFILE_SET != basic ]]; then
   systemctl is-active --quiet germanyvpn-portfolio.service
   systemctl is-enabled --quiet germanyvpn-portfolio.service

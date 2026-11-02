@@ -56,6 +56,9 @@ class PortfolioPlanTest(unittest.TestCase):
                 links = manifest["entries"]
                 self.assertEqual(len(links), expected)
                 self.assertEqual(len(config["inbounds"]), len(ports))
+                self.assertEqual({outbound["tag"] for outbound in config["outbounds"]},
+                                 {"DIRECT", "BLOCK"} if egress == "direct" else
+                                 {"DIRECT", "BLOCK", "WARP_CF"})
                 self.assertEqual(len(ports), expected if egress != "both" else expected // 2)
                 self.assertEqual({item["port"] for item in links}, set(ports))
                 self.assertEqual(len({item["remark"] for item in links}), expected)
@@ -77,6 +80,20 @@ class PortfolioPlanTest(unittest.TestCase):
                 serialized = json.dumps(config)
                 self.assertNotIn("Miranda", serialized)
                 self.assertNotIn("<", serialized)
+
+    def test_direct_only_does_not_require_a_warp_connector(self):
+        main_without_warp = dict(MAIN, outbounds=MAIN["outbounds"][:2])
+        for profile_set, expected in (("dpi", 46), ("all", 70)):
+            with self.subTest(profile_set=profile_set):
+                direct_rows = select_profiles(profile_set, "direct", "Sergey")
+                config, manifest, _ = build(TARGET, main_without_warp,
+                                            direct_rows, shared, profile)
+                self.assertEqual(len(manifest["entries"]), expected)
+                self.assertEqual([outbound["tag"] for outbound in config["outbounds"]],
+                                 ["DIRECT", "BLOCK"])
+                warp_rows = select_profiles(profile_set, "warp", "Sergey")
+                with self.assertRaisesRegex(ValueError, "PORTFOLIO_BASE_OUTBOUNDS"):
+                    build(TARGET, main_without_warp, warp_rows, shared, profile)
 
     def test_public_endpoint_does_not_replace_bind_address(self):
         rows = select_profiles("dpi", "warp", "Sergey")
@@ -105,8 +122,8 @@ class PortfolioPlanTest(unittest.TestCase):
                                       "pwd": types.ModuleType("pwd")}):
             spec.loader.exec_module(module)
         hook = module.hook_bytes(TARGET).decode()
-        self.assertIn("RENEWED_LINEAGE:-} == /etc/letsencrypt/live/vpn.example.test",
-                      hook)
+        self.assertIn("lineage=/etc/letsencrypt/live/vpn.example.test", hook)
+        self.assertIn('RENEWED_LINEAGE:-} == "$lineage"', hook)
         self.assertTrue(module.ufw_port_conflict(
             [["ufw", "allow", "30000:30010/tcp"]], {"30005": "tcp"}))
         self.assertTrue(module.ufw_port_conflict(

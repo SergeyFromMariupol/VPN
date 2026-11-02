@@ -349,9 +349,9 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('[Установка]', plain)
         wizard = plain.split('[Установка]', 1)[0]
         labels = [line.strip() for line in wizard.splitlines()]
-        self.assertIn('1. Только Cloudflare WARP', labels)
-        self.assertIn('2. Только IP сервера', labels)
-        self.assertIn('3. Оба варианта', labels)
+        self.assertIn('1. Использовать CloudFlare WARP', labels)
+        self.assertIn('2. Не использовать CloudFlare WARP', labels)
+        self.assertIn('3. Оба варианта профилей', labels)
         self.assertIn('1. По IP-адресу', labels)
         self.assertIn('2. По доменному имени', labels)
         self.assertIn('1. По умолчанию max.ru', labels)

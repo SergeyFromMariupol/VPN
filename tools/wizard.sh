@@ -101,10 +101,10 @@ collect_vpn_parameters() {
   fi
   TARGET_INTERFACE=$(ip -o -4 address show | awk -v addr="$TARGET_IPV4" '{split($4,a,"/"); if(a[1]==addr) print $2}')
 
-  wizard_section 'Выход' 'Через какой адрес сайты увидят VPN'
-  printf '  %b1. Только Cloudflare WARP%b\n' "$wizard_yellow" "$wizard_reset"
-  printf '  %b2. Только IP сервера%b\n' "$wizard_yellow" "$wizard_reset"
-  printf '  %b3. Оба варианта%b\n\n' "$wizard_yellow" "$wizard_reset"
+  wizard_section 'Выход' 'Использование CloudFlare WARP'
+  printf '  %b1. Использовать CloudFlare WARP%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b2. Не использовать CloudFlare WARP%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b3. Оба варианта профилей%b\n\n' "$wizard_yellow" "$wizard_reset"
   while true; do
     wizard_read egress_choice 'Выберите выход [3]: ' 3 || return 1
     case "$egress_choice" in
