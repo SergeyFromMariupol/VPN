@@ -119,7 +119,7 @@ SSH-порт берётся из текущего подключения; при
 Если в образе нет `curl`, используйте загрузку через стандартный Python 3:
 
 ```bash
-python3 -I -c 'import pathlib,urllib.request as u; o=u.build_opener(u.ProxyHandler({}),type("NoRedirect",(u.HTTPRedirectHandler,),{"redirect_request":lambda *a,**k:None})()); pathlib.Path("/root/vpn-install.sh").write_bytes(o.open("https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.2.11/install.sh",timeout=60).read(1048576))' && bash /root/vpn-install.sh
+python3 -I -c 'import pathlib,urllib.request as u; o=u.build_opener(u.ProxyHandler({}),type("NoRedirect",(u.HTTPRedirectHandler,),{"redirect_request":lambda *a,**k:None})()); pathlib.Path("/root/vpn-install.sh").write_bytes(o.open("https://raw.githubusercontent.com/SergeyFromMariupol/VPN/v1.2.12/install.sh",timeout=60).read(1048576))' && bash /root/vpn-install.sh
 ```
 
 После установки терминал покажет:
@@ -385,6 +385,11 @@ jq-фильтры и проверяют URI по независимо задан
 дополнительных профилей теперь обозначается постоянным кодом шага без вывода
 аргументов или закрытого вывода команды. Если откат тоже не удался, сообщение
 сохраняет код исходного сбоя и отдельно указывает код ошибки отката.
+
+В v1.2.12 исправлен порядок дополнительных профилей в подписке: ссылки и
+правила маршрутизации следуют выбранному набору, а Xray по-прежнему группирует
+клиентов по портам. Это устраняет остановку `PORTFOLIO_MANIFEST_SELECTION`
+при выборе 49, 73, 98 или 146 профилей.
 
 Скорость и работу у конкретного провайдера проверяют с устройства пользователя.
 Реальные импорты в мобильные приложения и устойчивость соединений не подтверждаются одним запуском
