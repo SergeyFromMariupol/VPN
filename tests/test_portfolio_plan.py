@@ -54,7 +54,10 @@ class PortfolioPlanTest(unittest.TestCase):
                 rows = select_profiles(profile_set, egress, "Sergey")
                 config, manifest, ports = build(TARGET, MAIN, rows, shared, profile)
                 links = manifest["entries"]
+                extras = [row for row in rows if not row["baseline_reuse"]]
                 self.assertEqual(len(links), expected)
+                self.assertEqual([item["id"] for item in links],
+                                 [row["id"] for row in extras])
                 self.assertEqual(len(config["inbounds"]), len(ports))
                 self.assertEqual({outbound["tag"] for outbound in config["outbounds"]},
                                  {"DIRECT", "BLOCK"} if egress == "direct" else
@@ -71,6 +74,9 @@ class PortfolioPlanTest(unittest.TestCase):
                                  "BLOCK")
                 user_rules = config["routing"]["rules"][4:-1]
                 self.assertEqual(len(user_rules), expected)
+                self.assertEqual([rule["user"] for rule in user_rules],
+                                 [["portfolio-" + row["egress"] + "-" + row["id"]]
+                                  for row in extras])
                 self.assertEqual([rule["outboundTag"] for rule in user_rules],
                                  [item["egress"] for item in links])
                 if egress == "warp":
@@ -111,6 +117,22 @@ class PortfolioPlanTest(unittest.TestCase):
         ip_config, _, _ = build(ip_target, MAIN, rows, shared, profile)
         self.assertEqual(ip_config["routing"]["rules"][3]["domain"],
                          ["full:" + TARGET["TARGET_IPV4"]])
+
+    def test_ip_warp_dpi49_manifest_matches_installer_selection(self):
+        ip_target = dict(TARGET, TARGET_FQDN=TARGET["TARGET_IPV4"],
+                         TARGET_ADDRESS_MODE="ip")
+        selected = select_profiles("dpi", "warp", "Sergey")
+        self.assertEqual(len(selected), 49)
+        config, manifest, ports = build(ip_target, MAIN, selected, shared, profile)
+        expected = [row for row in selected if not row["baseline_reuse"]]
+        self.assertEqual(len(expected), 46)
+        self.assertEqual(len(ports), 46)
+        self.assertEqual([entry["id"] for entry in manifest["entries"]],
+                         [row["id"] for row in expected])
+        self.assertEqual([entry["remark"] for entry in manifest["entries"]],
+                         [row["name"] for row in expected])
+        self.assertEqual([rule["outboundTag"] for rule in
+                          config["routing"]["rules"][4:-1]], ["WARP_CF"] * 46)
 
     def test_renewal_hook_and_firewall_conflict(self):
         # Linux-only account modules are inert at import time in this focused

@@ -115,6 +115,13 @@ def build(target: dict, main: dict, rows: list[dict], shared_factory,
                           "uri": uri, "port": port, "egress": role})
     _require(len(inbounds) == len(networks) and len(links) == len(extras) and
              len(routes) == len(extras), "PORTFOLIO_PLAN_COUNT")
+    # Inbounds stay grouped by port, while the subscription follows the catalog's
+    # selected tier order. Keep each user route paired with its share link.
+    selected_order = {entry["id"]: index for index, entry in enumerate(extras)}
+    ordered_pairs = sorted(zip(links, routes),
+                           key=lambda pair: selected_order[pair[0]["id"]])
+    links = [link for link, _ in ordered_pairs]
+    routes = [route for _, route in ordered_pairs]
     dns = copy.deepcopy(main["dns"])
     dns_tags = [server["tag"] for server in dns["servers"] if "tag" in server]
     _require(set(dns_tags) == {"dns_cf", "dns_q9"}, "PORTFOLIO_DNS")
