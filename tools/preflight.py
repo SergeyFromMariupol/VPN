@@ -161,6 +161,12 @@ def check_reality_target(sni: str) -> None:
 def validate_inputs(env: dict) -> None:
     if env.get('TARGET_TLS_MODE', 'letsencrypt') not in ('letsencrypt', 'none'):
         raise ValueError('Invalid certificate mode')
+    if env.get('TARGET_EGRESS_MODE', 'both') not in ('warp', 'direct', 'both'):
+        raise ValueError('Invalid egress mode')
+    if env.get('TARGET_PROFILE_SET', 'basic') not in ('basic', 'dpi', 'all'):
+        raise ValueError('Invalid profile set')
+    if env.get('TARGET_TLS_MODE', 'letsencrypt') == 'none' and env.get('TARGET_PROFILE_SET', 'basic') != 'basic':
+        raise ValueError('Expanded profile sets require Let\'s Encrypt')
     address = ipaddress.IPv4Address(env['TARGET_IPV4'])
     if not address.is_global:
         raise ValueError('A directly assigned public IPv4 is required (NAT VPS unsupported)')
@@ -191,7 +197,7 @@ def validate_inputs(env: dict) -> None:
     if env['ACME_EMAIL'] and not re.fullmatch(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', env['ACME_EMAIL']):
         raise ValueError('Invalid ACME email')
     label = env['TARGET_LABEL']
-    if not 1 <= len(label) <= 80 or any(unicodedata.category(c) == 'Cc' or c in '\u2028\u2029' for c in label):
+    if not 1 <= len(label) <= 80 or not label.strip() or any(unicodedata.category(c) == 'Cc' or c in '\u2028\u2029' for c in label):
         raise ValueError('Invalid profile prefix')
 
 

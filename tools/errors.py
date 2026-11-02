@@ -30,6 +30,9 @@ STAGES = {
     'warp': 'Cloudflare WARP',
     'dual': 'Профили VPN',
     'xhttp': 'Транспорт XHTTP',
+    'baseline-verify': 'Проверка основных профилей',
+    'portfolio-runtime': 'Дополнительные протоколы',
+    'portfolio-publish': 'Публикация подписки',
     'renewal': 'Проверка продления TLS',
     'verify': 'Итоговая проверка',
 }
@@ -398,6 +401,9 @@ def _check_command(stage, issue):
         'warp': 'krysyuk-warp-netns.service krysyuk-xray-warp-egress.service',
         'dual': 'x-ui.service krysyuk-xray-warp-egress.service',
         'xhttp': 'germanyvpn-xhttp-test.service germanyvpn-xhttp-warp.service',
+        'baseline-verify': 'x-ui.service germanyvpn-xhttp-test.service germanyvpn-xhttp-warp.service',
+        'portfolio-runtime': 'germanyvpn-portfolio.service krysyuk-xray-warp-egress.service',
+        'portfolio-publish': 'x-ui.service',
         'renewal': 'certbot.service certbot.timer',
         'verify': ('x-ui.service nginx.service krysyuk-warp-netns.service '
                    'krysyuk-xray-warp-egress.service krysyuk-warp-health.timer'),
