@@ -163,7 +163,10 @@ collect_vpn_parameters() {
   wizard_section 'Название' 'Начало названий профилей'
   wizard_personal_label || return 1
 
-  # Personal/friends defaults.
-  ACME_EMAIL=''
+  wizard_section 'Контакт' 'Let’s Encrypt'
+  wizard_note 'Email для уведомлений о сертификате можно оставить пустым.'
+  wizard_read ACME_EMAIL 'Email для Let’s Encrypt (необязательно) [пусто]: ' '' || return 1
+
+  # Personal/friends default.
   TARGET_DEVICE_LIMIT=0
 }

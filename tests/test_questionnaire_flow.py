@@ -203,6 +203,8 @@ def questionnaire_steps():
                          settings.get('custom_sni_answers', ['example.org']))
     steps.extend(('Ваше имя для названий профилей:', value) for value in
                  settings.get('label_answers', [settings.get('label', 'Мой VPN')]))
+    steps.append(('Email для Let’s Encrypt (необязательно) [пусто]:',
+                  settings.get('email', '')))
     for index, value in settings.get('override', {}).items():
         marker, _ = steps[int(index)]
         steps[int(index)] = (marker, value)
@@ -356,6 +358,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('2. По доменному имени', labels)
         self.assertIn('1. По умолчанию max.ru', labels)
         self.assertIn('2. Свой', labels)
+        self.assertIn('Email для Let’s Encrypt (необязательно) [пусто]:', wizard)
         self.assertNotIn('Выберите режим сертификата', wizard)
         self.assertNotIn('Без сертификата', wizard)
         self.assertNotRegex(wizard, r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
@@ -364,8 +367,8 @@ class QuestionnaireFlow(unittest.TestCase):
             self.assertNotIn(removed, wizard)
 
     def test_eof_at_each_question_publishes_nothing(self):
-        # Console: egress, set, port, address, domain, SNI, name.
-        for index in range(7):
+        # Console: egress, set, port, address, domain, SNI, name, email.
+        for index in range(8):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
@@ -398,7 +401,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
         events = result['events']
         self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(5)])
+                         ['ANSWER:' + str(index) for index in range(6)])
         self.assertLess(events.index('ANSWER:3'), events.index('SNI_PROBE:max.ru'))
         self.assertLess(events.index('SNI_PROBE:max.ru'), events.index('SNI_TLS:max.ru'))
         self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:4'))
@@ -443,7 +446,7 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['persisted']['ACME_EMAIL'], '')
                 self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:' + str(index) for index in range(6)])
+                                 ['ANSWER:' + str(index) for index in range(7)])
                 self.assertEqual('Домен VPN:' in result['output'], domain)
                 self.assertEqual('SSH порт [22]' in result['output'], not domain)
                 self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('SNI_PROBE:max.ru'))
@@ -466,6 +469,18 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
         self.assertEqual(result['resume']['events'], ['PHASE:verify'])
         self.assertNotIn('Выберите режим сертификата', result['resume']['output'])
+
+    def test_optional_acme_contact_is_saved_and_invalid_email_stops_before_bootstrap(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              email='owner+vpn@example.org', resume=True)
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertEqual(result['persisted']['ACME_EMAIL'], 'owner+vpn@example.org')
+        self.assertEqual(result['phase_inputs']['ACME_EMAIL'], 'owner+vpn@example.org')
+        self.assertEqual(result['resume']['phase_inputs']['ACME_EMAIL'], 'owner+vpn@example.org')
+        self.assertTrue(result['resume']['target_unchanged'])
+
+        self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
+                                             address_choice='1', email='bad@@example.org'))
 
     def test_legacy_resume_defaults_to_letsencrypt(self):
         legacy = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
@@ -537,7 +552,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
         self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
         self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
-        self.assertLess(result['events'].index('ANSWER:8'), result['events'].index('FULL_PREFLIGHT'))
+        self.assertLess(result['events'].index('ANSWER:9'), result['events'].index('FULL_PREFLIGHT'))
         self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
         self.assert_unpublished(self.fixture(domain_answers=['', None]))
 
