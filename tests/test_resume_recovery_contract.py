@@ -114,9 +114,9 @@ esac
 
     def test_installer_dispatches_completed_transactions_to_verifiers(self):
         source = (ROOT / "install.sh").read_text()
-        tls_start = source.index("if [[ $TARGET_TLS_MODE == letsencrypt ]]; then\n  installer_error_context certbot")
+        tls_start = source.index('installer_error_context certbot "$state/certbot.log"')
         tls_end = source.index("\ninstaller_error_context direct", tls_start)
-        reconcile_start = source.index("if [[ $TARGET_TLS_MODE == letsencrypt ]]; then\n  installer_error_context cert-reconcile")
+        reconcile_start = source.index('installer_error_context cert-reconcile "$state/cert-reconcile.log"')
         reconcile_end = source.index("\nif [[ $TARGET_EGRESS_MODE == direct ]]", reconcile_start)
         fragment = source[tls_start:tls_end] + "\n" + source[reconcile_start:reconcile_end]
         fragment = fragment.replace("/etc/letsencrypt/.vpn-acme-bootstrap-commit",

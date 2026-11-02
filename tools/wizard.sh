@@ -13,7 +13,7 @@ wizard_header() {
   printf '\n%b%s%b\n' "$wizard_cyan" 'VPN · 3X-UI' "$wizard_reset"
   printf '%b%s · Ubuntu 24.04%b\n' "$wizard_dim" "$1" "$wizard_reset"
   printf '%s\n' 'REALITY · Hysteria2 · XHTTP' '──────────────────────────────────────────────'
-  printf 'Выберите выход, набор профилей, адрес подключения, сертификат и SNI.\n\n'
+  printf 'Выберите выход, набор профилей, адрес подключения и SNI.\n\n'
 }
 
 wizard_section() {
@@ -88,8 +88,9 @@ wizard_reality_sni() {
 }
 
 collect_vpn_parameters() {
-  local address_choice certificate_choice egress_choice profile_choice profile_count verifier=$2
+  local address_choice egress_choice profile_choice verifier=$2
   wizard_init
+  TARGET_TLS_MODE=letsencrypt
   wizard_header "$1"
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
@@ -116,7 +117,7 @@ collect_vpn_parameters() {
   done
 
   wizard_section 'Профили' 'Сколько вариантов установить'
-  printf 'Показано число профилей для выбранного выхода с доверенным сертификатом.\n'
+  printf 'Показано число профилей для выбранного выхода.\n'
   if [[ $TARGET_EGRESS_MODE == both ]]; then
     printf '  %b1. Основные 6%b\n' "$wizard_yellow" "$wizard_reset"
     printf '  %b2. Для DPI/ТСПУ — 98%b\n' "$wizard_yellow" "$wizard_reset"
@@ -156,44 +157,7 @@ collect_vpn_parameters() {
     esac
   done
 
-  case "$TARGET_PROFILE_SET" in
-    basic) profile_count=3;;
-    dpi) profile_count=49;;
-    all) profile_count=73;;
-  esac
-  if [[ $TARGET_EGRESS_MODE == both ]]; then profile_count=$((profile_count * 2)); fi
-  wizard_section 'TLS' 'Сертификат и число профилей'
-  printf 'С Let’s Encrypt: %s профилей; панель и подписка по HTTPS.\n' "$profile_count"
-  if [[ $TARGET_PROFILE_SET == basic ]]; then
-    if [[ $TARGET_EGRESS_MODE == both ]]; then
-      printf 'Без сертификата: 4 профиля — REALITY и XHTTP; панель и подписка по HTTP.\n'
-    else
-      printf 'Без сертификата: 2 профиля — REALITY и XHTTP; панель и подписка по HTTP.\n'
-    fi
-  else
-    printf 'Для расширенного набора требуется Let’s Encrypt.\n'
-  fi
-  printf 'HTTP не защищает пароль панели и ключи подписки при передаче.\n\n'
-  printf '  %b1. Let’s Encrypt — %s профилей, HTTPS%b\n' "$wizard_yellow" "$profile_count" "$wizard_reset"
-  if [[ $TARGET_PROFILE_SET == basic ]]; then
-    printf '  %b2. Без сертификата — %s профиля, HTTP%b\n\n' "$wizard_yellow" "$((3 == profile_count ? 2 : 4))" "$wizard_reset"
-  else
-    printf '\n'
-  fi
-  while true; do
-    wizard_read certificate_choice 'Выберите режим сертификата [1]: ' 1 || return 1
-    case "$certificate_choice" in
-      1) TARGET_TLS_MODE=letsencrypt; break;;
-      2)
-        if [[ $TARGET_PROFILE_SET == basic ]]; then
-          TARGET_TLS_MODE=none
-          break
-        fi
-        wizard_error 'Для этого набора нужен Let’s Encrypt.'
-        ;;
-      *) wizard_error 'Выберите 1 или 2.';;
-    esac
-  done
+  wizard_note 'Let’s Encrypt выпускается автоматически для IP или домена; панель и подписка будут по HTTPS.'
   wizard_reality_sni "$verifier" || return 1
 
   wizard_section 'Название' 'Начало названий профилей'

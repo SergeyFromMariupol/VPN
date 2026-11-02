@@ -193,8 +193,6 @@ def questionnaire_steps():
     if menu[-1] == '2':
         steps.extend(('Домен VPN:', value) for value in
                      settings.get('domain_answers', [settings.get('domain', 'vpn.example.com')]))
-    steps.extend(('Выберите режим сертификата [1]:', value) for value in
-                 settings.get('certificate_answers', [settings.get('certificate_choice', '1')]))
     if 'sni_steps' in settings:
         steps.extend(settings['sni_steps'])
     else:
@@ -275,7 +273,7 @@ try:
             text = target.read_text()
             for key, value in settings['saved_resume_inputs'].items():
                 assert key in ('ACME_EMAIL', 'TARGET_LABEL', 'TARGET_REALITY_SNI', 'TARGET_DEVICE_LIMIT',
-                               'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET')
+                               'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET', 'TARGET_TLS_MODE')
                 text, replaced = re.subn('^' + key + '=.*$',
                                          lambda match: key + '=' + shlex.quote(value), text, flags=re.M)
                 assert replaced == 1
@@ -358,14 +356,16 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('2. По доменному имени', labels)
         self.assertIn('1. По умолчанию max.ru', labels)
         self.assertIn('2. Свой', labels)
+        self.assertNotIn('Выберите режим сертификата', wizard)
+        self.assertNotIn('Без сертификата', wizard)
         self.assertNotRegex(wizard, r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
         for removed in ('Ваш email', 'REALITY SNI [',
                         'Лимит IP', 'Установить VPN', 'Проверьте параметры перед запуском:'):
             self.assertNotIn(removed, wizard)
 
     def test_eof_at_each_question_publishes_nothing(self):
-        # Console: egress, set, port, address, domain, certificate, SNI, name.
-        for index in range(8):
+        # Console: egress, set, port, address, domain, SNI, name.
+        for index in range(7):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
@@ -378,7 +378,8 @@ class QuestionnaireFlow(unittest.TestCase):
 
     def test_default_sni_starts_install_and_resume_preserves_saved_parameters(self):
         injected = dict(ACME_EMAIL='caller@example.invalid', TARGET_LABEL='Caller VPN',
-                        TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99')
+                        TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99',
+                        TARGET_TLS_MODE='none')
         saved = dict(ACME_EMAIL='legacy@example.com', TARGET_LABEL='Старый VPN',
                      TARGET_REALITY_SNI='example.net', TARGET_DEVICE_LIMIT='17')
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='', resume=True,
@@ -397,11 +398,11 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
         events = result['events']
         self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(6)])
-        self.assertLess(events.index('ANSWER:4'), events.index('SNI_PROBE:max.ru'))
+                         ['ANSWER:' + str(index) for index in range(5)])
+        self.assertLess(events.index('ANSWER:3'), events.index('SNI_PROBE:max.ru'))
         self.assertLess(events.index('SNI_PROBE:max.ru'), events.index('SNI_TLS:max.ru'))
-        self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:5'))
-        self.assertLess(events.index('ANSWER:5'), events.index('INPUT_VALIDATION'))
+        self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:4'))
+        self.assertLess(events.index('ANSWER:4'), events.index('INPUT_VALIDATION'))
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('FULL_PREFLIGHT'))
         self.assertLess(events.index('FULL_PREFLIGHT'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('PHASE:base'))
@@ -433,6 +434,7 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['exit'], 0, result['output'])
                 self.assert_wizard_labels_and_no_ip(result)
                 self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain' if domain else 'ip')
+                self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
                 self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com' if domain else '8.8.4.4')
                 self.assertEqual(result['persisted']['TARGET_SSH_PORT'], '2222' if domain else '22')
                 self.assertEqual(result['persisted']['TARGET_LABEL'], 'Мой VPN')
@@ -441,43 +443,44 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['persisted']['ACME_EMAIL'], '')
                 self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:' + str(index) for index in range(7)])
+                                 ['ANSWER:' + str(index) for index in range(6)])
                 self.assertEqual('Домен VPN:' in result['output'], domain)
                 self.assertEqual('SSH порт [22]' in result['output'], not domain)
-                self.assertLess(result['events'].index('ANSWER:5'), result['events'].index('SNI_PROBE:max.ru'))
+                self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('SNI_PROBE:max.ru'))
                 self.assertNotIn('\x1b[', result['output'])
 
-    def test_certificate_free_choice_is_explained_and_resume_skips_all_acme_stages(self):
-        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              certificate_choice='2', resume=True)
+    def test_certificate_is_automatic_and_resume_preserves_it(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
-        self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'none')
-        self.assertEqual(result['phase_inputs']['TARGET_TLS_MODE'], 'none')
-        self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '4')
-        self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '4')
-        self.assertLess(result['output'].index('6 профилей'), result['output'].index('Выберите режим сертификата'))
-        self.assertLess(result['output'].index('4 профиля'), result['output'].index('Выберите режим сертификата'))
-        self.assertLess(result['output'].index('HTTP не защищает'), result['output'].index('Выберите режим сертификата'))
+        self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
+        self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
+        self.assertNotIn('Выберите режим сертификата', result['output'])
         phases = [event for event in result['events'] if event.startswith('PHASE:')]
         self.assertEqual(phases, ['PHASE:' + name for name in
-                         ('base', 'direct', 'panel', 'nginx-restart', 'warp', 'dual', 'xhttp', 'verify')])
+                         ('base', 'certbot', 'tls', 'direct', 'panel', 'nginx-restart',
+                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'verify')])
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
-        self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'none')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
         self.assertEqual(result['resume']['events'], ['PHASE:verify'])
         self.assertNotIn('Выберите режим сертификата', result['resume']['output'])
 
-    def test_certificate_menu_retries_and_legacy_resume_defaults_to_letsencrypt(self):
-        selected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                certificate_answers=['invalid', '2'])
-        self.assertEqual(selected['exit'], 0, selected['output'])
-        self.assertEqual(selected['persisted']['TARGET_TLS_MODE'], 'none')
-        self.assertEqual(selected['output'].count('Выберите режим сертификата [1]:'), 2)
-        self.assert_unpublished(self.fixture(certificate_answers=['invalid', None]))
+    def test_legacy_resume_defaults_to_letsencrypt(self):
         legacy = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
                               resume=True, legacy_without_tls_mode=True)
         self.assertEqual(legacy['resume']['exit'], 0, legacy['resume']['output'])
         self.assertEqual(legacy['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
+
+    def test_resume_rejects_saved_certificate_free_mode_without_mutation(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              resume=True, saved_resume_inputs={'TARGET_TLS_MODE': 'none'})
+        self.assertEqual(result['exit'], 0, result['output'])
+        resumed = result['resume']
+        self.assertNotEqual(resumed['exit'], 0)
+        self.assertTrue(resumed['target_unchanged'])
+        self.assertFalse(any(event.startswith('PHASE:') for event in resumed['events']))
 
     def test_egress_and_profile_set_choices_persist_with_personal_name(self):
         for egress_choice, mode, expected_count in (('1', 'warp', 49), ('2', 'direct', 49),
@@ -494,21 +497,22 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
                 self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], str(expected_count))
                 self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_SET'], 'dpi')
-                self.assertIn(f'Let’s Encrypt — {expected_count} профилей', result['output'])
+                self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
+                self.assertNotIn('Выберите режим сертификата', result['output'])
 
         all_profiles = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
                                     profile_choice='3')
         self.assertEqual(all_profiles['persisted']['TARGET_PROFILE_SET'], 'all')
         self.assertEqual(all_profiles['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '146')
-        self.assertIn('Let’s Encrypt — 146 профилей', all_profiles['output'])
+        self.assertEqual(all_profiles['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
 
         basic_direct = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                    egress_choice='2', certificate_choice='2')
-        self.assertEqual(basic_direct['phase_inputs']['TARGET_PROFILE_COUNT'], '4')
-        self.assertEqual(basic_direct['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '2')
-        self.assertIn('Без сертификата — 2 профиля', basic_direct['output'])
+                                    egress_choice='2')
+        self.assertEqual(basic_direct['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
+        self.assertEqual(basic_direct['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '3')
+        self.assertEqual(basic_direct['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
 
-    def test_invalid_selection_and_certless_expanded_set_publish_nothing(self):
+    def test_invalid_selection_publishes_nothing(self):
         selected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
                                 egress_answers=['bad', '1'], profile_answers=['bad', '3'])
         self.assertEqual(selected['exit'], 0, selected['output'])
@@ -518,10 +522,6 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(selected['output'].count('Выберите набор [1]:'), 2)
         self.assert_unpublished(self.fixture(egress_answers=['bad', None]))
         self.assert_unpublished(self.fixture(profile_answers=['bad', None]))
-        rejected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                profile_choice='3', certificate_answers=['2', None])
-        self.assert_unpublished(rejected)
-        self.assertIn('Для этого набора нужен Let’s Encrypt.', rejected['output'])
 
     def test_legacy_saved_selection_defaults_ignore_caller_environment(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
@@ -537,7 +537,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
         self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
         self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
-        self.assertLess(result['events'].index('ANSWER:9'), result['events'].index('FULL_PREFLIGHT'))
+        self.assertLess(result['events'].index('ANSWER:8'), result['events'].index('FULL_PREFLIGHT'))
         self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
         self.assert_unpublished(self.fixture(domain_answers=['', None]))
 
