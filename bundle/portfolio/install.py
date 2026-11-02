@@ -68,7 +68,45 @@ with closing(sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro', uri=True, timeout
 
 def need(value, code):
     if not value:
-        raise RuntimeError(code)
+        raise InvariantFailure(code)
+
+
+class InvariantFailure(RuntimeError):
+    def __init__(self, code):
+        safe = code if re.fullmatch(r"PORTFOLIO_[A-Z0-9_]{1,80}", code) else \
+            "PORTFOLIO_INVARIANT_UNKNOWN"
+        super().__init__(safe)
+
+
+class CommandFailure(RuntimeError):
+    def __init__(self, step):
+        need(re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", step),
+             "PORTFOLIO_INVALID_STEP")
+        super().__init__("PORTFOLIO_STEP_" + step)
+
+
+class RollbackFailure(RuntimeError):
+    def __init__(self, original, rollback_error):
+        self.original_code = safe_error_code(original)
+        self.rollback_code = safe_error_code(rollback_error)
+        super().__init__("PORTFOLIO_ROLLBACK_FAILED")
+
+
+def safe_error_code(error):
+    # Exception messages from subprocesses and libraries can include credentials.
+    # Only our own fixed codes are allowed into the private phase log or UI.
+    if isinstance(error, (CommandFailure, InvariantFailure)):
+        return str(error)
+    return "PORTFOLIO_UNEXPECTED"
+
+
+def report_failure(error, stream=None):
+    stream = stream if stream is not None else sys.stderr
+    if isinstance(error, RollbackFailure):
+        print("PORTFOLIO_ERROR=" + error.original_code, file=stream)
+        print("PORTFOLIO_ROLLBACK_ERROR=" + error.rollback_code, file=stream)
+    else:
+        print("PORTFOLIO_ERROR=" + safe_error_code(error), file=stream)
 
 
 def canonical(value):
@@ -80,13 +118,22 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def command(args, *, timeout=60, input_data=None):
+def run_command(args, *, step, timeout=60, input_data=None, check=True):
     environment = {key: value for key, value in os.environ.items()
                    if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
     environment.update(LC_ALL="C", LANG="C", LANGUAGE="C",
                        XRAY_LOCATION_ASSET=str(ASSETS))
-    return subprocess.run(args, input=input_data, check=True, capture_output=True,
-                          timeout=timeout, env=environment).stdout
+    try:
+        return subprocess.run(args, input=input_data, check=check,
+                              capture_output=True, timeout=timeout,
+                              env=environment)
+    except (OSError, subprocess.SubprocessError):
+        raise CommandFailure(step) from None
+
+
+def command(args, *, step, timeout=60, input_data=None):
+    return run_command(args, step=step, timeout=timeout,
+                       input_data=input_data).stdout
 
 
 def private(path, owner=0):
@@ -142,7 +189,8 @@ def rows_for(target_info):
 
 
 def keypair():
-    output = command([str(XRAY), "x25519"], timeout=20).decode("ascii")
+    output = command([str(XRAY), "x25519"], step="XRAY_X25519",
+                     timeout=20).decode("ascii")
     private_key = re.findall(r"^Private(?:\s+key|Key):\s*([A-Za-z0-9_-]{43})\s*$",
                              output, re.M)
     public_key = re.findall(r"^(?:Public(?:\s+key|Key)|Password \(PublicKey\)):\s*"
@@ -153,7 +201,8 @@ def keypair():
 
 
 def mlkem_pair():
-    output = command([str(XRAY), "vlessenc"], timeout=25).decode("utf-8")
+    output = command([str(XRAY), "vlessenc"], step="XRAY_VLESSENC",
+                     timeout=25).decode("utf-8")
     pairs = re.findall(r'"decryption"\s*:\s*"([^"]+)"\s*,?\s*'
                        r'"encryption"\s*:\s*"([^"]+)"', output)
     matches = [(dec, enc) for dec, enc in pairs
@@ -321,7 +370,7 @@ def read_state():
 
 
 def route_hashes():
-    return {name: sha(command(args)) for name, args in {
+    return {name: sha(command(args, step="ROUTE_" + name.upper())) for name, args in {
         "ip4_route": ["ip", "-4", "route", "show", "table", "all"],
         "ip6_route": ["ip", "-6", "route", "show", "table", "all"],
         "ip4_rule": ["ip", "-4", "rule", "show"],
@@ -330,7 +379,8 @@ def route_hashes():
 
 
 def ufw_added():
-    return [shlex.split(line) for line in command(["ufw", "show", "added"])
+    return [shlex.split(line) for line in command(["ufw", "show", "added"],
+                                                   step="UFW_READ")
             .decode("utf-8").splitlines() if line.startswith("ufw ")]
 
 
@@ -370,7 +420,8 @@ def snapshot():
     backup.mkdir(mode=0o700)
     safe_directory(backup)
     database = command(["runuser", "-u", "xui", "--", "python3", "-I", "-B",
-                        "-c", SQLITE_SNAPSHOT_WORKER], timeout=90)
+                        "-c", SQLITE_SNAPSHOT_WORKER], step="DB_SNAPSHOT",
+                       timeout=90)
     need(0 < len(database) <= 64 * 1024 * 1024, "PORTFOLIO_DB_SIZE")
     write_new(backup / "x-ui.db", database)
     with closing(sqlite3.connect("file:" + str(backup / "x-ui.db") +
@@ -381,10 +432,13 @@ def snapshot():
              "etc/ufw", "etc/systemd/system", "etc/nginx", "etc/letsencrypt"]
     command(["tar", "--acls", "--xattrs", "--numeric-owner", "-cpf",
              str(backup / "managed-before.tar"), "-C", "/", *paths],
-            timeout=180)
-    command(["tar", "-tf", str(backup / "managed-before.tar")], timeout=90)
-    write_new(backup / "nft-before.txt", command(["nft", "-s", "list", "ruleset"]))
-    write_new(backup / "ufw-before.txt", command(["ufw", "show", "added"]))
+            step="TAR_SNAPSHOT", timeout=180)
+    command(["tar", "-tf", str(backup / "managed-before.tar")],
+            step="TAR_READBACK", timeout=90)
+    write_new(backup / "nft-before.txt", command(["nft", "-s", "list", "ruleset"],
+                                                   step="NFT_SNAPSHOT"))
+    write_new(backup / "ufw-before.txt", command(["ufw", "show", "added"],
+                                                   step="UFW_SNAPSHOT"))
     write_new(backup / "routes-before.json", canonical(route_hashes()))
     hashes = {p.name: sha(p.read_bytes()) for p in backup.iterdir() if p.is_file()}
     write_new(backup / "snapshot-hashes.json", canonical(hashes))
@@ -409,11 +463,12 @@ def free_identity():
     for value in range(999, 699, -1):
         if value not in used:
             return value
-    raise RuntimeError("PORTFOLIO_NO_SYSTEM_UID")
+    raise InvariantFailure("PORTFOLIO_NO_SYSTEM_UID")
 
 
 def occupied_ports():
-    output = command(["ss", "-H", "-lntup"]).decode("utf-8")
+    output = command(["ss", "-H", "-lntup"],
+                     step="LISTENERS_READ").decode("utf-8")
     ports = set()
     for line in output.splitlines():
         fields = line.split()
@@ -494,14 +549,18 @@ def verify(info, state, *, allow_pending=False):
          [link["egress"] for link in manifest["entries"]] and
          config["routing"]["rules"][-1]["outboundTag"] == "BLOCK",
          "PORTFOLIO_CONFIG_ROUTES")
-    command([str(XRAY), "run", "-test", "-config", str(CONF)], timeout=120)
-    command(["systemctl", "is-active", "--quiet", UNIT_NAME])
-    command(["systemctl", "is-enabled", "--quiet", UNIT_NAME])
+    command([str(XRAY), "run", "-test", "-config", str(CONF)],
+            step="XRAY_VERIFY", timeout=120)
+    command(["systemctl", "is-active", "--quiet", UNIT_NAME],
+            step="SERVICE_ACTIVE")
+    command(["systemctl", "is-enabled", "--quiet", UNIT_NAME],
+            step="SERVICE_ENABLED")
     user, group = pwd.getpwnam(ACCOUNT), grp.getgrnam(ACCOUNT)
     need(user.pw_uid == user.pw_gid == group.gr_gid == state["uid"] and
          user.pw_dir == "/nonexistent" and user.pw_shell == "/usr/sbin/nologin",
          "PORTFOLIO_ACCOUNT_DRIFT")
-    properties = {key: command(["systemctl", "show", "-P", key, UNIT_NAME])
+    properties = {key: command(["systemctl", "show", "-P", key, UNIT_NAME],
+                               step="SERVICE_SHOW_" + key.upper())
                   .decode("utf-8").strip()
                   for key in ("User", "Group", "FragmentPath", "DropInPaths", "MainPID")}
     need(properties["User"] == properties["Group"] == ACCOUNT and
@@ -515,7 +574,8 @@ def verify(info, state, *, allow_pending=False):
                                   for value in uids.groups()) and
          (Path("/proc") / str(pid) / "exe").resolve(strict=True) == XRAY,
          "PORTFOLIO_PROCESS_DRIFT")
-    listeners = command(["ss", "-H", "-lntup"]).decode("utf-8")
+    listeners = command(["ss", "-H", "-lntup"],
+                        step="LISTENERS_VERIFY").decode("utf-8")
     for port, network in state["ports"].items():
         need(any(line.startswith(network + " ") and
                  line.split()[4] == info["TARGET_IPV4"] + ":" + port and
@@ -536,10 +596,11 @@ def rollback(info, state):
          "PORTFOLIO_ROLLBACK_TARGET_DRIFT")
     check_snapshot(Path(state["backup"]))
     if UNIT.exists():
-        subprocess.run(["systemctl", "disable", "--now", UNIT_NAME],
-                       capture_output=True, timeout=60)
-        stopped = subprocess.run(["systemctl", "is-active", "--quiet", UNIT_NAME],
-                                 capture_output=True, timeout=15)
+        run_command(["systemctl", "disable", "--now", UNIT_NAME],
+                    step="ROLLBACK_SERVICE_DISABLE", check=False, timeout=60)
+        stopped = run_command(["systemctl", "is-active", "--quiet", UNIT_NAME],
+                              step="ROLLBACK_SERVICE_STATUS", check=False,
+                              timeout=15)
         need(stopped.returncode != 0, "PORTFOLIO_SERVICE_STOP")
     current = ufw_added()
     before = state["ufw_before"]
@@ -548,7 +609,8 @@ def rollback(info, state):
         if exact in current:
             need(exact not in before, "PORTFOLIO_FOREIGN_RULE")
             need(current.count(exact) == 1, "PORTFOLIO_UFW_DUPLICATE")
-            command(["ufw", "--force", "delete", *rule], timeout=30)
+            command(["ufw", "--force", "delete", *rule],
+                    step="ROLLBACK_UFW_DELETE", timeout=30)
             current = ufw_added()
     for path, digest in ((UNIT, state["unit_sha256"]),
                          (HOOK, state["hook_sha256"]),
@@ -563,21 +625,32 @@ def rollback(info, state):
         need(marker == (state["tls_initial_sha256"] + "\n").encode(),
              "PORTFOLIO_ROLLBACK_TLS_MARKER")
         TLS_MARKER.unlink()
-    command(["systemctl", "daemon-reload"])
+    command(["systemctl", "daemon-reload"],
+            step="ROLLBACK_DAEMON_RELOAD")
     if ACCOUNT in [entry.pw_name for entry in pwd.getpwall()]:
         need(pwd.getpwnam(ACCOUNT).pw_uid == state["uid"],
              "PORTFOLIO_ACCOUNT_DRIFT")
-        command(["userdel", ACCOUNT])
+        command(["userdel", ACCOUNT], step="ROLLBACK_USER_DELETE")
     if ACCOUNT in [entry.gr_name for entry in grp.getgrall()]:
         need(grp.getgrnam(ACCOUNT).gr_gid == state["uid"],
              "PORTFOLIO_GROUP_DRIFT")
-        command(["groupdel", ACCOUNT])
+        command(["groupdel", ACCOUNT], step="ROLLBACK_GROUP_DELETE")
     need(route_hashes() == state["routes_before"], "PORTFOLIO_ROLLBACK_ROUTE")
     need(ufw_added() == before, "PORTFOLIO_ROLLBACK_UFW")
     need(set(ROOT.iterdir()) == {STATE}, "PORTFOLIO_ROLLBACK_ROOT")
     need(private(STATE) == canonical(state), "PORTFOLIO_ROLLBACK_STATE")
     STATE.unlink()
     ROOT.rmdir()
+
+
+def compensate_after_failure(info, state, original):
+    try:
+        if STATE.exists() and state["phase"] == "pending":
+            rollback(info, state)
+        elif ROOT.exists() and not ROOT.is_symlink() and not any(ROOT.iterdir()):
+            ROOT.rmdir()
+    except BaseException as rollback_error:
+        raise RollbackFailure(original, rollback_error) from None
 
 
 def apply(info):
@@ -620,7 +693,8 @@ def apply(info):
                       ("staged-unit", unit_raw), ("staged-hook", hook_raw)):
         write_new(backup / name, raw)
     command([str(XRAY), "run", "-test", "-config",
-             str(backup / "staged-config.json")], timeout=120)
+             str(backup / "staged-config.json")],
+            step="XRAY_STAGED_PREFLIGHT", timeout=120)
     uid = free_identity()
     state = {"version": 1, "phase": "pending", "target": info["TARGET_IPV4"],
              "interface": info["TARGET_INTERFACE"],
@@ -637,31 +711,33 @@ def apply(info):
         ROOT.mkdir(mode=0o700)
         safe_directory(ROOT)
         write_state(state)
-        command(["groupadd", "--system", "--gid", str(uid), ACCOUNT])
+        command(["groupadd", "--system", "--gid", str(uid), ACCOUNT],
+                step="GROUP_CREATE")
         command(["useradd", "--system", "--uid", str(uid), "--gid", str(uid),
                  "--no-create-home", "--home-dir", "/nonexistent",
-                 "--shell", "/usr/sbin/nologin", ACCOUNT])
+                  "--shell", "/usr/sbin/nologin", ACCOUNT],
+                step="USER_CREATE")
         write_new(CONF, config_raw)
         write_new(LINKS, links_raw)
         write_new(UNIT, unit_raw, 0o644)
         write_new(HOOK, hook_raw, 0o750)
-        command(["bash", "-n", str(HOOK)])
-        command(["systemd-analyze", "verify", str(UNIT)])
-        command(["systemctl", "daemon-reload"])
-        command(["systemctl", "enable", "--now", UNIT_NAME], timeout=90)
+        command(["bash", "-n", str(HOOK)], step="HOOK_SYNTAX")
+        command(["systemd-analyze", "verify", str(UNIT)],
+                step="UNIT_PREFLIGHT")
+        command(["systemctl", "daemon-reload"], step="DAEMON_RELOAD")
+        command(["systemctl", "enable", "--now", UNIT_NAME],
+                step="SERVICE_START", timeout=90)
         command(["env", "RENEWED_LINEAGE=/etc/letsencrypt/live/" +
-                 info["TARGET_FQDN"], "/bin/bash", str(HOOK)], timeout=180)
+                 info["TARGET_FQDN"], "/bin/bash", str(HOOK)],
+                step="RENEWAL_HOOK", timeout=180)
         for rule in rules_for(info, ports):
-            command(["ufw", *rule], timeout=30)
+            command(["ufw", *rule], step="UFW_ADD", timeout=30)
         verify(info, state, allow_pending=True)
         state["phase"] = "committed"
         write_state(state)
         print("PORTFOLIO_SERVICE_COMMITTED=" + str(state["profile_count"]))
-    except BaseException:
-        if STATE.exists() and state["phase"] == "pending":
-            rollback(info, state)
-        elif ROOT.exists() and not ROOT.is_symlink() and not any(ROOT.iterdir()):
-            ROOT.rmdir()
+    except BaseException as original:
+        compensate_after_failure(info, state, original)
         raise
 
 
@@ -693,8 +769,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        print("PORTFOLIO_ERROR=" +
-              (str(error) if isinstance(error, (ValueError, RuntimeError)) else
-               type(error).__name__), file=sys.stderr)
+    except Exception as error:
+        report_failure(error)
         sys.exit(1)

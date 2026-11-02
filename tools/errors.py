@@ -40,6 +40,18 @@ PHASES = tuple(STAGES)[5:]
 EARLY_STAGES = frozenset(('startup', 'download', 'source', 'preflight', 'bootstrap'))
 MAX_LOG_BYTES = 8 * 1024 * 1024
 LAUNCH = 'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh)'
+PORTFOLIO_STEPS = frozenset('PORTFOLIO_STEP_' + step for step in '''
+    XRAY_X25519 XRAY_VLESSENC ROUTE_IP4_ROUTE ROUTE_IP6_ROUTE
+    ROUTE_IP4_RULE ROUTE_IP6_RULE UFW_READ DB_SNAPSHOT TAR_SNAPSHOT
+    TAR_READBACK NFT_SNAPSHOT UFW_SNAPSHOT LISTENERS_READ XRAY_VERIFY
+    SERVICE_ACTIVE SERVICE_ENABLED SERVICE_SHOW_USER SERVICE_SHOW_GROUP
+    SERVICE_SHOW_FRAGMENTPATH SERVICE_SHOW_DROPINPATHS SERVICE_SHOW_MAINPID
+    LISTENERS_VERIFY ROLLBACK_SERVICE_DISABLE ROLLBACK_SERVICE_STATUS
+    ROLLBACK_UFW_DELETE ROLLBACK_DAEMON_RELOAD ROLLBACK_USER_DELETE
+    ROLLBACK_GROUP_DELETE XRAY_STAGED_PREFLIGHT GROUP_CREATE USER_CREATE
+    HOOK_SYNTAX UNIT_PREFLIGHT DAEMON_RELOAD SERVICE_START RENEWAL_HOOK
+    UFW_ADD
+'''.split())
 
 
 def _issue(code, title, cause, solution, resume=False, retry_after_utc=None):
@@ -210,6 +222,17 @@ def classify(stage, text, status=1, code=''):
     lower = text.lower()
     markers = re.findall(r'^VPN_ERROR_CODE=([A-Z][A-Z0-9_]{1,63})\s*$', text, flags=re.M)
     selected = code if code in FIXED else next((item for item in reversed(markers) if item in FIXED), '')
+    portfolio_primary = ''
+    portfolio_rollback = ''
+    if stage == 'portfolio-runtime':
+        primary = re.findall(r'^PORTFOLIO_ERROR=(PORTFOLIO_STEP_[A-Z0-9_]{1,63})$',
+                             text, flags=re.M)
+        rollback = re.findall(r'^PORTFOLIO_ROLLBACK_ERROR=(PORTFOLIO_STEP_[A-Z0-9_]{1,63})$',
+                              text, flags=re.M)
+        portfolio_primary = next((item for item in reversed(primary)
+                                  if item in PORTFOLIO_STEPS), '')
+        portfolio_rollback = next((item for item in reversed(rollback)
+                                   if item in PORTFOLIO_STEPS), '')
 
     recovery = (
         re.search(r'\b[A-Z0-9_]*ROLLBACK_OK=0\b|\bROLLBACK_VERIFIED=0\b', text)
@@ -218,11 +241,17 @@ def classify(stage, text, status=1, code=''):
         or 'BOOTSTRAP_CLEANUP_REFUSED=' in text
         or 'BOOTSTRAP_PUBLISH_CONFLICT=' in text
         or selected == 'BOOTSTRAP_RECOVERY'
+        or (stage == 'portfolio-runtime' and 'PORTFOLIO_ROLLBACK_ERROR=' in text)
         or 'certificate recovery needs the protected snapshot' in lower
     )
     if recovery:
+        cause = 'Установщик обнаружил ошибку отката или изменённое состояние файлов.'
+        if portfolio_primary:
+            cause += ' Исходный код шага: ' + portfolio_primary + '.'
+        if portfolio_rollback:
+            cause += ' Код шага отката: ' + portfolio_rollback + '.'
         return _issue('RECOVERY_REQUIRED', 'Восстановление после ошибки не подтверждено.',
-                      'Установщик обнаружил ошибку отката или изменённое состояние файлов.',
+                      cause,
                       'Сохраните защищённые снимки в /var/backups и выполните диагностику. '
                       'Пока не запускайте установку повторно и не удаляйте её файлы.')
     if ('OS_UPGRADE_INCOMPLETE=1' in text or 'APT_INSTALL_PACKAGE_CHANGES_REMAIN=1' in text):
@@ -268,6 +297,12 @@ def classify(stage, text, status=1, code=''):
     if selected:
         title, cause, solution = FIXED[selected]
         return _issue(selected, title, cause, solution, selected in FIXED_RESUMABLE)
+
+    if portfolio_primary:
+        return _issue('PORTFOLIO_STEP_FAILED', 'Этап дополнительных протоколов остановился.',
+                      'Код шага: ' + portfolio_primary + '.',
+                      'Проверьте службу и состояние сервера безопасной диагностикой. '
+                      'Не публикуйте неподтверждённую подписку.')
 
     acme = stage in ('tls', 'renewal', 'certbot')
     if acme and ('too many certificates' in lower and 'exact set' in lower
@@ -430,7 +465,8 @@ def render(issue, stage, status=1, can_resume=False, destination='/opt/vpn-insta
         'ACME_RATE_LIMIT', 'ACME_HTTP01', 'DNS_AAAA', 'DNS_CNAME', 'DNS_A', 'PORT_BUSY',
         'PACKAGE_LOCK', 'PACKAGE_INTERRUPTED', 'DISK_FULL', 'NETWORK_DNS', 'TLS_TRUST',
         'SOURCE_UNAVAILABLE', 'NETWORK_TIMEOUT', 'WARP_ISOLATION', 'WARP_CONNECTIVITY',
-        'SUBSCRIPTION_MISMATCH', 'XHTTP_TEST_FAILED', 'CANCELLED', 'UNKNOWN',
+        'SUBSCRIPTION_MISMATCH', 'XHTTP_TEST_FAILED', 'PORTFOLIO_STEP_FAILED',
+        'CANCELLED', 'UNKNOWN',
     }
     if error_code not in allowed:
         issue = classify(stage, '', status)

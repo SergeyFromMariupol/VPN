@@ -152,6 +152,29 @@ class ErrorClassification(unittest.TestCase):
         self.assertNotIn('--resume', output)
         self.assert_private(output)
 
+    def test_portfolio_command_step_is_visible_without_private_child_output(self):
+        text = ('PORTFOLIO_ERROR=PORTFOLIO_STEP_XRAY_STAGED_PREFLIGHT\n' +
+                PRIVATE_TEXT)
+        issue, output = self.render('portfolio-runtime', text, can_resume=True)
+        self.assertEqual(issue['code'], 'PORTFOLIO_STEP_FAILED')
+        self.assertIn('PORTFOLIO_STEP_XRAY_STAGED_PREFLIGHT', output)
+        self.assert_private(output)
+
+    def test_portfolio_rollback_failure_keeps_primary_step_and_requires_recovery(self):
+        text = ('PORTFOLIO_ERROR=PORTFOLIO_STEP_SERVICE_START\n'
+                'PORTFOLIO_ROLLBACK_ERROR=PORTFOLIO_STEP_ROLLBACK_UFW_DELETE\n' +
+                PRIVATE_TEXT)
+        issue, output = self.render('portfolio-runtime', text, can_resume=True)
+        self.assertEqual(issue['code'], 'RECOVERY_REQUIRED')
+        self.assertIn('PORTFOLIO_STEP_SERVICE_START', output)
+        self.assertIn('PORTFOLIO_STEP_ROLLBACK_UFW_DELETE', output)
+        self.assertNotIn('--resume', output)
+        self.assert_private(output)
+
+        spoofed = 'PORTFOLIO_ERROR=PORTFOLIO_STEP_' + CANARIES[0] + '\n' + PRIVATE_TEXT
+        _, output = self.render('portfolio-runtime', spoofed, can_resume=True)
+        self.assertNotIn(CANARIES[0], output)
+
     def test_fixed_gate_codes_and_malicious_marker_values_do_not_echo_values(self):
         for code in ('ACME_PORT80', 'ACME_XUI_STATE', 'VERIFY_DATABASE', 'ROOT_REQUIRED'):
             with self.subTest(code=code):
