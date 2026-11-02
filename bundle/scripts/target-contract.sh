@@ -13,17 +13,35 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
   }
   # shellcheck disable=SC1091
   TARGET_TLS_MODE=letsencrypt
+  TARGET_EGRESS_MODE=both
+  TARGET_PROFILE_SET=basic
   source /etc/germanyvpn-target.env
 fi
 TARGET_FQDN=${TARGET_FQDN:?TARGET_FQDN is required}
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
+TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
+TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
+case $TARGET_EGRESS_MODE in
+  warp|direct|both) ;;
+  *) printf 'ERROR: TARGET_EGRESS_MODE must be warp, direct or both\n' >&2; return 1;;
+esac
+case $TARGET_PROFILE_SET in
+  basic|dpi|all) ;;
+  *) printf 'ERROR: TARGET_PROFILE_SET must be basic, dpi or all\n' >&2; return 1;;
+esac
 case $TARGET_TLS_MODE in
   letsencrypt) TARGET_PUBLIC_SCHEME=https; TARGET_PROTOCOL_COUNT=3; TARGET_PROFILE_COUNT=6;;
   none) TARGET_PUBLIC_SCHEME=http; TARGET_PROTOCOL_COUNT=2; TARGET_PROFILE_COUNT=4;;
   *) printf 'ERROR: TARGET_TLS_MODE must be letsencrypt or none\n' >&2; return 1;;
 esac
-export TARGET_TLS_MODE TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT
+case $TARGET_PROFILE_SET in
+  basic) TARGET_SELECTED_PROFILE_COUNT=$TARGET_PROTOCOL_COUNT;;
+  dpi) [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: dpi requires a trusted certificate\n' >&2; return 1; }; TARGET_SELECTED_PROFILE_COUNT=49;;
+  all) [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: all requires a trusted certificate\n' >&2; return 1; }; TARGET_SELECTED_PROFILE_COUNT=73;;
+esac
+if [[ $TARGET_EGRESS_MODE == both ]]; then TARGET_SELECTED_PROFILE_COUNT=$((TARGET_SELECTED_PROFILE_COUNT * 2)); fi
+export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT TARGET_SELECTED_PROFILE_COUNT
 [[ $TARGET_FQDN =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && $TARGET_FQDN == *.* && $TARGET_FQDN != *..* ]] || {
   printf 'ERROR: TARGET_FQDN must be a lowercase DNS name or public IPv4\n' >&2; return 1;
 }
@@ -63,7 +81,7 @@ for field in (('TARGET_FQDN', 'TARGET_REALITY_SNI') if mode == 'domain' else ('T
     else:
         raise SystemExit(field + ' must be a DNS hostname, not an IP literal')
 label = os.environ['TARGET_LABEL']
-if not 1 <= len(label) <= 80 or any(unicodedata.category(c) in {'Cc', 'Zl', 'Zp'} for c in label):
+if not 1 <= len(label) <= 80 or not label.strip() or any(unicodedata.category(c) in {'Cc', 'Zl', 'Zp'} for c in label):
     raise SystemExit('invalid TARGET_LABEL')
 PY
 then

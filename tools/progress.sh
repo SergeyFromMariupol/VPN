@@ -13,6 +13,9 @@ _installer_progress_label() {
     cert-reconcile) printf 'Обновление сертификатов';; warp) printf 'Cloudflare WARP';;
     dual) if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 'Четыре профиля VPN'; else printf 'Шесть профилей VPN'; fi;;
     xhttp) printf 'Транспорт XHTTP';;
+    baseline-verify) printf 'Проверка основных профилей';;
+    portfolio-runtime) printf 'Дополнительные протоколы';;
+    portfolio-publish) printf 'Публикация подписки';;
     renewal) printf 'Проверка продления TLS';; verify) printf 'Итоговая проверка';;
     preflight) printf 'Проверка сервера';; bootstrap) printf 'Подготовка установки';;
     sni-check) printf 'Проверка REALITY SNI';; *) return 1;;
@@ -20,15 +23,26 @@ _installer_progress_label() {
 }
 
 _installer_progress_phases() {
+  local -a phases
   if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then
-    printf '%s\n' base direct panel nginx-restart warp dual xhttp verify
+    phases=(base direct panel nginx-restart warp dual xhttp)
   else
-    printf '%s\n' base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal verify
+    phases=(base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp)
   fi
+  if [[ ${TARGET_PROFILE_SET:-basic} != basic || ${TARGET_EGRESS_MODE:-both} != both ]]; then
+    phases+=(baseline-verify)
+    if [[ ${TARGET_PROFILE_SET:-basic} != basic ]]; then phases+=(portfolio-runtime); fi
+    phases+=(portfolio-publish)
+  fi
+  if [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then phases+=(renewal); fi
+  phases+=(verify)
+  printf '%s\n' "${phases[@]}"
 }
 
 _installer_progress_total() {
-  if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 8; else printf 12; fi
+  local count=0 phase_name
+  while IFS= read -r phase_name; do count=$((count + 1)); done < <(_installer_progress_phases)
+  printf '%s' "$count"
 }
 
 _installer_progress_identity() {

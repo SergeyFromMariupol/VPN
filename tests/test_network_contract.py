@@ -71,6 +71,34 @@ class CertificateModeContract(unittest.TestCase):
             network.validate_listeners(network.parse_ss(listeners), IP, INTERFACE, SSH, True)
 
 
+class PortfolioPortContract(unittest.TestCase):
+    def test_selected_extra_ports_are_exact_and_publicly_scoped(self):
+        extra = {'30000': 'tcp', '30001': 'udp'}
+        listeners = sockets() + socket('tcp', f'{IP}:30000') + socket('udp', f'{IP}:30001')
+        rules = (firewall() +
+                 f'{IP} 30000/tcp on {INTERFACE} ALLOW IN Anywhere # portfolio\n' +
+                 f'{IP} 30001/udp on {INTERFACE} ALLOW IN Anywhere # portfolio\n')
+        network.validate_listeners(network.parse_ss(listeners), IP, INTERFACE, SSH,
+                                   True, portfolio_ports=extra)
+        network.validate_ufw(rules, IP, INTERFACE, SSH, True, DEFAULTS,
+                             portfolio_ports=extra)
+        for changed in (sockets(), listeners.replace(f'{IP}:30001', '0.0.0.0:30001')):
+            with self.assertRaises(ValueError):
+                network.validate_listeners(network.parse_ss(changed), IP, INTERFACE,
+                                           SSH, True, portfolio_ports=extra)
+        for changed in (firewall(), rules.replace(f'{IP} 30001/udp on {INTERFACE}',
+                                                  '30001/udp')):
+            with self.assertRaises(ValueError):
+                network.validate_ufw(changed, IP, INTERFACE, SSH, True, DEFAULTS,
+                                     portfolio_ports=extra)
+
+    def test_bad_or_conflicting_port_manifest_is_rejected(self):
+        for ports in ({'443': 'tcp'}, {'30000': 'sctp'}, {'30000': 'tcp', 30000: 'udp'},
+                      {'30000': 'tcp+udp'}, {'65536': 'udp'}):
+            with self.subTest(ports=ports), self.assertRaises(ValueError):
+                network.normalized_portfolio_ports(ports)
+
+
 class FirewallContract(unittest.TestCase):
     def check(self, text, promoted=True, defaults=DEFAULTS):
         network.validate_ufw(text, IP, INTERFACE, SSH, promoted, defaults)

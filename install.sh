@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.7'
+readonly release='v1.2.8'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -275,9 +275,11 @@ installer_progress_init "$task_stage" "$source_dir/tools/progress.py" || :
 if [[ $mode == --verify ]]; then
   installer_resume_ready || die 'Небезопасное или неполное состояние для проверки VPN'
   TARGET_TLS_MODE=letsencrypt
+  TARGET_EGRESS_MODE=both
+  TARGET_PROFILE_SET=basic
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
-  export TARGET_TLS_MODE
+  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET
   if [[ -e $state/verify-command.log || -L $state/verify-command.log ]]; then
     [[ -f $state/verify-command.log && ! -L $state/verify-command.log &&
        $(stat -c '%u:%g:%a:%h' "$state/verify-command.log") == 0:0:600:1 ]] || die 'Небезопасный журнал проверки VPN'
@@ -293,6 +295,8 @@ if [[ $mode == --resume ]]; then
   # Old saved installations predate this setting. Never inherit a conflicting
   # certificate mode from the caller when the saved file has no such key.
   TARGET_TLS_MODE=letsencrypt
+  TARGET_EGRESS_MODE=both
+  TARGET_PROFILE_SET=basic
   source "$target_file"
   [[ -f $destination/SHA256SUMS ]] || die 'Отсутствует установленный bundle'
   (cd -- "$destination"; sha256sum --check --strict SHA256SUMS >/dev/null)
@@ -306,7 +310,7 @@ else
   [[ -r /dev/tty ]] || die 'Нужен интерактивный терминал для параметров установки'
   source "$source_dir/tools/wizard.sh"
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
-  export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
+  export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
   installer_error_context preflight "$task_stage/preflight-error.txt"
@@ -328,8 +332,13 @@ else
 fi
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
+TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
+TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
 [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
-export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
+[[ $TARGET_EGRESS_MODE == warp || $TARGET_EGRESS_MODE == direct || $TARGET_EGRESS_MODE == both ]] || die 'Небезопасный режим выхода'
+[[ $TARGET_PROFILE_SET == basic || $TARGET_PROFILE_SET == dpi || $TARGET_PROFILE_SET == all ]] || die 'Небезопасный набор профилей'
+[[ $TARGET_TLS_MODE != none || $TARGET_PROFILE_SET == basic ]] || die 'Расширенный набор требует доверенный сертификат'
+export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
@@ -373,6 +382,18 @@ if [[ ! -f $state/xhttp.done && -f /etc/germanyvpn-xhttp-test/promotion.json ]];
   phase xhttp python3 "$runtime/scripts/finalize-xhttp.py" --verify
 else
   phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
+fi
+if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
+  # The established six/four profile gate runs before the selected portfolio
+  # changes subscription rows. It cannot be used after filtering or expansion.
+  installer_error_context baseline-verify "$state/baseline-verify.log"
+  phase baseline-verify bash "$runtime/tests/postboot-verify.sh" --live
+  if [[ $TARGET_PROFILE_SET != basic ]]; then
+    installer_error_context portfolio-runtime "$state/portfolio-runtime.log"
+    phase portfolio-runtime python3 -I -B "$runtime/portfolio/install.py" --apply
+  fi
+  installer_error_context portfolio-publish "$state/portfolio-publish.log"
+  phase portfolio-publish python3 -I -B "$destination/tools/portfolio_publish.py" --apply
 fi
 # The production timer keeps Certbot's random spread; an interactive install
 # should run its one acceptance renewal immediately.

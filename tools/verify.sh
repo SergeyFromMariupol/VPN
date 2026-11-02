@@ -8,6 +8,9 @@ verify_fail() {
 [[ $EUID == 0 ]] || exit 1
 readonly bundle='/var/lib/vpn-installer/bundle'
 source "$bundle/scripts/target-contract.sh"
+if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
+  exec bash /opt/vpn-installer/tools/verify-portfolio.sh
+fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   bash "$bundle/base/install-certbot.sh" --check-only
   bash "$bundle/base/install-cert-reconcile.sh" --check-only
