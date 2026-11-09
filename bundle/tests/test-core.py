@@ -147,7 +147,7 @@ class TargetAddressContract(unittest.TestCase):
                    TARGET_REALITY_SNI='max.ru', TARGET_ADDRESS_MODE='domain', TARGET_LABEL='Мой VPN')
         env.update(changes)
         result = subprocess.run([sys.executable, '-c', CONTRACT_CODE], env=env, capture_output=True)
-        self.assertEqual(result.returncode == 0, success, 'target contract returned unexpected status')
+        self.assertEqual(result.returncode == 0, success, result.stderr.decode(errors='replace'))
 
     def test_domain(self):
         self.check(True)
@@ -157,6 +157,20 @@ class TargetAddressContract(unittest.TestCase):
 
     def test_ip_must_equal_public_ipv4(self):
         self.check(False, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='45.67.89.11')
+
+    def test_ip_mode_accepts_secondary_ipv4_and_managed_lineage(self):
+        self.check(True, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='45.67.89.10',
+                   TARGET_ADDITIONAL_IPV4='45.67.89.11 45.67.89.12',
+                   TARGET_CERT_NAME='vpn-ip-' + 'a' * 24)
+
+    def test_ip_mode_rejects_invalid_secondary_ipv4(self):
+        for invalid in ('45.67.89.10', '10.0.0.1', '224.0.0.1', '45.67.89.11 45.67.89.11'):
+            with self.subTest(addresses=invalid):
+                self.check(False, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='45.67.89.10',
+                           TARGET_ADDITIONAL_IPV4=invalid)
+
+    def test_domain_mode_rejects_secondary_ipv4(self):
+        self.check(False, TARGET_ADDITIONAL_IPV4='45.67.89.11')
 
     def test_domain_mode_does_not_accept_ip_literal(self):
         self.check(False, TARGET_FQDN='45.67.89.10')

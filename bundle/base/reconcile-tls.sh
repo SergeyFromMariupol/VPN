@@ -10,7 +10,7 @@ hook60=/etc/letsencrypt/renewal-hooks/deploy/60-krysyuk-standalone-xui
 hook80=/etc/letsencrypt/renewal-hooks/deploy/80-germanyvpn-portfolio
 portfolio_root=/etc/germanyvpn-portfolio
 portfolio_state=$portfolio_root/state.json
-lineage="/etc/letsencrypt/live/$TARGET_FQDN"
+lineage="/etc/letsencrypt/live/${TARGET_CERT_NAME:-$TARGET_FQDN}"
 [[ -f $hook60 && ! -L $hook60 &&
    $(stat -c '%u:%g:%a:%h' "$hook60") == 0:0:750:1 ]] || exit 1
 RENEWED_LINEAGE="$lineage" bash "$hook60"

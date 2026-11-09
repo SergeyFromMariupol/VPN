@@ -8,6 +8,10 @@ verify_fail() {
 [[ $EUID == 0 ]] || exit 1
 readonly bundle='/var/lib/vpn-installer/bundle'
 source "$bundle/scripts/target-contract.sh"
+bash "$bundle/tests/verify-happ-routing.sh"
+if [[ $TARGET_ADDRESS_MODE == ip && -f /var/lib/vpn-installer/ip-address.done ]]; then
+  python3 -E -s -B /opt/vpn-installer/bundle/base/ip_reconcile.py --check
+fi
 if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
   exec bash /opt/vpn-installer/tools/verify-portfolio.sh
 fi
@@ -35,7 +39,7 @@ if [[ $TARGET_ADDRESS_MODE == domain ]]; then
   done
 fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  openssl x509 -in "/etc/letsencrypt/live/$TARGET_FQDN/fullchain.pem" -noout -checkend 86400 >/dev/null || verify_fail VERIFY_CERT
+  verify_target_certificate "/etc/letsencrypt/live/$TARGET_CERT_NAME/fullchain.pem" || verify_fail VERIFY_CERT
 fi
 current_boot=$(cat /proc/sys/kernel/random/boot_id)
 if [[ $current_boot != "$(cat /var/lib/vpn-installer/install-boot-id)" ]]; then

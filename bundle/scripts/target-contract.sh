@@ -15,9 +15,13 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_CERT_NAME=''
+  TARGET_ADDITIONAL_IPV4=''
   source /etc/germanyvpn-target.env
 fi
 TARGET_FQDN=${TARGET_FQDN:?TARGET_FQDN is required}
+TARGET_CERT_NAME=${TARGET_CERT_NAME:-$TARGET_FQDN}
+TARGET_ADDITIONAL_IPV4=${TARGET_ADDITIONAL_IPV4:-}
 TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
@@ -55,6 +59,7 @@ TARGET_LABEL=${TARGET_LABEL:?TARGET_LABEL is required}
 ((TARGET_SSH_PORT >= 1 && TARGET_SSH_PORT <= 65535 && TARGET_DEVICE_LIMIT <= 10000)) || return 1
 [[ $TARGET_REALITY_SNI =~ ^[a-z0-9.-]+$ && $TARGET_REALITY_SNI != *cloudflare* ]] || return 1
 export TARGET_IPV4 TARGET_FQDN TARGET_ADDRESS_MODE TARGET_INTERFACE TARGET_SSH_PORT TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_LABEL
+export TARGET_CERT_NAME TARGET_ADDITIONAL_IPV4
 if ! python3 - <<'PY'
 import ipaddress
 import os
@@ -68,6 +73,15 @@ if mode not in ('domain', 'ip'):
     raise SystemExit('TARGET_ADDRESS_MODE must be domain or ip')
 if mode == 'ip' and os.environ['TARGET_FQDN'] != str(address):
     raise SystemExit('IP endpoint must equal TARGET_IPV4')
+aliases = [ipaddress.IPv4Address(value) for value in os.environ.get('TARGET_ADDITIONAL_IPV4', '').split()]
+if (address in aliases or len(aliases) > 99 or len(set(aliases)) != len(aliases) or
+        any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in aliases)):
+    raise SystemExit('Invalid secondary IPv4 set')
+cert_name = os.environ.get('TARGET_CERT_NAME') or os.environ['TARGET_FQDN']
+if mode == 'domain' and (aliases or cert_name != os.environ['TARGET_FQDN']):
+    raise SystemExit('Domain installations require their domain certificate')
+if mode == 'ip' and cert_name != str(address) and not re.fullmatch(r'vpn-ip-[a-f0-9]{24}', cert_name):
+    raise SystemExit('Invalid IP certificate name')
 for field in (('TARGET_FQDN', 'TARGET_REALITY_SNI') if mode == 'domain' else ('TARGET_REALITY_SNI',)):
     name = os.environ[field]
     if len(name) > 253 or len(name.split('.')) < 2 or any(

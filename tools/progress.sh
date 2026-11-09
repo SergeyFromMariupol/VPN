@@ -17,6 +17,7 @@ _installer_progress_label() {
     portfolio-runtime) printf 'Дополнительные протоколы';;
     portfolio-publish) printf 'Публикация подписки';;
     renewal) printf 'Проверка продления TLS';; verify) printf 'Итоговая проверка';;
+    ip-address) printf 'Автоматическая смена IP';;
     preflight) printf 'Проверка сервера';; bootstrap) printf 'Подготовка установки';;
     sni-check) printf 'Проверка REALITY SNI';; *) return 1;;
   esac
@@ -42,6 +43,9 @@ _installer_progress_phases() {
   fi
   if [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then phases+=(renewal); fi
   phases+=(verify)
+  if [[ ${TARGET_ADDRESS_MODE:-domain} == ip && ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then
+    phases+=(ip-address)
+  fi
   printf '%s\n' "${phases[@]}"
 }
 

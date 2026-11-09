@@ -1,0 +1,22 @@
+[Unit]
+Description=Serve native subscriptions for secondary VPN IPv4 addresses
+After=network-online.target
+Before=nginx.service
+
+[Service]
+User=www-data
+Group=www-data
+UMask=0007
+RuntimeDirectory=vpn-ip-feed
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/python3 -E -s -B /usr/local/lib/vpn-ip-feed/ip_feed.py /run/vpn-ip-feed/feed.sock /etc/vpn-ip-addresses/proxy.json
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

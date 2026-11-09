@@ -131,10 +131,10 @@ class ProcessSubstitution(unittest.TestCase):
                 path = root / 'bin' / name
                 path.write_text(program, encoding='utf-8')
                 path.chmod(0o700)
-            release = re.search(r"readonly release='([^']+)'", source).group(1)
+            source_ref = re.search(r"readonly source_ref='([^']+)'", source).group(1)
             environment = dict(os.environ, FIXTURE_ROOT=str(root), RAW_URL=RAW_URL,
-                               ARCHIVE_URL='https://github.com/SergeyFromMariupol/VPN/archive/refs/tags/'
-                                           + release + '.tar.gz')
+                               ARCHIVE_URL='https://github.com/SergeyFromMariupol/VPN/archive/'
+                                           + source_ref + '.tar.gz')
             assignments = [name + '=' + environment[name]
                            for name in ('FIXTURE_ROOT', 'RAW_URL', 'ARCHIVE_URL')]
             result = subprocess.run([*self.prefix, 'env', *assignments, 'bash', '-s', '--',

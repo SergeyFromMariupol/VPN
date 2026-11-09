@@ -234,7 +234,8 @@ jq --exit-status --rawfile connector "$stage/connector.uuid" '
   and .routing.rules[0].inboundTag==["api"] and .routing.rules[0].outboundTag=="api"
   and .routing.rules[1].protocol==["bittorrent"] and .routing.rules[1].outboundTag=="BLOCK"
   and .routing.rules[2].inboundTag==["dns_cf","dns_q9"] and .routing.rules[2].outboundTag=="DIRECT"
-  and .routing.rules[3].ip==["geoip:private","::/0",(env.TARGET_IPV4+"/32")]
+  and .routing.rules[3].ip==(["geoip:private","::/0",(env.TARGET_IPV4+"/32")]
+    + (env.TARGET_ADDITIONAL_IPV4 | split(" ") | map(select(length > 0) + "/32")))
   and .routing.rules[3].outboundTag=="BLOCK"
   and .routing.rules[4].domain==[("full:"+env.PUBLIC_FQDN)]
   and .routing.rules[4].outboundTag=="BLOCK"

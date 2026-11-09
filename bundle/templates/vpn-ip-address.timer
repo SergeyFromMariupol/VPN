@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for local public IPv4 changes
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=3min
+Unit=vpn-ip-address.service
+
+[Install]
+WantedBy=timers.target

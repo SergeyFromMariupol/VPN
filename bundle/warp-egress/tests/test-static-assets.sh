@@ -374,4 +374,7 @@ bash "$bundle_root/tests/test-health-watchdog-semantics.sh" >/dev/null
 bash "$bundle_root/tests/test-bootstrap-plan-safety.sh" >/dev/null
 bash "$bundle_root/tests/test-partial-netns-cleanup.sh" >/dev/null
 bash "$bundle_root/tests/test-phase-checkpoints.sh" >/dev/null
+if [[ $EUID == 0 && -f $bundle_root/../tests/test-ip-alias-network.sh ]]; then
+  bash "$bundle_root/../tests/test-ip-alias-network.sh"
+fi
 printf '%s\n' 'WARP_EGRESS_NETNS_STATIC_ASSETS_OK=1'

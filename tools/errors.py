@@ -27,6 +27,7 @@ STAGES = {
     'panel': 'Панель управления',
     'nginx-restart': 'Настройка Nginx',
     'cert-reconcile': 'Обновление сертификатов',
+    'ip-address': 'Автоматическая смена IP',
     'warp': 'Cloudflare WARP',
     'dual': 'Профили VPN',
     'xhttp': 'Транспорт XHTTP',

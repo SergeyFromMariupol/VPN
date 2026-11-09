@@ -32,6 +32,7 @@ readonly tls_private_key="$tls_root/privkey.pem"
 readonly letsencrypt_live="/etc/letsencrypt/live/$PUBLIC_FQDN"
 readonly decoy_root='/var/www/krysyuk-standalone-decoy'
 readonly hardening_source="$(cd -- "$(dirname -- "$0")/../templates" && pwd -P)/20-krysyuk-nonroot-hardening.conf"
+readonly happ_routing="$(dirname -- "${BASH_SOURCE[0]}")/happ_routing.py"
 readonly hardening_target='/etc/systemd/system/x-ui.service.d/20-krysyuk-nonroot-hardening.conf'
 readonly renew_hook='/etc/letsencrypt/renewal-hooks/deploy/60-krysyuk-standalone-xui'
 readonly backup_root='/var/backups/krysyuk-standalone'
@@ -524,14 +525,17 @@ invalid_code=$(curl --proto '=http' --silent --show-error --max-time 10 \
 
 api_post --output "$stage/settings-before.json" "$api_url/setting/all"
 jq --exit-status '.success == true and (.obj|type=="object")' "$stage/settings-before.json" >/dev/null
+python3 -I -B "$happ_routing" --link >"$stage/happ-routing.link"
 jq --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" \
   --arg panel_path "/$PANEL_BASE_PATH/" --arg sub_path "/$SUBSCRIPTION_PATH/" \
   --arg sub_uri "$TARGET_PUBLIC_SCHEME://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
-  --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" '
+  --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" \
+  --rawfile happ_routing "$stage/happ-routing.link" '
   .obj
   | .webListen="127.0.0.1" | .webPort=2053 | .webDomain="" | .webBasePath=$panel_path
   | .webCertFile="" | .webKeyFile="" | .trustedProxyCIDRs="127.0.0.1/32,::1/128"
   | .subEnable=true | .subJsonEnable=false | .subJsonAutoDetect=false
+  | .subEnableRouting=true | .subRoutingRules=($happ_routing | rtrimstr("\n"))
   | .subListen=$ip | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
   | .subCertFile=$cert | .subKeyFile=$key | .remarkTemplate="{{COMMENT}}"
 ' "$stage/settings-before.json" >"$stage/settings-intended.json"
@@ -712,8 +716,10 @@ fi
 
 subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
 curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
-  --user-agent 'v2rayN/7' --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
+  --user-agent Happ --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
+  --dump-header "$stage/subscription.headers" \
   --output "$stage/subscription.body" "$subscription_url"
+python3 -I -B "$happ_routing" --check-headers <"$stage/subscription.headers"
 [[ -s "$stage/subscription.body" ]] || die 'subscription body is empty'
 
 SUB_BODY="$stage/subscription.body" CHECK_PUBLIC_FQDN="$PUBLIC_FQDN" \

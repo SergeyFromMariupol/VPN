@@ -33,7 +33,7 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
     systemctl is-active --quiet "$unit"
     systemctl is-enabled --quiet "$unit"
   done
-  verify_target_certificate "/etc/letsencrypt/live/$TARGET_FQDN/fullchain.pem"
+  verify_target_certificate "/etc/letsencrypt/live/$TARGET_CERT_NAME/fullchain.pem"
 fi
 bash "$bundle/base/install-nginx-restart.sh" --check-only
 nginx -t >/dev/null 2>&1
