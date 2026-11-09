@@ -88,19 +88,30 @@ wizard_reality_sni() {
 }
 
 wizard_custom_profiles() {
-  local selector="${1%/*}/portfolio_catalog.py" numbers chosen profile_count
+  local selector="${1%/*}/portfolio_catalog.py" numbers chosen='' profile_count status=0
   wizard_section 'Профили' 'Ручной выбор'
-  python3 -B "$selector" --menu --egress "$TARGET_EGRESS_MODE" || return 1
-  wizard_note 'Введите номера через пробел или запятую. Диапазон можно указать как 1-3.'
-  while true; do
-    wizard_read numbers 'Номера профилей: ' || return 1
-    if chosen=$(python3 -B "$selector" --choose="$numbers" --egress "$TARGET_EGRESS_MODE" 2>/dev/null); then
-      IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
-      wizard_note "Выбрано профилей: $profile_count."
-      return 0
-    fi
-    wizard_error 'Выберите хотя бы один профиль. Проверьте номера, диапазоны и повторы.'
-  done
+  if [[ ${TERM:-dumb} != dumb ]]; then
+    chosen=$(LC_ALL=C.UTF-8 python3 -B "$selector" --checklist --egress "$TARGET_EGRESS_MODE" \
+      3>&1 </dev/tty >/dev/tty) || status=$?
+    case $status in
+      0) ;;
+      69) wizard_note 'Терминал не поддерживает список с галочками. Выберите по номерам.' ;;
+      *) wizard_error 'Выбор прерван. Установка не началась.'; return 1 ;;
+    esac
+  fi
+  if [[ -z $chosen ]]; then
+    python3 -B "$selector" --menu --egress "$TARGET_EGRESS_MODE" || return 1
+    wizard_note 'Введите номера через пробел или запятую. Диапазон можно указать как 1-3.'
+    while true; do
+      wizard_read numbers 'Номера профилей: ' || return 1
+      if chosen=$(python3 -B "$selector" --choose="$numbers" --egress "$TARGET_EGRESS_MODE" 2>/dev/null); then
+        break
+      fi
+      wizard_error 'Выберите хотя бы один профиль. Проверьте номера, диапазоны и повторы.'
+    done
+  fi
+  IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
+  wizard_note "Выбрано профилей: $profile_count."
 }
 
 collect_vpn_parameters() {

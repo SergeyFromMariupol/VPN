@@ -171,12 +171,111 @@ def select_numbers(egress_mode: str, selection: str) -> list[dict]:
     return [row for number, row in enumerate(rows, 1) if number in chosen]
 
 
+def write_selection(rows: list[dict], output) -> None:
+    roles = {row["egress"] for row in rows}
+    mode = "both" if len(roles) == 2 else roles.pop()
+    print(mode, ",".join(row["id"] for row in rows), len(rows), file=output)
+
+
+def checklist(egress_mode: str) -> int:
+    """Draw on the terminal and return the saved selection through fd 3."""
+    try:
+        import curses
+        import locale
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return 69
+        locale.setlocale(locale.LC_ALL, "")
+        curses.setupterm(fd=sys.stdout.fileno())
+        if not curses.tigetstr("cup") or not curses.tigetstr("clear"):
+            return 69
+    except ImportError:
+        return 69
+    except (curses.error, locale.Error):
+        return 69
+
+    rows = select_profiles("all", egress_mode, "VPN")
+
+    def choose(screen):
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        cursor = first = 0
+        checked = set()
+        notice = ""
+        while True:
+            height, width = screen.getmaxyx()
+            screen.erase()
+            compact = height < 7 or width < 24
+            visible = max(1, height - 5)
+            if compact:
+                if height > 0 and width > 1:
+                    screen.addstr(0, 0, "Увеличьте окно или Esc."[:width - 1])
+            else:
+                first = min(first, max(0, len(rows) - visible))
+                if cursor < first:
+                    first = cursor
+                elif cursor >= first + visible:
+                    first = cursor - visible + 1
+                end = min(first + visible, len(rows))
+
+                def line(y, text, attr=0):
+                    screen.addstr(y, 0, text[:width - 1], attr)
+
+                line(0, "Выберите профили", curses.A_BOLD)
+                line(1, "↑/↓ — курсор   Пробел — отметить   PgUp/PgDn — листать")
+                line(2, "Enter — подтвердить   Esc — отменить")
+                line(3, f"Отмечено: {len(checked)} из {len(rows)}   Строки {first + 1}–{end}")
+                for index in range(first, end):
+                    row = rows[index]
+                    marker = "x" if index in checked else " "
+                    egress = "WARP" if row["egress"] == "warp" else "IP"
+                    name = row["name"].rsplit(" · ", 1)[-1]
+                    attr = curses.A_REVERSE if index == cursor else 0
+                    line(index - first + 4, f"[{marker}] {egress:4}  {name}", attr)
+                line(height - 1, notice, curses.A_BOLD)
+            screen.refresh()
+
+            key = screen.getch()
+            if key in (-1, 4, 27):
+                return None
+            if compact:
+                continue
+            moves = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                     curses.KEY_PPAGE: -visible, curses.KEY_NPAGE: visible}
+            if key in moves:
+                cursor = max(0, min(len(rows) - 1, cursor + moves[key]))
+            elif key == curses.KEY_HOME:
+                cursor = 0
+            elif key == curses.KEY_END:
+                cursor = len(rows) - 1
+            elif key == ord(" "):
+                checked.symmetric_difference_update({cursor})
+                notice = ""
+            elif key in (10, 13, curses.KEY_ENTER):
+                if checked:
+                    return [rows[index] for index in sorted(checked)]
+                notice = "Отметьте хотя бы один профиль."
+
+    try:
+        selected = curses.wrapper(choose)
+    except KeyboardInterrupt:
+        return 1
+    if selected is None:
+        return 1
+    with os.fdopen(3, "w", encoding="utf-8") as output:
+        write_selection(selected, output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--set", dest="profile_set", choices=PROFILE_SETS)
     action.add_argument("--menu", action="store_true")
     action.add_argument("--choose")
+    action.add_argument("--checklist", action="store_true")
     parser.add_argument("--egress", choices=EGRESS_MODES, required=True)
     parser.add_argument("--label", default=os.environ.get("TARGET_LABEL"))
     parser.add_argument("--ids", default=os.environ.get("TARGET_PROFILE_IDS", ""))
@@ -189,10 +288,9 @@ def main(argv: list[str] | None = None) -> int:
             for number, row in enumerate(select_profiles("all", args.egress, "VPN"), 1):
                 print(f"  {number:3}. {row['name'].removeprefix('VPN · ')}")
         elif args.choose is not None:
-            rows = select_numbers(args.egress, args.choose)
-            roles = {row["egress"] for row in rows}
-            mode = "both" if len(roles) == 2 else roles.pop()
-            print(mode, ",".join(row["id"] for row in rows), len(rows))
+            write_selection(select_numbers(args.egress, args.choose), sys.stdout)
+        elif args.checklist:
+            return checklist(args.egress)
         else:
             if args.label is None:
                 parser.error("--label or TARGET_LABEL is required")
