@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.4.2'
+readonly release='v1.4.3'
 readonly source_ref='dfbad3f2c8295caf01b2f4d894ad279e96e94597'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'

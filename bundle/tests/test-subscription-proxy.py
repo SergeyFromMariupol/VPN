@@ -28,6 +28,9 @@ SUBSCRIPTION_PATH = f'/{PATH_PREFIX}/fixture'
 LABEL = 'Тест 🇩🇪 «Профиль»'
 INCY_AGENT = 'INCY/3.9.9/android Dalvik/2.1.0'
 COPY_URL = 'https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/bundle/scripts/android-app-bypass.txt'
+PAGE_MARKER = b'<div id="app"></div>'
+HTML = b'<!doctype html><html><body>' + PAGE_MARKER + b'</body></html>'
+INFO = json.dumps({'marker': PAGE_MARKER.decode()}).encode()
 OWNER_METADATA = {
     'Profile-Web-Page-Url': 'https://fixture.example/home',
     'Announce': 'Owner notice',
@@ -43,6 +46,20 @@ class Subscription(BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.headers['Host'] == 'fixture.example:2096'
         assert self.headers['X-Forwarded-Proto'] == 'https'
+        if self.path == SUBSCRIPTION_PATH + '?format=info':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(INFO)
+            return
+        if self.path in (SUBSCRIPTION_PATH + '?html=1', SUBSCRIPTION_PATH + '?view=html') or (
+                self.path == SUBSCRIPTION_PATH and self.headers.get('Accept') == 'text/html'):
+            assert self.headers.get('Accept-Encoding') is None
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(HTML)
+            return
         assert self.path == SUBSCRIPTION_PATH
         if self.server.hold_requests and self.headers['User-Agent'] == INCY_AGENT:
             self.server.arrivals.put(None)
@@ -62,10 +79,10 @@ class Subscription(BaseHTTPRequestHandler):
         pass
 
 
-def request(address, agent, tls, source=None):
+def request(address, agent, tls, source=None, *, path=SUBSCRIPTION_PATH, extra_headers=None):
     conn = HTTPSConnection(address, 2096, timeout=12, context=tls, source_address=source)
     try:
-        conn.request('GET', SUBSCRIPTION_PATH, headers={'User-Agent': agent})
+        conn.request('GET', path, headers={'User-Agent': agent, **(extra_headers or {})})
         with conn.getresponse() as response:
             fields = ''.join(f'{name}: {value}\r\n' for name, value in response.getheaders())
             raw = f'HTTP/1.1 {response.status} {response.reason}\r\n{fields}\r\n'.encode('ascii')
@@ -96,6 +113,24 @@ def check_requests(address, provider_id, tls):
         else:
             assert metadata.get('Announce') is None, (address, agent)
         assert body == body_for(address), (address, agent)
+
+
+def check_browser_copy_panel(tls):
+    asset_path = '/android-app-bypass.js'
+    script_tag = b'<script src="/android-app-bypass.js" defer referrerpolicy="no-referrer"></script>'
+    for query, extra in (('', {'Accept': 'text/html'}), ('?html=1', {}), ('?view=html', {})):
+        raw, body = request(PUBLIC, 'Mozilla/5.0', tls, path=SUBSCRIPTION_PATH + query,
+                            extra_headers={'Accept-Encoding': 'gzip', **extra})
+        assert raw.startswith(b'HTTP/1.1 200'), query
+        assert body == HTML.replace(PAGE_MARKER, PAGE_MARKER + script_tag), query
+    raw, script = request(PUBLIC, 'Mozilla/5.0', tls, path=asset_path)
+    assert raw.startswith(b'HTTP/1.1 200')
+    assert b'content-type: application/javascript; charset=utf-8\r\n' in raw.lower()
+    packages = (BUNDLE / 'scripts/android-app-bypass.txt').read_text(encoding='ascii')
+    assert b'const packages = ' + json.dumps(packages).encode() + b';' in script
+    assert b'navigator.clipboard.writeText(packages)' in script
+    _, info = request(PUBLIC, 'Mozilla/5.0', tls, path=SUBSCRIPTION_PATH + '?format=info')
+    assert info == INFO
 
 
 def check_owner_metadata(upstream, tls):
@@ -192,7 +227,7 @@ with tempfile.TemporaryDirectory(prefix='vpn-subscription-proxy-') as directory:
                                   'daemon off;\nmaster_process off;\nevents {}\nhttp {\n'
                                   'access_log off;\n'
                                   'limit_conn_zone $binary_remote_addr zone=krysyuk_panel_connections:1m;\n'
-                                  + temp_paths + proxy + '}\n', encoding='ascii')
+                                  + temp_paths + proxy + '}\n', encoding='utf-8')
                 command = ['nginx', '-e', 'stderr', '-p', directory, '-c', str(config)]
                 subprocess.run([*command, '-t'], check=True)
                 with subprocess.Popen(command, stderr=subprocess.PIPE) as nginx:
@@ -201,6 +236,7 @@ with tempfile.TemporaryDirectory(prefix='vpn-subscription-proxy-') as directory:
                         for address in (PUBLIC, ALIAS):
                             check_requests(address, provider_id, client_tls)
                         if provider_id:
+                            check_browser_copy_panel(client_tls)
                             check_owner_metadata(upstream, client_tls)
                             check_concurrent_alias_requests(upstream, client_tls)
                     finally:

@@ -70,6 +70,11 @@ def subscription_proxy(target):
             scheme not in ('https', 'http')):
         raise ValueError('Invalid subscription proxy settings')
     template = SCRIPT_DIR.parent / 'templates/3x-ui-subscription.nginx.conf'
+    packages = app_list()
+    script = template.with_name('android-app-bypass.js').read_text(encoding='utf-8')
+    script = script.replace('__ANDROID_PACKAGES_JSON__', json.dumps(packages.replace(',', '\n') + '\n'))
+    if '$' in script:
+        raise ValueError('Unexpected Nginx variable in Android package script')
     replacements = {
         '__SERVER_IPV4__': target['TARGET_IPV4'],
         '__PUBLIC_FQDN__': target['TARGET_FQDN'],
@@ -79,7 +84,8 @@ def subscription_proxy(target):
         '__SUB_CERT__': ('ssl_certificate /etc/krysyuk-standalone/tls/fullchain.pem;\n'
                          '    ssl_certificate_key /etc/krysyuk-standalone/tls/privkey.pem;\n'
                          '    ssl_protocols TLSv1.2 TLSv1.3;' if scheme == 'https' else ''),
-        '__ANDROID_APP_LIST__': app_list(),
+        '__ANDROID_APP_LIST__': packages,
+        '__ANDROID_APPS_JS__': json.dumps(script, ensure_ascii=False),
         '__ANDROID_APP_LIST_URL__': 'https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/bundle/scripts/android-app-bypass.txt',
         '__ANDROID_APP_LIST_ANNOUNCE__': 'base64:' + base64.b64encode(
             'Скопировать список приложений Android'.encode('utf-8')).decode('ascii'),
@@ -117,7 +123,7 @@ if __name__ == '__main__':
     if sys.argv[1:] == ['--link']:
         print(routing_link(os.environ['TARGET_LABEL']))
     elif sys.argv[1:] == ['--nginx']:
-        sys.stdout.write(subscription_proxy(os.environ))
+        sys.stdout.buffer.write(subscription_proxy(os.environ).encode('utf-8'))
     elif sys.argv[1:2] == ['--check-headers'] and sys.argv[2:] in ([], ['happ'], ['incy'], ['v2raytun']):
         client = sys.argv[2] if len(sys.argv) == 3 else ''
         try:
