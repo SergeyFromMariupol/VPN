@@ -12,8 +12,8 @@ source "$access_file"
 
 for client in happ incy v2raytun; do
   case "$client" in
-    happ) user_agent=Happ ;;
-    incy) user_agent=INCY/1.0/android ;;
+    happ) user_agent=Happ/4.10.1/Android/37 ;;
+    incy) user_agent='INCY/3.9.9/android Dalvik/2.1.0' ;;
     v2raytun) user_agent=v2RayTun ;;
   esac
   curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \

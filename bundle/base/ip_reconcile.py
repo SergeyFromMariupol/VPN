@@ -305,8 +305,8 @@ def activate(units, timers, panel=True):
 
 
 def verify_feeds(primary, aliases, path):
-    happ_agent = "Happ"
-    for ua in (happ_agent, "INCY/1.0/android", "v2RayTun", "Karing"):
+    happ_agent = "Happ/4.10.1/Android/37"
+    for ua in (happ_agent, "INCY/3.9.9/android Dalvik/2.1.0", "v2RayTun", "Karing"):
         body, headers = fetch_feed(primary, path, ua)
         if ua == happ_agent:
             primary_links = uri_lines(body)
