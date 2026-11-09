@@ -174,7 +174,8 @@ def environment():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('TARGET_') and key not in ('SSH_CONNECTION', 'ACME_EMAIL', 'NO_COLOR')}
     env.update(PATH=str(root / 'bin') + ':/usr/sbin:/usr/bin:/sbin:/bin',
-               FIXTURE_ROOT=str(root), FIXTURE_PYTHON=real_python, LC_ALL='C', LANG='C',
+               FIXTURE_ROOT=str(root), FIXTURE_PYTHON=real_python, LANG='C',
+               LC_ALL='C.UTF-8' if 'checklist_keys' in settings else 'C',
                TERM=settings.get('term', 'dumb'),
                FIXTURE_TLS_FAIL_SNIS=','.join(settings.get('tls_fail_snis', [])))
     if settings.get('ssh_connection'):
@@ -190,8 +191,11 @@ def questionnaire_steps():
     profile_answers = settings.get('profile_answers', [settings.get('profile_choice', '1')])
     steps.extend(('Выберите набор [1]:', value) for value in profile_answers)
     if profile_answers[-1] == '4':
-        steps.extend(('Номера профилей:', value) for value in
-                     settings.get('custom_answers', ['1']))
+        if 'checklist_keys' in settings:
+            steps.append(('[ ]', settings['checklist_keys'].encode('ascii')))
+        else:
+            steps.extend(('Номера профилей:', value) for value in
+                         settings.get('custom_answers', ['1']))
     if not settings.get('ssh_connection'):
         steps.append(('SSH порт', settings.get('port', '2222')))
     menu = settings.get('menu_answers', [settings.get('address_choice', '2')])
@@ -221,6 +225,8 @@ def questionnaire_steps():
 def transcript(steps, eof=None):
     pid, descriptor = pty.fork()
     if pid == 0:
+        if 'checklist_keys' in settings:
+            termios.tcsetwinsize(0, (24, 100))
         attributes = termios.tcgetattr(0)
         attributes[3] &= ~termios.ECHO
         termios.tcsetattr(0, termios.TCSANOW, attributes)
@@ -251,7 +257,10 @@ def transcript(steps, eof=None):
                     index = len(steps)
                 else:
                     event('ANSWER:' + str(index))
-                    os.write(descriptor, (steps[index][1] + '\n').encode('utf-8'))
+                    answer = steps[index][1]
+                    if isinstance(answer, str):
+                        answer = (answer + '\n').encode('utf-8')
+                    os.write(descriptor, answer)
                     index += 1
                 buffer = ''
         _, status = os.waitpid(pid, 0)
@@ -565,6 +574,27 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_IDS'], ids)
+
+    def test_custom_checklist_uses_arrows_space_and_enter(self):
+        # The terminal uses application cursor sequences after keypad(True).
+        up, down = '\x1bOA', '\x1bOB'
+        keys = '\r' + down + ' ' + down + ' ' + up + ' ' + up + ' ' + '\r'
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              profile_choice='4', term='xterm-256color', checklist_keys=keys)
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertIn('ANSWER:2', result['events'])
+        self.assertNotIn('Номера профилей:', result['output'])
+        self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
+        self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], 'warp')
+        self.assertEqual(result['persisted']['TARGET_PROFILE_IDS'],
+                         'vless-reality-grpc-warp,vless-reality-xhttp-packet-up-warp')
+        self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '2')
+
+    def test_custom_checklist_escape_cancels_before_persistence(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              profile_choice='4', term='xterm-256color', checklist_keys=' \x1b')
+        self.assertIn('ANSWER:2', result['events'])
+        self.assert_unpublished(result)
 
     def test_invalid_selection_publishes_nothing(self):
         selected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
