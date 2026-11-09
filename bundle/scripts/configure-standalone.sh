@@ -730,9 +730,9 @@ fi
 
 subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
 curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
-  --header 'Accept: text/html' --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
-  --output "$stage/subscription-page.html" --config - <<<"url = \"$subscription_url\""
-grep -Fqf <(printf 'data-sub-url="%s"\n' "$subscription_url") "$stage/subscription-page.html" ||
+  --header 'Accept: application/json' --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
+  --output "$stage/subscription-info.json" --config - <<<"url = \"${subscription_url}?format=info\""
+[[ "$(jq -er '.subUrl' "$stage/subscription-info.json")" == "$subscription_url" ]] ||
   die 'the subscription page (including its QR code) does not advertise the working subscription URL'
 curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
   --user-agent Happ --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
