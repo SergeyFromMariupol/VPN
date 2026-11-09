@@ -173,7 +173,7 @@ collect_vpn_parameters() {
   wizard_read ACME_EMAIL 'Email для Let’s Encrypt (необязательно) [пусто]: ' '' || return 1
 
   wizard_section 'Happ' 'Обход VPN для приложений Android'
-  wizard_note 'Для автоматической настройки в Happ нужен Provider ID. Настройте привязку к хосту подписки в кабинете happ-proxy.com.'
+  wizard_note 'Список обхода передаётся всегда. Для автоматического применения Happ нужен премиальный Provider ID, привязанный к хосту подписки.'
   wizard_note 'С Provider ID Happ раз в сутки отправляет своему сервису ID устройства, название и версию ОС и хеш хоста подписки.'
   while true; do
     wizard_read TARGET_HAPP_PROVIDER_ID 'Happ Provider ID (необязательно) [пусто]: ' || return 1

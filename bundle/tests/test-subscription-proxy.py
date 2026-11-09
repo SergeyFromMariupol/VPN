@@ -73,6 +73,9 @@ def check_requests(address, provider_id, tls):
     for client, agent in agents:
         headers, body = request(address, agent, tls)
         assert METADATA['check_headers'](headers, LABEL, client, provider_id), (address, agent)
+        if client == 'happ' and not provider_id:
+            assert b'\r\nper-app-proxy-mode: bypass\r\n' in headers.lower(), (address, agent)
+            assert b'\r\nproviderid:' not in headers.lower(), (address, agent)
         assert body == body_for(address), (address, agent)
 
 
