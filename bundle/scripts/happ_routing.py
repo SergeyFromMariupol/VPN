@@ -81,7 +81,6 @@ def subscription_proxy(target):
                          '    ssl_protocols TLSv1.2 TLSv1.3;' if scheme == 'https' else ''),
         '__ANDROID_APP_LIST__': app_list(),
         '__HAPP_PROVIDER_ID__': provider_id,
-        '__HAPP_APP_MODE__': 'bypass' if provider_id else '',
         '__INCY_ROUTING__': routing_link(target['TARGET_LABEL']),
         '__V2RAYTUN_ROUTING__': v2raytun_header(target['TARGET_LABEL']),
     }
@@ -101,7 +100,7 @@ def check_headers(raw, profile_name, client='', provider_id=''):
     routing = v2raytun_header(profile_name) if client == 'v2raytun' else routing_link(profile_name)
     expected = {'Routing-Enable': ['true'], 'Routing': [routing]}
     if client:
-        bypass = client == 'incy' or (client == 'happ' and provider_id)
+        bypass = client in ('happ', 'incy')
         expected.update({
             'per-app-proxy-enable': ['1'] if client == 'incy' else None,
             'per-app-proxy-mode': ['bypass'] if bypass else None,

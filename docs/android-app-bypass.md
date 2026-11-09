@@ -74,7 +74,7 @@
 
 ## Happ
 
-При установке сервера укажите **Provider ID**, привязанный к адресу подписки в Happ. На Android список придёт при импорте или обновлении подписки и добавится к уже выбранным приложениям. Если адрес подписки меняется, проверьте привязку нового адреса у Happ. [Provider ID в Happ](https://www.happ.su/main/ru/dev-docs/provider-id)
+Подписка передаёт список обхода для Happ на Android при импорте и обновлении, в том числе с пустым Provider ID. Для автоматического применения Happ проверяет премиальный статус **Provider ID**, привязанного к адресу подписки. Если адрес подписки меняется, проверьте привязку нового адреса у Happ. [Настройки Happ](https://www.happ.su/main/ru/dev-docs/app-management#upravlenie-nastroikami-prilozheniya) · [Проверка Provider ID](https://docs.happ-proxy.com/ru/getting-started/how-to-start)
 
 Чтобы выбрать приложения вручную, выполните два шага.
 
