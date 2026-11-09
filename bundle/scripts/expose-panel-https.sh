@@ -38,6 +38,108 @@ die() {
   exit 1
 }
 
+owned_file() {
+  [[ -f $1 && ! -L $1 && $(stat -c '%u:%g:%a:%h' -- "$1") == "0:0:$2:1" ]]
+}
+
+render_nginx_config() {
+  PANEL_BASE_PATH="$PANEL_BASE_PATH" NGINX_TEMPLATE="$nginx_template" python3 - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+text = Path(os.environ['NGINX_TEMPLATE']).read_text()
+for key, value in {
+    '__SERVER_IPV4__': os.environ['TARGET_IPV4'], '__PUBLIC_FQDN__': os.environ['TARGET_FQDN'],
+    '__PANEL_BASE_PATH__': os.environ['PANEL_BASE_PATH'],
+}.items():
+    text = text.replace(key, value)
+sys.stdout.write(text)
+PY
+  SUBSCRIPTION_PATH="$SUBSCRIPTION_PATH" python3 -I -B "$bundle_root/scripts/happ_routing.py" --nginx
+}
+
+render_access() {
+  PANEL_URL="$panel_url" ACCESS_SOURCE="$1" EXPECTED_SUBSCRIPTION_URL="$subscription_url" python3 - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+lines = [line for line in Path(os.environ['ACCESS_SOURCE']).read_text().splitlines()
+         if not line.startswith('PANEL_URL=')]
+expected = 'SUBSCRIPTION_URL=' + os.environ['EXPECTED_SUBSCRIPTION_URL']
+if [line for line in lines if line.startswith('SUBSCRIPTION_URL=')] != [expected]:
+    raise SystemExit('Subscription URL differs from managed server settings')
+lines.append('PANEL_URL=' + os.environ['PANEL_URL'])
+sys.stdout.write('\n'.join(lines) + '\n')
+PY
+}
+
+verify_panel_publication() {
+  local public_status root_status
+  ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
+    die 'loopback 3X-UI backend disappeared'
+  ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" ||
+    die 'public HTTPS panel listener is missing'
+  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+    die 'panel proxy unexpectedly listens on a wildcard address'
+  fi
+  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]"; then
+    die 'nginx unexpectedly occupies public TCP/80'
+  fi
+  public_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
+    --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
+    --output /dev/null --write-out '%{http_code}' "$panel_url")
+  [[ $public_status == 200 || $public_status == 302 ]] ||
+    die "unexpected public panel HTTPS status: $public_status"
+  root_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
+    --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
+    --output /dev/null --write-out '%{http_code}' \
+    "${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/")
+  [[ $root_status == 404 ]] || die "unexpected public root HTTPS status: $root_status"
+  nginx -t
+  sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
+  systemctl is-active --quiet x-ui.service
+  if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl is-active --quiet certbot.timer; fi
+  bash "$bundle_root/tests/panel-login-acceptance.sh" >/dev/null
+  bash "$bundle_root/tests/verify-happ-routing.sh"
+}
+
+recover_committed_panel() (
+  local backup stage sites
+  local -a snapshots=("$backup_root"/????????T??????Z-panel-public-https)
+  backup=${snapshots[-1]}
+  [[ ${backup##*/} =~ ^[0-9]{8}T[0-9]{6}Z-panel-public-https$ &&
+     -d $backup && ! -L $backup && $(stat -c '%u:%g:%a' -- "$backup") == 0:0:700 ]] &&
+    owned_file "$backup/PROVISION_COMMITTED" 600 && [[ ! -s $backup/PROVISION_COMMITTED ]] &&
+    owned_file "$backup/SHA256SUMS" 600 && owned_file "$backup/access.env" 600 &&
+    (cd -- "$backup"; sha256sum --check --strict SHA256SUMS >/dev/null) ||
+    die 'existing public panel has no intact committed provisioning snapshot'
+  sites=$(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print)
+  [[ $sites == "$nginx_config" ]] && owned_file "$nginx_config" 600 ||
+    die 'existing Nginx configuration is not the managed panel and subscription configuration'
+  stage=$(mktemp -d -p /run panel-readback.XXXXXXXX)
+  trap 'rm -rf -- "$stage"' EXIT
+  render_nginx_config >"$stage/3x-ui-public.conf"
+  cmp -s "$stage/3x-ui-public.conf" "$nginx_config" || die 'managed Nginx configuration differs'
+  render_access "$backup/access.env" >"$stage/access.env"
+  cmp -s "$stage/access.env" "$access_file" ||
+    die 'managed access file differs from committed panel settings'
+  if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+    owned_file "$renew_hook" 755 && cmp -s "$renew_hook_source" "$renew_hook" ||
+      die 'managed panel renewal hook differs'
+    systemctl is-enabled --quiet certbot.timer || die 'certbot timer is not enabled'
+  else
+    [[ ! -e $renew_hook && ! -L $renew_hook ]] || die 'unexpected panel renewal hook'
+  fi
+  systemctl is-active --quiet nginx.service && systemctl is-enabled --quiet nginx.service ||
+    die 'nginx is not active and enabled'
+  python3 -I -B "$bundle_root/scripts/network-contract.py" --target-ip "$SERVER_IPV4" \
+    --interface "$PUBLIC_INTERFACE" --ssh-port "$TARGET_SSH_PORT" --promoted 0
+  verify_panel_publication
+  printf 'PANEL_PUBLIC_HTTPS_RECOVERED=1\nPANEL_PUBLIC_HTTPS_OK=1\n'
+)
+
 while (($#)); do
   case "$1" in
     --check-only) mode='check' ;;
@@ -54,12 +156,15 @@ for command_name in awk cat cmp cp curl date dirname dpkg-query find grep instal
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
 done
 
-[[ -f "$runtime_env" && ! -L "$runtime_env" ]] || die 'server.env is missing or unsafe'
-[[ -f "$access_file" && ! -L "$access_file" ]] || die 'access.env is missing or unsafe'
+owned_file "$runtime_env" 600 || die 'server.env is missing or unsafe'
+owned_file "$access_file" 600 || die 'access.env is missing or unsafe'
 # shellcheck disable=SC1090
 source "$runtime_env"
 [[ "${PANEL_BASE_PATH:-}" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || die 'panel base path is invalid'
 [[ "${SUBSCRIPTION_PATH:-}" =~ ^[a-f0-9]{40}$ ]] || die 'subscription base path is invalid'
+[[ "${SUBSCRIPTION_ID:-}" =~ ^[a-f0-9]{64}$ ]] || die 'subscription ID is invalid'
+readonly panel_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/${PANEL_BASE_PATH}/"
+readonly subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
 
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 [[ -f "$tls_fullchain" && ! -L "$tls_fullchain" ]] || die 'TLS full chain is missing or unsafe'
@@ -80,14 +185,8 @@ ip -4 -o address show dev "$PUBLIC_INTERFACE" scope global | grep -Fq " $SERVER_
   die 'public IPv4 is not assigned to the expected interface'
 ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
   die '3X-UI backend is not loopback-only on TCP/2053'
-if ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]"; then
-  die 'public TCP/2053 is already occupied'
-fi
 ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" ||
   die '3X-UI subscription backend is not loopback-only on TCP/2096'
-if ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW"; then
-  die 'UFW already permits TCP/2053; reviewed merge required'
-fi
 [[ "$(ufw status | sed -n '1p')" == 'Status: active' ]] || die 'UFW is not active'
 
 backend_status=$(curl --proto '=http' --silent --show-error --max-time 15 \
@@ -106,6 +205,16 @@ renew_hook_source="$bundle_root/templates/70-krysyuk-standalone-nginx"
 
 dpkg-query -W -f='${db:Status-Status}' nginx 2>/dev/null | grep -qx installed ||
   die 'base/install-pinned-base.sh must install nginx first'
+if [[ $mode == apply && (-e $nginx_config || -L $nginx_config) ]]; then
+  recover_committed_panel
+  exit 0
+fi
+if ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]"; then
+  die 'public TCP/2053 is already occupied'
+fi
+if ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW"; then
+  die 'UFW already permits TCP/2053; reviewed merge required'
+fi
 [[ -z $(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print -quit) ]] ||
   die 'nginx contains enabled sites/configs; reviewed merge required'
 ! systemctl is-active --quiet nginx.service || die 'nginx must be stopped before panel transaction'
@@ -198,20 +307,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-PANEL_BASE_PATH="$PANEL_BASE_PATH" NGINX_TEMPLATE="$nginx_template" \
-  NGINX_RENDERED="$stage/3x-ui-public.conf" python3 - <<'PY'
-import os
-from pathlib import Path
-text = Path(os.environ['NGINX_TEMPLATE']).read_text()
-for key,value in {
-    '__SERVER_IPV4__':os.environ['TARGET_IPV4'], '__PUBLIC_FQDN__':os.environ['TARGET_FQDN'],
-    '__PANEL_BASE_PATH__':os.environ['PANEL_BASE_PATH']
-}.items():
-    text=text.replace(key,value)
-Path(os.environ['NGINX_RENDERED']).write_text(text)
-PY
-SUBSCRIPTION_PATH="$SUBSCRIPTION_PATH" python3 -I -B "$bundle_root/scripts/happ_routing.py" --nginx \
-  >>"$stage/3x-ui-public.conf"
+render_nginx_config >"$stage/3x-ui-public.conf"
 grep -Fq '__' "$stage/3x-ui-public.conf" && die 'unresolved nginx template placeholder'
 install -o root -g root -m 0600 "$stage/3x-ui-public.conf" "$nginx_config"
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
@@ -229,47 +325,10 @@ ufw allow in on "$PUBLIC_INTERFACE" to "$SERVER_IPV4" port "$PANEL_PORT" \
 ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" ||
   die 'UFW did not permit TCP/2053'
 
-panel_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/${PANEL_BASE_PATH}/"
-PANEL_URL="$panel_url" ACCESS_SOURCE="$access_file" ACCESS_RENDERED="$stage/access.env" python3 - <<'PY'
-import os
-from pathlib import Path
-lines = [line for line in Path(os.environ['ACCESS_SOURCE']).read_text().splitlines()
-         if not line.startswith('PANEL_URL=')]
-lines.append('PANEL_URL='+os.environ['PANEL_URL'])
-Path(os.environ['ACCESS_RENDERED']).write_text('\n'.join(lines)+'\n')
-PY
+render_access "$access_file" >"$stage/access.env"
 install -o root -g root -m 0600 "$stage/access.env" "$access_file"
 
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
-  die 'loopback 3X-UI backend disappeared'
-ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" ||
-  die 'public HTTPS panel listener is missing'
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
-  die 'panel proxy unexpectedly listens on a wildcard address'
-fi
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]"; then
-  die 'nginx unexpectedly occupies public TCP/80'
-fi
-
-public_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
-  --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
-  --output /dev/null --write-out '%{http_code}' "$panel_url")
-[[ "$public_status" == 200 || "$public_status" == 302 ]] ||
-  die "unexpected public panel HTTPS status: $public_status"
-root_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
-  --resolve "${PUBLIC_FQDN}:${PANEL_PORT}:${SERVER_IPV4}" \
-  --output /dev/null --write-out '%{http_code}' \
-  "${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${PANEL_PORT}/")
-[[ "$root_status" == 404 ]] || die "unexpected public root HTTPS status: $root_status"
-unset public_status root_status panel_url
-
-nginx -t
-sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
-systemctl is-active --quiet x-ui.service
-if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl is-active --quiet certbot.timer; fi
-
-bash "$bundle_root/tests/panel-login-acceptance.sh" >/dev/null
-bash "$bundle_root/tests/verify-happ-routing.sh"
+verify_panel_publication
 touch "$backup/PROVISION_COMMITTED"
 chmod 0600 "$backup/PROVISION_COMMITTED"
 committed=1
