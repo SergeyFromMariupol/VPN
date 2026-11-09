@@ -41,8 +41,10 @@ class Subscription(BaseHTTPRequestHandler):
             self.server.arrivals.put(None)
             assert self.server.release_requests.wait(15)
         self.send_response(200)
-        self.send_header('Routing', METADATA['routing_link'](LABEL))
-        self.send_header('Routing-Enable', 'true')
+        # 3X-UI 3.11 suppresses native Happ routing headers for INCY.
+        if not self.headers.get('User-Agent', '').lower().startswith('incy/'):
+            self.send_header('Routing', METADATA['routing_link'](LABEL))
+            self.send_header('Routing-Enable', 'true')
         self.end_headers()
         self.wfile.write(body_for(PUBLIC))
 

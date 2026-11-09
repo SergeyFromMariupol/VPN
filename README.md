@@ -203,8 +203,8 @@ INCY на Android получает список приложений для об
 
 | Компонент | Версия / транспорт |
 | --- | --- |
-| 3X-UI | 3.7.0, непривилегированный пользователь xui |
-| Xray | 26.7.28, проверка SHA-256 до установки |
+| 3X-UI | 3.11.0, непривилегированный пользователь xui |
+| Xray | 26.10.21, проверка SHA-256 до установки |
 | WARP | Только для вариантов 1 и 3: 2026.7.1377.0, отдельный network namespace |
 | Certbot | 5.9.0, отдельное Python-окружение, зависимости закреплены SHA-256 |
 | REALITY | VLESS/gRPC TCP443, chrome, без flow |
@@ -452,8 +452,8 @@ jq-фильтры и проверяют URI по независимо задан
 Новая чистая установка v1.2.6 с нуля в обоих режимах, мобильные GUI-импорты, независимые
 внешние REALITY 24/24 и скорость остаются отдельными непроверенными этапами.
 
-Исходные релизы: [3X-UI](https://github.com/MHSanaei/3x-ui/releases/tag/v3.7.0),
-[Xray](https://github.com/XTLS/Xray-core/releases/tag/v26.7.28),
+Исходные релизы: [3X-UI](https://github.com/MHSanaei/3x-ui/releases/tag/v3.11.0),
+[Xray](https://github.com/XTLS/Xray-core/releases/tag/v26.10.21),
 [Cloudflare Linux packages](https://pkg.cloudflareclient.com/).
 [Официальное описание IP-сертификатов в Certbot](https://letsencrypt.org/2026/03/11/shorter-certs-certbot/).
 Закреплённые версии не заменяются новыми автоматически. При исчезновении файла

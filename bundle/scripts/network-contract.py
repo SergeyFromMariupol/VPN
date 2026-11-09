@@ -16,7 +16,7 @@ from typing import NamedTuple
 
 NGINX_EXECUTABLE = '/usr/sbin/nginx'
 DHCP_EXECUTABLES = frozenset(('/usr/lib/systemd/systemd-networkd', '/usr/sbin/dhclient'))
-XRAY_SHA256 = '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
+XRAY_SHA256 = 'a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e'
 MAIN_XRAY = '/usr/local/x-ui/bin/xray-linux-amd64'
 XHTTP_XRAY = '/usr/local/lib/germanyvpn-xhttp-test/xray'
 

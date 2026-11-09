@@ -39,9 +39,9 @@ bash "$bundle/base/install-nginx-restart.sh" --check-only
 nginx -t >/dev/null 2>&1
 [[ $(sqlite3 -readonly /etc/x-ui/x-ui.db 'PRAGMA quick_check;') == ok ]]
 [[ $(ps -p "$(systemctl show x-ui -p MainPID --value)" -o user= | xargs) == xui ]]
-[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.7.0 ]]
+[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.11.0 ]]
 printf '%s  %s\n' \
-  64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d \
+  a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e \
   /usr/local/x-ui/bin/xray-linux-amd64 | sha256sum --check --strict - >/dev/null
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin \
   /usr/local/x-ui/bin/xray-linux-amd64 run -test \

@@ -84,13 +84,14 @@ systemctl disable --now warp-svc.service >/dev/null 2>&1 || true
 [[ -x /usr/lib/systemd/systemd-socket-proxyd ]] || \
   die 'systemd-socket-proxyd is missing'
 
-release_base="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}"
+# Official Xray-linux-64.zip and .dgst assets for the version pinned above.
+release_assets='https://api.github.com/repos/XTLS/Xray-core/releases/assets'
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-  --retry 2 --connect-timeout 15 --max-time 300 \
-  "${release_base}/${XRAY_RELEASE_ARCHIVE}" --output "$stage/xray.zip"
+  --retry 2 --connect-timeout 15 --max-time 300 --header 'Accept: application/octet-stream' \
+  "${release_assets}/${XRAY_RELEASE_ASSET}?download=1" --output "$stage/xray.zip"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-  --retry 2 --connect-timeout 15 --max-time 300 \
-  "${release_base}/${XRAY_RELEASE_ARCHIVE}.dgst" --output "$stage/xray.zip.dgst"
+  --retry 2 --connect-timeout 15 --max-time 300 --header 'Accept: application/octet-stream' \
+  "${release_assets}/${XRAY_DIGEST_ASSET}?download=1" --output "$stage/xray.zip.dgst"
 expected_sha=$(grep -Eio '[0-9a-fA-F]{64}' "$stage/xray.zip.dgst" | head -n 1 || true)
 [[ ${#expected_sha} -eq 64 ]] || die 'could not parse the official Xray SHA-256 digest'
 actual_sha=$(sha256sum "$stage/xray.zip" | awk '{print $1}')

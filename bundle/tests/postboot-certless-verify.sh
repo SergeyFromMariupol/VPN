@@ -28,8 +28,8 @@ trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 grep -Fxq 'ID=ubuntu' /etc/os-release
 grep -Fxq 'VERSION_ID="24.04"' /etc/os-release
 [[ $(uname -m) == x86_64 ]]
-[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.7.0 ]]
-printf '%s  %s\n' '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d' "$xray" |
+[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.11.0 ]]
+printf '%s  %s\n' 'a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e' "$xray" |
   sha256sum --check --strict - >/dev/null
 for file in "$runtime_root/server.env" "$runtime_root/admin-api.token" \
   "$runtime_root/access.env" "$connector_env" "$warp_deployed_boot"; do
