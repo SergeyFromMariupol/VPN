@@ -20,7 +20,7 @@ SUB_PATH = re.compile(r"/[0-9a-f]{32,128}/[A-Za-z0-9_-]{1,128}")
 ROUTING_HEADERS = frozenset({"routing-enable", "routing", "providerid", "per-app-proxy-enable",
                              "per-app-proxy-mode", "per-app-proxy-list"})
 HEADERS = frozenset({"subscription-userinfo", "profile-update-interval", "profile-title",
-                     "support-url", "profile-web-page-url", "announce", "hide-settings"}) | ROUTING_HEADERS
+                     "support-url", "profile-web-page-url", "announce", "announce-url", "hide-settings"}) | ROUTING_HEADERS
 CLIENT_HEADERS = ("User-Agent", "X-Hwid", "X-Device-Os", "X-Ver-Os", "X-Device-Model")
 URI_SCHEMES = {"vless", "vmess", "trojan", "hysteria2", "hy2"}
 

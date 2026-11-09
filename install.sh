@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.4.1'
+readonly release='v1.4.2'
 readonly source_ref='652aa2aeb98d91be84f5b482fb1b53a025fefd9d'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
@@ -443,6 +443,7 @@ fi
 installer_success 'VPN успешно установлен!'
 printf '\nСохраните данные доступа:\n\n'
 cat /etc/krysyuk-standalone/access.env
+printf '\nСписок пакетов Android для импорта:\nhttps://raw.githubusercontent.com/%s/main/bundle/scripts/android-app-bypass.txt\n' "$repository"
 printf '\nЧтобы снова показать эти данные, выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --show-access\n'
 printf '\nДля проверки VPN после перезагрузки выполните команду целиком:\n\nbash /opt/vpn-installer/install.sh --verify\n\n'
 printf 'Проверку скорости и импорт в приложения выполните со своего подключения.\n'
