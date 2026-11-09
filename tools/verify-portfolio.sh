@@ -72,7 +72,7 @@ fi
 network_args=(--target-ip "$TARGET_IPV4" --interface "$TARGET_INTERFACE"
   --ssh-port "$TARGET_SSH_PORT" --promoted 1 --tls-mode "$TARGET_TLS_MODE"
   --egress-mode "$TARGET_EGRESS_MODE")
-if [[ $TARGET_PROFILE_SET != basic ]]; then
+if (( TARGET_EXTRA_PROFILE_COUNT > 0 )); then
   systemctl is-active --quiet germanyvpn-portfolio.service
   systemctl is-enabled --quiet germanyvpn-portfolio.service
   python3 -I -B "$bundle/portfolio/install.py" --verify

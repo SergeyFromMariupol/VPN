@@ -165,7 +165,7 @@ def target():
     result.setdefault("TARGET_EGRESS_MODE", "both")
     result.setdefault("TARGET_PROFILE_SET", "basic")
     need(result.get("TARGET_TLS_MODE", "letsencrypt") == "letsencrypt" and
-         result["TARGET_PROFILE_SET"] in ("dpi", "all") and
+         result["TARGET_PROFILE_SET"] in ("dpi", "all", "custom") and
          result["TARGET_EGRESS_MODE"] in ("warp", "direct", "both"),
          "PORTFOLIO_TARGET_MODE")
     need(result.get("TARGET_IPV4") and result.get("TARGET_FQDN") and
@@ -177,15 +177,25 @@ def target():
 def rows_for(target_info):
     rows = select_profiles(target_info["TARGET_PROFILE_SET"],
                            target_info["TARGET_EGRESS_MODE"],
-                           target_info["TARGET_LABEL"])
-    rows = [row for row in rows if row["baseline_reuse"] is False]
-    counts = {("dpi", "both"): 92, ("all", "both"): 140,
-              ("dpi", "warp"): 46, ("dpi", "direct"): 46,
-              ("all", "warp"): 70, ("all", "direct"): 70}
-    need(len(rows) == counts[(target_info["TARGET_PROFILE_SET"],
-                              target_info["TARGET_EGRESS_MODE"])],
-         "PORTFOLIO_SELECTED_COUNT")
+                           target_info["TARGET_LABEL"],
+                           target_info.get("TARGET_PROFILE_IDS", ""))
+    rows = [row for row in rows if not row["baseline_reuse"]]
+    profile_set = target_info["TARGET_PROFILE_SET"]
+    if profile_set != "custom":
+        count = {"dpi": 46, "all": 70}[profile_set]
+        if target_info["TARGET_EGRESS_MODE"] == "both":
+            count *= 2
+        need(len(rows) == count, "PORTFOLIO_SELECTED_COUNT")
+    need(bool(rows), "PORTFOLIO_SELECTED_COUNT")
     return rows
+
+
+def same_target(info, state):
+    return (state["target"] == info["TARGET_IPV4"] and
+            state["interface"] == info["TARGET_INTERFACE"] and
+            state["profile_set"] == info["TARGET_PROFILE_SET"] and
+            state["egress_mode"] == info["TARGET_EGRESS_MODE"] and
+            state.get("profile_ids", "") == info.get("TARGET_PROFILE_IDS", ""))
 
 
 def keypair():
@@ -482,10 +492,7 @@ def occupied_ports():
 def verify(info, state, *, allow_pending=False):
     need(state["phase"] == "committed" or allow_pending,
          "PORTFOLIO_NOT_COMMITTED")
-    need(state["target"] == info["TARGET_IPV4"] and
-         state["interface"] == info["TARGET_INTERFACE"] and
-         state["profile_set"] == info["TARGET_PROFILE_SET"] and
-         state["egress_mode"] == info["TARGET_EGRESS_MODE"] and
+    need(same_target(info, state) and
          state["catalog_sha256"] == sha(CATALOG.read_bytes()),
          "PORTFOLIO_TARGET_DRIFT")
     check_snapshot(Path(state["backup"]))
@@ -540,8 +547,9 @@ def verify(info, state, *, allow_pending=False):
                  unquote(parsed.fragment) == recipe["name"],
                  "PORTFOLIO_SHARE_URI")
     config = json.loads(private(CONF))
-    selected_outbounds = ({"DIRECT", "BLOCK"} if info["TARGET_EGRESS_MODE"] == "direct"
-                          else {"DIRECT", "BLOCK", "WARP_CF"})
+    selected_outbounds = {"DIRECT", "BLOCK"}
+    if any(row["egress"] == "warp" for row in expected_rows):
+        selected_outbounds.add("WARP_CF")
     need({inbound["port"] for inbound in config["inbounds"]} ==
          {int(port) for port in state["ports"]} and
          {outbound["tag"] for outbound in config["outbounds"]} == selected_outbounds and
@@ -591,9 +599,7 @@ def verify(info, state, *, allow_pending=False):
 
 def rollback(info, state):
     need(state["phase"] == "pending", "PORTFOLIO_ROLLBACK_PHASE")
-    need(state["target"] == info["TARGET_IPV4"] and
-         state["interface"] == info["TARGET_INTERFACE"],
-         "PORTFOLIO_ROLLBACK_TARGET_DRIFT")
+    need(same_target(info, state), "PORTFOLIO_ROLLBACK_TARGET_DRIFT")
     check_snapshot(Path(state["backup"]))
     if UNIT.exists():
         run_command(["systemctl", "disable", "--now", UNIT_NAME],
@@ -654,6 +660,7 @@ def compensate_after_failure(info, state, original):
 
 
 def apply(info):
+    rows = rows_for(info)
     prior = read_state()
     if prior and prior["phase"] == "committed":
         verify(info, prior)
@@ -672,7 +679,6 @@ def apply(info):
     need(sha(XRAY.read_bytes()) == XRAY_SHA256 and
          TLS_CERT.is_file() and TLS_KEY.is_file(), "PORTFOLIO_PINNED_BASE")
     tls_initial_sha256 = sha(TLS_CERT.read_bytes())
-    rows = rows_for(info)
     main = json.loads(MAIN.read_bytes())
     config, manifest, networks = build(info, main, rows,
                                        shared_credentials, profile_credentials)
@@ -699,6 +705,7 @@ def apply(info):
     state = {"version": 1, "phase": "pending", "target": info["TARGET_IPV4"],
              "interface": info["TARGET_INTERFACE"],
              "profile_set": info["TARGET_PROFILE_SET"],
+             "profile_ids": info.get("TARGET_PROFILE_IDS", ""),
              "egress_mode": info["TARGET_EGRESS_MODE"],
              "catalog_sha256": sha(CATALOG.read_bytes()),
              "profile_count": len(manifest["entries"]), "ports": ports,

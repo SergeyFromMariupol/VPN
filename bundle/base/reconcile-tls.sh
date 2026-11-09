@@ -14,7 +14,11 @@ lineage="/etc/letsencrypt/live/${TARGET_CERT_NAME:-$TARGET_FQDN}"
 [[ -f $hook60 && ! -L $hook60 &&
    $(stat -c '%u:%g:%a:%h' "$hook60") == 0:0:750:1 ]] || exit 1
 RENEWED_LINEAGE="$lineage" bash "$hook60"
-[[ $TARGET_PROFILE_SET != basic ]] || exit 0
+if [[ $TARGET_PROFILE_SET == custom ]]; then
+  ((TARGET_EXTRA_PROFILE_COUNT > 0)) || exit 0
+else
+  [[ $TARGET_PROFILE_SET != basic ]] || exit 0
+fi
 if [[ ! -e $portfolio_root && ! -L $portfolio_root ]]; then exit 0; fi
 [[ -d $portfolio_root && ! -L $portfolio_root &&
    $(stat -c '%u:%g:%a' "$portfolio_root") == 0:0:700 ]] || exit 1
@@ -22,7 +26,7 @@ if [[ ! -e $portfolio_state && ! -L $portfolio_state ]]; then exit 0; fi
 [[ -f $portfolio_state && ! -L $portfolio_state &&
    $(stat -c '%u:%g:%a:%h' "$portfolio_state") == 0:0:600:1 ]] || exit 1
 phase=$(python3 -I -B - "$portfolio_state" "$TARGET_IPV4" \
-  "$TARGET_PROFILE_SET" "$TARGET_EGRESS_MODE" <<'PY'
+  "$TARGET_PROFILE_SET" "$TARGET_EGRESS_MODE" "${TARGET_PROFILE_IDS:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -30,6 +34,7 @@ state = json.loads(Path(sys.argv[1]).read_bytes())
 if (state.get('target') != sys.argv[2] or
         state.get('profile_set') != sys.argv[3] or
         state.get('egress_mode') != sys.argv[4] or
+        state.get('profile_ids', '') != sys.argv[5] or
         state.get('phase') not in ('pending', 'committed')):
     raise SystemExit(1)
 print(state['phase'])

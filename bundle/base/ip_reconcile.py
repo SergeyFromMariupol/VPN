@@ -186,12 +186,62 @@ def replace_address(raw, old, new):
     return re.sub(pattern, new.encode("ascii"), raw)
 
 
-def ports_for(target):
+def custom_profile_rows(target):
+    if target["TARGET_PROFILE_SET"] != "custom":
+        return None
+    catalog = Path(__file__).resolve().parents[1] / "portfolio/portfolio_catalog.py"
+    spec = importlib.util.spec_from_file_location("vpn_ip_catalog", catalog)
+    selector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selector)
+    return selector.select_profiles("custom", target["TARGET_EGRESS_MODE"],
+                                    target["TARGET_LABEL"], target["TARGET_PROFILE_IDS"])
+
+
+def managed_json(path):
+    saved = state(path)
+    if (saved is None or saved.get("mode") != 0o600 or saved.get("uid") != 0 or
+            saved.get("gid") != 0):
+        raise RuntimeError("IP_UNSAFE_MANAGED_FILE")
+    return json.loads(decode(saved["data"]))
+
+
+def check_custom_publication(target, rows):
+    publication = managed_json(STATE / "portfolio-publication.json")
+    if (publication.get("status") != "committed" or
+            publication.get("target") != target["TARGET_IPV4"] or
+            publication.get("profile_set") != "custom" or
+            publication.get("egress") != target["TARGET_EGRESS_MODE"] or
+            publication.get("profile_ids") != target["TARGET_PROFILE_IDS"] or
+            publication.get("names") != [row["name"] for row in rows]):
+        raise RuntimeError("IP_PUBLICATION_SELECTION")
+
+
+def managed_portfolio(target, rows):
+    if target["TARGET_PROFILE_SET"] == "basic":
+        return None
+    extras = None if rows is None else [row for row in rows if not row["baseline_reuse"]]
+    if extras == []:
+        if PORTFOLIO.exists() or PORTFOLIO.is_symlink():
+            raise RuntimeError("IP_PORTFOLIO_UNEXPECTED")
+        return None
+    portfolio = managed_json(PORTFOLIO)
+    if (portfolio.get("phase") != "committed" or
+            portfolio.get("target") != target["TARGET_IPV4"] or
+            portfolio.get("profile_set") != target["TARGET_PROFILE_SET"] or
+            portfolio.get("egress_mode") != target["TARGET_EGRESS_MODE"] or
+            portfolio.get("profile_ids", "") != target.get("TARGET_PROFILE_IDS", "")):
+        raise RuntimeError("IP_PORTFOLIO_SELECTION")
+    if extras is not None and portfolio["ports"] != {
+            str(30000 + row["port_offset"]): row["network"] for row in extras}:
+        raise RuntimeError("IP_PORTFOLIO_PORT")
+    return portfolio
+
+
+def ports_for(target, portfolio):
     ports = {(443, "tcp"), (443, "udp"), (8444, "tcp")}
     if target["TARGET_EGRESS_MODE"] != "direct":
         ports.add((8443, "tcp"))
-    if target["TARGET_PROFILE_SET"] != "basic":
-        portfolio = json.loads(PORTFOLIO.read_bytes())
+    if portfolio is not None:
         for key, proto in portfolio["ports"].items():
             port = int(key)
             if not 30000 <= port <= 30126 or proto not in ("tcp", "udp"):
@@ -200,13 +250,13 @@ def ports_for(target):
     return ports
 
 
-def validate_firewall(target, status):
+def validate_firewall(target, status, portfolio):
     spec = importlib.util.spec_from_file_location("vpn_ip_network_contract",
                                                  BUNDLE / "scripts/network-contract.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    portfolio_ports = json.loads(PORTFOLIO.read_bytes())["ports"] if PORTFOLIO.exists() else {}
+    portfolio_ports = portfolio["ports"] if portfolio is not None else {}
     module.validate_ufw(status.decode("ascii"), target["TARGET_IPV4"], target["TARGET_INTERFACE"],
                         target["TARGET_SSH_PORT"], True, Path("/etc/default/ufw").read_text(),
                         portfolio_ports=portfolio_ports, egress_mode=target["TARGET_EGRESS_MODE"])
@@ -270,13 +320,13 @@ def database(edits, restore=False):
             raise RuntimeError("IP_DATABASE_CHECK")
 
 
-def services(target):
+def services(target, portfolio):
     units = list(BASE_UNITS)
     timers = list(IP_TIMERS)
     if target["TARGET_EGRESS_MODE"] != "direct":
         units = [*WARP_UNITS, *units]
         timers.append("krysyuk-warp-health.timer")
-    if target["TARGET_PROFILE_SET"] != "basic":
+    if portfolio is not None:
         units.append("germanyvpn-portfolio.service")
     return units, timers
 
@@ -320,7 +370,7 @@ def verify_feeds(primary, aliases, path):
     return primary_links
 
 
-def verify_alias_payloads(primary, aliases, path, ports, target):
+def verify_alias_payloads(primary, aliases, path, ports, target, rows):
     if not aliases:
         return
     spec = importlib.util.spec_from_file_location("vpn_ip_payload",
@@ -328,12 +378,16 @@ def verify_alias_payloads(primary, aliases, path, ports, target):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    expected = {}
-    classes = (("warp", "☁️ Cloudflare"), ("direct", "🖥️ IP сервера"))
-    for egress, suffix in classes:
-        if target["TARGET_EGRESS_MODE"] in (egress, "both"):
-            for protocol in ("REALITY", "HYSTERIA2", "XHTTP"):
-                expected[f"{target['TARGET_LABEL']} · {suffix} · {protocol}"] = egress == "warp"
+    if rows is not None:
+        expected = {row["name"]: row["egress"] == "warp" for row in rows
+                    if row["baseline_reuse"]}
+    else:
+        expected = {}
+        classes = (("warp", "☁️ Cloudflare"), ("direct", "🖥️ IP сервера"))
+        for egress, suffix in classes:
+            if target["TARGET_EGRESS_MODE"] in (egress, "both"):
+                for protocol in ("REALITY", "HYSTERIA2", "XHTTP"):
+                    expected[f"{target['TARGET_LABEL']} · {suffix} · {protocol}"] = egress == "warp"
     for address in aliases:
         # Test every translated TCP port and the actual baseline transports,
         # including a real QUIC handshake for the translated UDP/443 port.
@@ -453,7 +507,11 @@ def reconcile():
         print("IP_ADDRESS_UNCHANGED=1")
         return
 
-    units, timers = services(target)
+    rows = custom_profile_rows(target)
+    if rows is not None:
+        check_custom_publication(target, rows)
+    portfolio = managed_portfolio(target, rows)
+    units, timers = services(target, portfolio)
     directory = Path(tempfile.mkdtemp(prefix="vpn-ip-", dir="/var/backups"))
     transaction = Journal(directory, {"previous": previous, "old": old, "units": units,
                                       "timers": timers, "database": [], "files": [], "applying": False})
@@ -476,16 +534,16 @@ def reconcile():
         routes = run("bash", str(route_command)) if WARP_ROUTES.exists() else None
         atomic(directory / "nft-before.txt", run("nft", "-s", "list", "ruleset"))
         firewall = run("ufw", "status", "verbose")
-        validate_firewall(target, firewall)
+        validate_firewall(target, firewall, portfolio)
         atomic(directory / "ufw-before.txt", firewall)
         before_routes = portfolio_routes() if PORTFOLIO in plan.files else None
         if before_routes is not None:
-            portfolio = json.loads(plan.files[PORTFOLIO])
-            portfolio["ufw_before"] = [[primary if word == old else word for word in line]
-                                      for line in portfolio["ufw_before"]]
-            plan.files[PORTFOLIO] = json.dumps(portfolio, ensure_ascii=False,
+            moved_portfolio = json.loads(plan.files[PORTFOLIO])
+            moved_portfolio["ufw_before"] = [[primary if word == old else word for word in line]
+                                      for line in moved_portfolio["ufw_before"]]
+            plan.files[PORTFOLIO] = json.dumps(moved_portfolio, ensure_ascii=False,
                                                sort_keys=True, separators=(",", ":")).encode()
-        ports = ports_for(target)
+        ports = ports_for(target, portfolio)
         expected = nft_rules(primary, aliases, interface, ports)
         atomic(directory / "aliases.nft", expected)
         run("nft", "-c", "-f", str(directory / "aliases.nft"))
@@ -544,15 +602,15 @@ def reconcile():
                 time.sleep(1)
         for file, content in plan.final_files(MAIN.read_bytes(), uris).items():
             transaction.change(file, content)
-        verify_alias_payloads(primary, aliases, path, ports, target)
+        verify_alias_payloads(primary, aliases, path, ports, target, rows)
         if routes is not None and run("bash", str(route_command)) != routes:
             raise RuntimeError("IP_DEFAULT_ROUTE_CHANGED")
         if before_routes is not None:
             after_routes = portfolio_routes()
             if without_warp_link(after_routes) != without_warp_link(before_routes):
                 raise RuntimeError("IP_PORTFOLIO_ROUTES_CHANGED")
-            portfolio["routes_before"] = {key: digest(value) for key, value in after_routes.items()}
-            transaction.change(PORTFOLIO, json.dumps(portfolio, ensure_ascii=False, sort_keys=True,
+            moved_portfolio["routes_before"] = {key: digest(value) for key, value in after_routes.items()}
+            transaction.change(PORTFOLIO, json.dumps(moved_portfolio, ensure_ascii=False, sort_keys=True,
                                                      separators=(",", ":")).encode())
         run("bash", str(SOURCE / "tools/verify.sh"), timeout=600)
         if discover() != current:

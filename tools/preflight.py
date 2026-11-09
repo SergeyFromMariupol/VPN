@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+from runpy import run_path
 import secrets
 import socket
 import stat
@@ -162,13 +163,31 @@ def check_reality_target(sni: str) -> None:
         raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
 
 
+def validate_profile_selection(env: dict) -> None:
+    egress = env.get('TARGET_EGRESS_MODE', 'both')
+    profile_set = env.get('TARGET_PROFILE_SET', 'basic')
+    profile_ids = env.get('TARGET_PROFILE_IDS', '')
+    if egress not in ('warp', 'direct', 'both'):
+        raise ValueError('Invalid egress mode')
+    if profile_set not in ('basic', 'dpi', 'all', 'custom'):
+        raise ValueError('Invalid profile set')
+    if profile_set != 'custom':
+        if profile_ids:
+            raise ValueError('Profile IDs require a custom selection')
+        return
+    selector = Path(__file__).resolve().with_name('portfolio_catalog.py')
+    rows = run_path(str(selector))['select_profiles']('custom', egress, 'selection', profile_ids)
+    if profile_ids != ','.join(row['id'] for row in rows):
+        raise ValueError('Profile IDs must follow catalog order')
+    expected_egress = {'warp', 'direct'} if egress == 'both' else {egress}
+    if {row['egress'] for row in rows} != expected_egress:
+        raise ValueError('Egress must match the selected profiles')
+
+
 def validate_inputs(env: dict) -> None:
     if env.get('TARGET_TLS_MODE', 'letsencrypt') != 'letsencrypt':
         raise ValueError('New installations require Let\'s Encrypt')
-    if env.get('TARGET_EGRESS_MODE', 'both') not in ('warp', 'direct', 'both'):
-        raise ValueError('Invalid egress mode')
-    if env.get('TARGET_PROFILE_SET', 'basic') not in ('basic', 'dpi', 'all'):
-        raise ValueError('Invalid profile set')
+    validate_profile_selection(env)
     address = ipaddress.IPv4Address(env['TARGET_IPV4'])
     if not address.is_global:
         raise ValueError('A directly assigned public IPv4 is required (NAT VPS unsupported)')

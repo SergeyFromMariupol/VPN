@@ -33,6 +33,7 @@ target = root / 'target.env'
 events = root / 'events'
 real_python = sys.executable
 keys = ('TARGET_ADDRESS_MODE', 'TARGET_TLS_MODE', 'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET',
+        'TARGET_PROFILE_IDS',
         'TARGET_IPV4', 'TARGET_FQDN', 'TARGET_INTERFACE',
         'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL',
         'TARGET_HAPP_PROVIDER_ID')
@@ -186,8 +187,11 @@ def environment():
 def questionnaire_steps():
     steps = [('Выберите выход [3]:', value) for value in
              settings.get('egress_answers', [settings.get('egress_choice', '3')])]
-    steps.extend(('Выберите набор [1]:', value) for value in
-                 settings.get('profile_answers', [settings.get('profile_choice', '1')]))
+    profile_answers = settings.get('profile_answers', [settings.get('profile_choice', '1')])
+    steps.extend(('Выберите набор [1]:', value) for value in profile_answers)
+    if profile_answers[-1] == '4':
+        steps.extend(('Номера профилей:', value) for value in
+                     settings.get('custom_answers', ['1']))
     if not settings.get('ssh_connection'):
         steps.append(('SSH порт', settings.get('port', '2222')))
     menu = settings.get('menu_answers', [settings.get('address_choice', '2')])
@@ -287,7 +291,7 @@ try:
         if settings.get('legacy_without_tls_mode'):
             target.write_text(re.sub(r'^TARGET_TLS_MODE=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_selection'):
-            target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET)=.*\n', '', target.read_text(), flags=re.M))
+            target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET|PROFILE_IDS)=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_provider'):
             target.write_text(re.sub(r'^TARGET_HAPP_PROVIDER_ID=.*\n', '', target.read_text(), flags=re.M))
         before = target.read_bytes()
@@ -296,7 +300,8 @@ try:
         # Deliberately conflicting values must not replace saved answers.
         env.update(TARGET_LABEL='caller-must-not-win', ACME_EMAIL='caller@example.invalid',
                    TARGET_TLS_MODE='none' if settings.get('legacy_without_tls_mode') else 'letsencrypt',
-                   TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all', TARGET_HAPP_PROVIDER_ID='Caller99')
+                   TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all',
+                   TARGET_PROFILE_IDS='vless-reality-grpc-direct', TARGET_HAPP_PROVIDER_ID='Caller99')
         child = subprocess.run(['/bin/bash', str(installed / 'install.sh'), '--resume'],
                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                start_new_session=True, timeout=30)
@@ -389,7 +394,7 @@ class QuestionnaireFlow(unittest.TestCase):
     def test_default_sni_starts_install_and_resume_preserves_saved_parameters(self):
         injected = dict(ACME_EMAIL='caller@example.invalid', TARGET_LABEL='Caller VPN',
                         TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99',
-                        TARGET_TLS_MODE='none')
+                        TARGET_TLS_MODE='none', TARGET_PROFILE_IDS='vless-reality-grpc-warp')
         saved = dict(ACME_EMAIL='legacy@example.com', TARGET_LABEL='Старый VPN',
                      TARGET_REALITY_SNI='example.net', TARGET_DEVICE_LIMIT='17')
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='', resume=True,
@@ -398,7 +403,8 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['exit'], 0, result['output'])
         self.assert_wizard_labels_and_no_ip(result)
         expected = dict(TARGET_ADDRESS_MODE='ip', TARGET_TLS_MODE='letsencrypt',
-                        TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_IPV4='8.8.4.4',
+                        TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_PROFILE_IDS='',
+                        TARGET_IPV4='8.8.4.4',
                         TARGET_FQDN='8.8.4.4', TARGET_INTERFACE='enp1s0',
                         TARGET_SSH_PORT='2222', TARGET_DEVICE_LIMIT='0',
                         TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='',
@@ -541,6 +547,25 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(basic_direct['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '3')
         self.assertEqual(basic_direct['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
 
+    def test_custom_selection_persists_exact_ids_and_effective_egress(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                              profile_choice='4', custom_answers=['', '999', '3, 1-2'],
+                              resume=True)
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertEqual(result['output'].count('Номера профилей:'), 3)
+        self.assertIn('Выбрано профилей: 3.', result['output'])
+        self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
+        self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], 'warp')
+        ids = ('vless-reality-grpc-warp,hysteria2-tls-hysteria-warp,'
+               'vless-reality-xhttp-packet-up-warp')
+        self.assertEqual(result['persisted']['TARGET_PROFILE_IDS'], ids)
+        self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '3')
+        self.assertIn('PHASE:portfolio-publish', result['events'])
+        self.assertNotIn('PHASE:portfolio-runtime', result['events'])
+        self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
+        self.assertTrue(result['resume']['target_unchanged'])
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_IDS'], ids)
+
     def test_invalid_selection_publishes_nothing(self):
         selected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
                                 egress_answers=['bad', '1'], profile_answers=['bad', '3'])
@@ -551,6 +576,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(selected['output'].count('Выберите набор [1]:'), 2)
         self.assert_unpublished(self.fixture(egress_answers=['bad', None]))
         self.assert_unpublished(self.fixture(profile_answers=['bad', None]))
+        self.assert_unpublished(self.fixture(profile_choice='4', custom_answers=['1,1', None]))
 
     def test_legacy_saved_selection_defaults_ignore_caller_environment(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
@@ -559,6 +585,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_EGRESS_MODE'], 'both')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_SET'], 'basic')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_IDS'], '')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], '')
 
     def test_invalid_menu_retries_and_eof_cannot_start_installation(self):

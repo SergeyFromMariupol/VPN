@@ -134,6 +134,34 @@ class PortfolioPlanTest(unittest.TestCase):
         self.assertEqual([rule["outboundTag"] for rule in
                           config["routing"]["rules"][4:-1]], ["WARP_CF"] * 46)
 
+    def test_custom_sidecar_uses_only_chosen_extra_roles(self):
+        spec = importlib.util.spec_from_file_location("portfolio_install_custom",
+                                                       PORTFOLIO / "install.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"grp": types.ModuleType("grp"),
+                                      "pwd": types.ModuleType("pwd")}):
+            spec.loader.exec_module(module)
+        info = dict(TARGET, TARGET_PROFILE_SET="custom", TARGET_EGRESS_MODE="both",
+                    TARGET_LABEL="Sergey", TARGET_INTERFACE="eth0",
+                    TARGET_PROFILE_IDS="vless-reality-grpc-warp,vless-tls-tcp-direct")
+        rows = module.rows_for(info)
+        config, manifest, ports = build(info, MAIN, rows, shared, profile)
+        self.assertEqual([item["id"] for item in manifest["entries"]],
+                         ["vless-tls-tcp-direct"])
+        self.assertEqual([outbound["tag"] for outbound in config["outbounds"]],
+                         ["DIRECT", "BLOCK"])
+        self.assertEqual(ports, {30000: "tcp"})
+        state = {"target": info["TARGET_IPV4"], "interface": "eth0",
+                 "profile_set": "custom", "egress_mode": "both",
+                 "profile_ids": info["TARGET_PROFILE_IDS"]}
+        self.assertTrue(module.same_target(info, state))
+        self.assertFalse(module.same_target(
+            dict(info, TARGET_PROFILE_IDS="vless-reality-grpc-warp,vless-tls-ws-direct"),
+            state))
+        with self.assertRaisesRegex(RuntimeError, "PORTFOLIO_SELECTED_COUNT"):
+            module.rows_for(dict(info, TARGET_EGRESS_MODE="warp",
+                                 TARGET_PROFILE_IDS="vless-reality-grpc-warp"))
+
     def test_renewal_hook_and_firewall_conflict(self):
         # Linux-only account modules are inert at import time in this focused
         # test; the production runtime uses the system's real modules.

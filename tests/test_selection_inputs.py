@@ -22,7 +22,7 @@ TARGET = load('selection_target', 'tools/write-target.py')
 
 def inputs(**overrides):
     values = dict(TARGET_ADDRESS_MODE='ip', TARGET_TLS_MODE='letsencrypt',
-                  TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic',
+                  TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_PROFILE_IDS='',
                   TARGET_IPV4='8.8.4.4', TARGET_FQDN='8.8.4.4',
                   TARGET_INTERFACE='enp1s0', TARGET_SSH_PORT='22',
                   TARGET_DEVICE_LIMIT='0', TARGET_REALITY_SNI='max.ru',
@@ -51,6 +51,7 @@ class SelectionInputs(unittest.TestCase):
         values.pop('TARGET_TLS_MODE')
         values.pop('TARGET_EGRESS_MODE')
         values.pop('TARGET_PROFILE_SET')
+        values.pop('TARGET_PROFILE_IDS')
         values.pop('TARGET_HAPP_PROVIDER_ID')
         PREFLIGHT.validate_inputs(values)
         with tempfile.TemporaryDirectory() as directory:
@@ -60,11 +61,34 @@ class SelectionInputs(unittest.TestCase):
             self.assertEqual(shlex.split(stored['TARGET_TLS_MODE']), ['letsencrypt'])
             self.assertEqual(shlex.split(stored['TARGET_EGRESS_MODE']), ['both'])
             self.assertEqual(shlex.split(stored['TARGET_PROFILE_SET']), ['basic'])
+            self.assertEqual(shlex.split(stored['TARGET_PROFILE_IDS']), [''])
             self.assertEqual(shlex.split(stored['TARGET_HAPP_PROVIDER_ID']), [''])
+
+    def test_custom_selection_is_persisted_in_catalog_order(self):
+        ids = 'vless-reality-grpc-warp,hysteria2-tls-hysteria-direct'
+        values = inputs(TARGET_PROFILE_SET='custom', TARGET_PROFILE_IDS=ids)
+        PREFLIGHT.validate_inputs(values)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'target.env'
+            TARGET.write_target(path, values)
+            stored = dict(line.split('=', 1) for line in path.read_text().splitlines())
+            self.assertEqual(shlex.split(stored['TARGET_PROFILE_SET']), ['custom'])
+            self.assertEqual(shlex.split(stored['TARGET_PROFILE_IDS']), [ids])
 
     def test_invalid_selection_rejected_before_persistence(self):
         for changes in (dict(TARGET_EGRESS_MODE='invalid'),
                         dict(TARGET_PROFILE_SET='invalid'),
+                        dict(TARGET_PROFILE_IDS='vless-reality-grpc-warp'),
+                        dict(TARGET_PROFILE_SET='custom'),
+                        dict(TARGET_PROFILE_SET='custom', TARGET_PROFILE_IDS='not-in-catalog'),
+                        dict(TARGET_PROFILE_SET='custom',
+                             TARGET_PROFILE_IDS='vless-reality-grpc-warp'),
+                        dict(TARGET_PROFILE_SET='custom', TARGET_EGRESS_MODE='warp',
+                             TARGET_PROFILE_IDS='vless-reality-grpc-direct'),
+                        dict(TARGET_PROFILE_SET='custom', TARGET_EGRESS_MODE='warp',
+                             TARGET_PROFILE_IDS='vless-reality-grpc-warp,vless-reality-grpc-warp'),
+                        dict(TARGET_PROFILE_SET='custom',
+                             TARGET_PROFILE_IDS='hysteria2-tls-hysteria-direct,vless-reality-grpc-warp'),
                         dict(TARGET_LABEL='   '),
                         dict(TARGET_TLS_MODE='none'),
                         dict(TARGET_TLS_MODE='none', TARGET_PROFILE_SET='dpi'),

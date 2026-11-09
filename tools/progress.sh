@@ -23,6 +23,14 @@ _installer_progress_label() {
   esac
 }
 
+installer_has_extra_profiles() {
+  case ${TARGET_PROFILE_SET:-basic} in
+    basic) return 1;;
+    custom) (( ${TARGET_EXTRA_PROFILE_COUNT:-0} > 0 ));;
+    *) return 0;;
+  esac
+}
+
 _installer_progress_phases() {
   local -a phases
   if [[ ${TARGET_EGRESS_MODE:-both} == direct ]]; then
@@ -38,7 +46,7 @@ _installer_progress_phases() {
   fi
   if [[ ${TARGET_PROFILE_SET:-basic} != basic || ${TARGET_EGRESS_MODE:-both} != both ]]; then
     phases+=(baseline-verify)
-    if [[ ${TARGET_PROFILE_SET:-basic} != basic ]]; then phases+=(portfolio-runtime); fi
+    if installer_has_extra_profiles; then phases+=(portfolio-runtime); fi
     phases+=(portfolio-publish)
   fi
   if [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then phases+=(renewal); fi

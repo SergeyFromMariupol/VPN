@@ -17,6 +17,7 @@ load_catalog = _selector.load_catalog
 main = _selector.main
 profile_name = _selector.profile_name
 select_profiles = _selector.select_profiles
+select_numbers = _selector.select_numbers
 
 
 if __name__ == "__main__":

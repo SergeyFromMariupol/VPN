@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bundle/portfolio"))
-from portfolio_catalog import load_catalog, select_profiles  # noqa: E402
+from portfolio_catalog import load_catalog, select_numbers, select_profiles  # noqa: E402
 
 
 class PortfolioCatalogTests(unittest.TestCase):
@@ -97,6 +97,29 @@ class PortfolioCatalogTests(unittest.TestCase):
         self.assertNotIn("miranda", raw.lower())
         self.assertNotIn("2.27.200.203", raw)
         self.assertNotIn("TEST", raw)
+
+    def test_manual_selection_matches_menu_and_canonical_order(self):
+        menu = select_profiles("all", "both", "VPN")
+        chosen = select_numbers("both", "146, 5 1-2")
+        self.assertEqual([row["id"] for row in chosen],
+                         [menu[i - 1]["id"] for i in (1, 2, 5, 146)])
+        ids = ",".join(row["id"] for row in reversed(chosen))
+        installed = select_profiles("custom", "both", "My VPN", ids)
+        self.assertEqual([row["id"] for row in installed], [row["id"] for row in chosen])
+        self.assertTrue(all(row["name"].startswith("My VPN · ") for row in installed))
+        self.assertEqual(len(select_numbers("both", "1-146")), 146)
+
+    def test_manual_selection_rejects_invalid_choices(self):
+        for selection in ("", "0", "74", "3-1", "1-3,2", "1,,2", "x"):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                select_numbers("warp", selection)
+        known = select_profiles("all", "warp", "VPN")[0]["id"]
+        for mode, ids in (("warp", ""), ("warp", "missing"), ("warp", f"{known},{known}"),
+                          ("direct", known)):
+            with self.subTest(mode=mode, ids=ids), self.assertRaises(ValueError):
+                select_profiles("custom", mode, "VPN", ids)
+        with self.assertRaises(ValueError):
+            select_profiles("basic", "warp", "VPN", known)
 
     def test_cli_json_utf8(self):
         process = subprocess.run(

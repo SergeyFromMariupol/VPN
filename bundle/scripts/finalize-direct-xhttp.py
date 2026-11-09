@@ -328,6 +328,16 @@ def verify(target, secret, selected=False, allow_pending=False, expected=None):
         public = x.native(target, secret, expected_count=len(links))
         x.need(public == links and (expected is None or public == expected),
                'DIRECT_PUBLIC_BASELINE')
+    if selected and target.get('TARGET_PROFILE_SET') == 'custom':
+        catalog_path = Path(__file__).resolve().parents[1] / 'portfolio/portfolio_catalog.py'
+        spec = importlib.util.spec_from_file_location('vpn_direct_selection', catalog_path)
+        catalog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(catalog)
+        recipes = catalog.select_profiles('custom', 'direct', target['TARGET_LABEL'],
+                                          target['TARGET_PROFILE_IDS'])
+        names_selected = {row['name'] for row in recipes if row['baseline_reuse']}
+        links = [uri for uri in links if unquote(x.query(uri)[0].fragment) in names_selected]
+        x.need(len(links) == len(names_selected), 'DIRECT_SELECTED_BASELINE')
     for uri in links:
         x.payload(uri, False, target['TARGET_IPV4'])
     return marker
