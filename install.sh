@@ -7,8 +7,8 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.4.7'
-readonly source_ref='a4c2d543fe5a1685a8de38f1edc80a883cb6d7b5'
+readonly release='v1.4.8'
+readonly source_ref='06c174b788cf0451f964ad82c274169f5b87c1a2'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -278,10 +278,11 @@ if [[ $mode == --verify ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_PROFILE_IDS=''
   TARGET_HAPP_PROVIDER_ID=''
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
-  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_HAPP_PROVIDER_ID
+  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_HAPP_PROVIDER_ID
   if [[ -e $state/verify-command.log || -L $state/verify-command.log ]]; then
     [[ -f $state/verify-command.log && ! -L $state/verify-command.log &&
        $(stat -c '%u:%g:%a:%h' "$state/verify-command.log") == 0:0:600:1 ]] || die 'Небезопасный журнал проверки VPN'
@@ -299,6 +300,7 @@ if [[ $mode == --resume ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_PROFILE_IDS=''
   TARGET_HAPP_PROVIDER_ID=''
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Сохранён режим без сертификата; этот установщик продолжает только HTTPS-установки'
@@ -315,7 +317,7 @@ else
   source "$source_dir/tools/wizard.sh"
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
   export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
-  export TARGET_HAPP_PROVIDER_ID
+  export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
   installer_error_context preflight "$task_stage/preflight-error.txt"
@@ -339,11 +341,24 @@ TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
+TARGET_PROFILE_IDS=${TARGET_PROFILE_IDS:-}
 [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Новая установка требует Let’s Encrypt и HTTPS'
 [[ $TARGET_EGRESS_MODE == warp || $TARGET_EGRESS_MODE == direct || $TARGET_EGRESS_MODE == both ]] || die 'Небезопасный режим выхода'
-[[ $TARGET_PROFILE_SET == basic || $TARGET_PROFILE_SET == dpi || $TARGET_PROFILE_SET == all ]] || die 'Небезопасный набор профилей'
+case "$TARGET_PROFILE_SET" in
+  basic|dpi|all)
+    [[ -z $TARGET_PROFILE_IDS ]] || die 'Небезопасный набор профилей'
+    ;;
+  custom)
+    profile_counts=$(TARGET_PROFILE_IDS="$TARGET_PROFILE_IDS" python3 -I -B \
+      "$destination/bundle/portfolio/portfolio_catalog.py" --set custom \
+      --egress "$TARGET_EGRESS_MODE" --label "$TARGET_LABEL" --counts) ||
+      die 'Небезопасный ручной набор профилей'
+    read -r _ TARGET_EXTRA_PROFILE_COUNT <<<"$profile_counts"
+    ;;
+  *) die 'Небезопасный набор профилей';;
+esac
 export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
-export TARGET_HAPP_PROVIDER_ID
+export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS TARGET_EXTRA_PROFILE_COUNT
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
@@ -422,7 +437,7 @@ if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
   else
     phase baseline-verify bash "$runtime/tests/postboot-verify.sh" --live
   fi
-  if [[ $TARGET_PROFILE_SET != basic ]]; then
+  if installer_has_extra_profiles; then
     installer_error_context portfolio-runtime "$state/portfolio-runtime.log"
     phase portfolio-runtime python3 -I -B "$runtime/portfolio/install.py" --apply
   fi

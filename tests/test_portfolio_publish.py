@@ -81,6 +81,16 @@ def worker(path, op, payload=None):
     return result
 
 
+def custom_fixture(egress, *profile_ids):
+    target, data, initial = fixture(egress=egress)
+    target.update(TARGET_PROFILE_SET='custom', TARGET_PROFILE_IDS=','.join(profile_ids))
+    extras = [{'id': row['id'], 'remark': row['name'],
+               'uri': (f"{row['protocol']}://fixture@vpn.example.com:"
+                       f"{30000 + row['port_offset']}#{quote(row['name'], safe='')}")}
+              for row in PUBLISH.selected_recipe(target)]
+    return target, data, initial, extras
+
+
 class PortfolioPublication(unittest.TestCase):
     def test_native_runtime_removes_unselected_egress(self):
         target, _, _ = fixture()
@@ -178,6 +188,77 @@ class PortfolioPublication(unittest.TestCase):
                     self.assertEqual(len(result['delete_joins']), count if egress == 'warp' else 0)
                     self.assertEqual(len(result['delete_external']), count if egress == 'warp' else 0)
                     self.assertIn(1, [row['id'] for row in data['clients']])
+
+    def test_custom_baseline_uses_exact_joins_and_external_links(self):
+        target, data, initial, extras = custom_fixture(
+            'warp', 'hysteria2-tls-hysteria-warp', 'vless-reality-xhttp-packet-up-warp')
+        intent = PUBLISH.plan(data, target, extras, initial)
+        self.assertEqual(intent['names'], PUBLISH.baseline_names(target)[1:3])
+        self.assertEqual(intent['after']['joins'], data['joins'][1:3])
+        self.assertEqual(intent['after']['external'], data['external'][:1])
+        self.assertFalse(intent['insert_external'])
+
+    def test_custom_extras_only_retain_owner_with_no_native_joins(self):
+        target, data, initial, extras = custom_fixture('direct', 'vless-tls-tcp-direct')
+        intent = PUBLISH.plan(data, target, extras, initial)
+        self.assertEqual(intent['names'], [extras[0]['remark']])
+        self.assertFalse(intent['after']['joins'])
+        self.assertEqual(intent['delete_external'], [data['external'][0]['id']])
+        self.assertEqual(len(intent['after']['external']), 1)
+        self.assertEqual(intent['after']['external'][0]['client_id'], data['clients'][0]['id'])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / 'x-ui.db'
+            create_db(database, data)
+            applied = worker(database, 'apply', {**intent, 'expected': intent['before'],
+                                                'intended': intent['after']})
+            self.assertEqual(applied.returncode, 0, applied.stderr.decode())
+            persisted = json.loads(worker(database, 'read').stdout)
+            self.assertEqual(persisted['clients'], data['clients'])
+            self.assertEqual(persisted['joins'], [])
+            self.assertEqual(persisted['external'], intent['after']['external'])
+            runtime = root / 'config.json'
+            config = {'inbounds': [{'tag': tag, 'settings': {'clients': []}}
+                                   for tag in ('in-443-tcp', 'in-443-udp')]}
+            runtime.write_text(json.dumps(config))
+            with patch.object(PUBLISH, 'XRAY_RUNTIME', runtime):
+                PUBLISH.verify_native_runtime(target)
+                config['inbounds'][1]['streamSettings'] = {'hysteriaSettings': {'auth': 'fixture'}}
+                runtime.write_text(json.dumps(config))
+                with self.assertRaisesRegex(RuntimeError, 'RUNTIME_HYSTERIA_AUTH'):
+                    PUBLISH.verify_native_runtime(target)
+                del config['inbounds'][1]['streamSettings']
+                config['inbounds'][0]['settings']['clients'] = [{'email': 'germany-reality'}]
+                runtime.write_text(json.dumps(config))
+                with self.assertRaisesRegex(RuntimeError, 'RUNTIME_CLIENTS'):
+                    PUBLISH.verify_native_runtime(target)
+
+    def test_custom_dual_mixed_profiles_keep_catalog_order(self):
+        target, data, initial, extras = custom_fixture(
+            'both', 'vless-reality-grpc-warp', 'hysteria2-tls-hysteria-direct',
+            'vless-tls-ws-warp', 'vless-tls-tcp-direct')
+        self.assertEqual([row['id'] for row in extras], ['vless-tls-ws-warp', 'vless-tls-tcp-direct'])
+        intent = PUBLISH.plan(data, target, extras, initial)
+        names = PUBLISH.baseline_names(target)
+        self.assertEqual(intent['names'], [names[0], names[4]] + [row['remark'] for row in extras])
+        self.assertEqual(intent['after']['joins'], [data['joins'][0], data['joins'][4]])
+        self.assertEqual(intent['after']['external'][0], data['external'][2])
+        self.assertEqual([row['sort_index'] for row in intent['after']['external']], [1, 3, 4])
+        with self.assertRaisesRegex(RuntimeError, 'CUSTOM_PUBLIC_ORDER'):
+            PUBLISH.plan(data, target, list(reversed(extras)), initial)
+
+    def test_custom_receipt_matches_exact_selection_and_accepts_old_presets(self):
+        target, _, _, _ = custom_fixture('direct', 'vless-tls-tcp-direct')
+        target['TARGET_IPV4'] = '8.8.4.4'
+        receipt = {'target': target['TARGET_IPV4'], 'egress': 'direct', 'profile_set': 'custom',
+                   'profile_ids': target['TARGET_PROFILE_IDS']}
+        self.assertTrue(PUBLISH.state_matches_target(receipt, target))
+        self.assertFalse(PUBLISH.state_matches_target(dict(receipt, profile_ids='vless-tls-ws-direct'), target))
+        receipt.pop('profile_ids')
+        self.assertFalse(PUBLISH.state_matches_target(receipt, target))
+        receipt['profile_set'] = target['TARGET_PROFILE_SET'] = 'basic'
+        target.pop('TARGET_PROFILE_IDS')
+        self.assertTrue(PUBLISH.state_matches_target(receipt, target))
 
     def test_append_order_and_cas_restore(self):
         target, data, initial = fixture(egress='direct')

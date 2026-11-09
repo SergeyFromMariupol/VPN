@@ -194,9 +194,11 @@ def target_and_access():
     target.setdefault('TARGET_TLS_MODE', 'letsencrypt')
     target.setdefault('TARGET_EGRESS_MODE', 'both')
     target.setdefault('TARGET_PROFILE_SET', 'basic')
+    target.setdefault('TARGET_PROFILE_IDS', '')
     need(target['TARGET_TLS_MODE'] in ('letsencrypt', 'none') and
          target['TARGET_EGRESS_MODE'] in ('warp', 'direct', 'both') and
-         target['TARGET_PROFILE_SET'] in ('basic', 'dpi', 'all') and
+         target['TARGET_PROFILE_SET'] in ('basic', 'dpi', 'all', 'custom') and
+         bool(target['TARGET_PROFILE_IDS']) == (target['TARGET_PROFILE_SET'] == 'custom') and
          (target['TARGET_TLS_MODE'] == 'letsencrypt' or
           target['TARGET_PROFILE_SET'] == 'basic'), 'TARGET_SELECTION')
     address = str(ipaddress.IPv4Address(target['TARGET_IPV4']))
@@ -291,6 +293,11 @@ def feeds(url, ready_timeout=0):
 
 def verify_native_runtime(target, mode=None):
     """Read back native credentials after x-ui has rebuilt Xray from the joins."""
+    selected_clients = None
+    if mode is None and target['TARGET_PROFILE_SET'] == 'custom':
+        names = {row['name'] for row in custom_rows(target) if row['baseline_reuse']}
+        selected_clients = {email for email, name in baseline_client_names(target).items()
+                            if name in names}
     mode = mode or target['TARGET_EGRESS_MODE']
     need(mode in ('warp', 'direct', 'both'), 'RUNTIME_EGRESS')
     raw = XRAY_RUNTIME.read_bytes()
@@ -307,12 +314,18 @@ def verify_native_runtime(target, mode=None):
                         ('in-443-udp', 'hysteria2')):
         if tag not in expected_tags:
             continue
-        actual = [client['email'] for client in
-                  inbounds[tag]['settings']['clients']]
+        inbound = inbounds[tag]
+        actual = [client['email'] for client in inbound['settings']['clients']]
         expected = [('germany-warp-' + suffix if role == 'warp' else
                      'germany-' + suffix) for role in roles]
+        if selected_clients is not None:
+            expected = [email for email in expected if email in selected_clients]
         need(len(actual) == len(set(actual)) and set(actual) == set(expected),
              'RUNTIME_CLIENTS')
+        if selected_clients is not None and suffix == 'hysteria2' and not expected:
+            # Xray can fall back to transport-level auth with an empty user list.
+            hysteria = inbound.get('streamSettings', {}).get('hysteriaSettings', {})
+            need(not hysteria.get('auth'), 'RUNTIME_HYSTERIA_AUTH')
 
 
 def wait_native_runtime(target, mode=None):
@@ -348,24 +361,29 @@ def uri_signature(uri):
             'name': unquote(parsed.fragment)}
 
 
-def baseline_names(target):
+def baseline_client_names(target):
     protocols = ('REALITY', 'HYSTERIA2', 'XHTTP') if target['TARGET_TLS_MODE'] == 'letsencrypt' else ('REALITY', 'XHTTP')
     label = target['TARGET_LABEL']
-    direct = [label + ' · 🖥️ IP сервера · ' + protocol for protocol in protocols]
-    if target['TARGET_EGRESS_MODE'] == 'direct':
-        return direct
-    return [label + ' · ☁️ Cloudflare · ' + protocol for protocol in protocols] + direct
+    clients = {}
+    if target['TARGET_EGRESS_MODE'] != 'direct':
+        clients.update((f'germany-warp-{protocol.lower()}', f'{label} · ☁️ Cloudflare · {protocol}')
+                       for protocol in protocols)
+    clients.update((f'germany-{protocol.lower()}', f'{label} · 🖥️ IP сервера · {protocol}')
+                   for protocol in protocols)
+    return clients
+
+
+def baseline_names(target):
+    return list(baseline_client_names(target).values())
 
 
 def baseline_db(data, target):
     protocols = ('reality', 'hysteria2', 'xhttp') if target['TARGET_TLS_MODE'] == 'letsencrypt' else ('reality', 'xhttp')
     direct_only = target['TARGET_EGRESS_MODE'] == 'direct'
-    emails = ([f'germany-{item}' for item in protocols] if direct_only else
-              [f'germany-warp-{item}' for item in protocols] +
-              [f'germany-{item}' for item in protocols])
+    emails = set(baseline_client_names(target))
     clients = data['clients']
     need(len(clients) == len(emails) and len({row['email'] for row in clients}) == len(emails) and
-         {row['email'] for row in clients} == set(emails), 'BASE_CLIENTS')
+         {row['email'] for row in clients} == emails, 'BASE_CLIENTS')
     owner_email = 'germany-reality' if direct_only else OWNER_EMAIL
     owners = [row['id'] for row in clients if row['email'] == owner_email]
     need(len(owners) == 1, 'BASE_OWNER')
@@ -374,7 +392,7 @@ def baseline_db(data, target):
     joins = data['joins']
     need(len(joins) == len(emails) and all('client_id' in row and 'inbound_id' in row and
          row['client_id'] in by_id for row in joins) and
-         {by_id[row['client_id']] for row in joins} == set(emails), 'BASE_JOINS')
+         {by_id[row['client_id']] for row in joins} == emails, 'BASE_JOINS')
     if direct_only:
         expected_external = [(0, target['TARGET_LABEL'] + ' · 🖥️ IP сервера · XHTTP')]
     else:
@@ -392,12 +410,19 @@ def baseline_db(data, target):
     return owner, by_id
 
 
+def custom_rows(target):
+    return select_profiles('custom', target['TARGET_EGRESS_MODE'], target['TARGET_LABEL'],
+                           target['TARGET_PROFILE_IDS'])
+
+
 def selected_recipe(target):
     mode = target['TARGET_EGRESS_MODE']
     profile_set = target['TARGET_PROFILE_SET']
     if target['TARGET_TLS_MODE'] == 'none':
         need(profile_set == 'basic', 'CERTLESS_PORTFOLIO')
         return []
+    if profile_set == 'custom':
+        return [row for row in custom_rows(target) if not row['baseline_reuse']]
     rows = select_profiles(profile_set, mode, target['TARGET_LABEL'])
     expected = {'basic': 3, 'dpi': 49, 'all': 73}[profile_set]
     if mode == 'both':
@@ -444,23 +469,30 @@ def read_extras(target, selected):
 
 def plan(data, target, extras, initial):
     owner, by_id = baseline_db(data, target)
-    names = baseline_names(target)
+    baseline_clients = baseline_client_names(target)
+    names = list(baseline_clients.values())
     need(len(initial) == len(names) and [uri_name(uri) for uri in initial] == names,
          'BASE_PUBLIC_ORDER')
     mode = target['TARGET_EGRESS_MODE']
-    count = len(names) // 2
-    baseline = initial[:count] if mode == 'warp' else initial
+    custom = target['TARGET_PROFILE_SET'] == 'custom'
+    if custom:
+        rows = custom_rows(target)
+        selected_baseline = {row['name'] for row in rows if row['baseline_reuse']}
+    else:
+        selected_baseline = set(names[:len(names) // 2] if mode == 'warp' else names)
+    baseline = [uri for name, uri in zip(names, initial, strict=True) if name in selected_baseline]
     selected_names = [uri_name(uri) for uri in baseline] + [entry['remark'] for entry in extras]
     selected_uris = baseline + [entry['uri'] for entry in extras]
+    if custom:
+        need(selected_names == [row['name'] for row in rows], 'CUSTOM_PUBLIC_ORDER')
     need(len(selected_uris) == len(set(selected_uris)) and
          len(selected_names) == len(set(selected_names)), 'SELECTED_DUPLICATE')
     delete_joins = [
         {'client_id': row['client_id'], 'inbound_id': row['inbound_id']}
         for row in data['joins']
-        if (mode == 'direct' and by_id[row['client_id']].startswith('germany-warp-')) or
-           (mode == 'warp' and not by_id[row['client_id']].startswith('germany-warp-'))]
-    delete_external = ([row['id'] for row in data['external'] if row['sort_index'] >= 0]
-                       if mode == 'warp' else [])
+        if baseline_clients[by_id[row['client_id']]] not in selected_baseline]
+    delete_external = [row['id'] for row in data['external']
+                       if row['remark'] not in selected_baseline]
     max_id = max(row['id'] for row in data['external'])
     now = int(time.time() * 1000)
     insert_external = [
@@ -532,7 +564,16 @@ def state_write(data):
     write_atomic(STATE, canonical(data))
 
 
+def state_matches_target(state, target):
+    return (state.get('target') == target['TARGET_IPV4'] and
+            state.get('egress') == target['TARGET_EGRESS_MODE'] and
+            state.get('profile_set') == target['TARGET_PROFILE_SET'] and
+            state.get('profile_ids', '') == target.get('TARGET_PROFILE_IDS', ''))
+
+
 def verify_public(state, target, url):
+    if target['TARGET_PROFILE_SET'] == 'custom':
+        need(state['names'] == [row['name'] for row in custom_rows(target)], 'PUBLISHED_SELECTION')
     current = db_read()
     need({'joins': current['joins'], 'external': current['external']} == state['after'],
          'PUBLISHED_DATABASE')
@@ -578,9 +619,7 @@ def restore_prepared(state, target):
 def apply(target, url):
     old = state_read()
     if old is not None:
-        need(old.get('target') == target['TARGET_IPV4'] and
-             old.get('egress') == target['TARGET_EGRESS_MODE'] and
-             old.get('profile_set') == target['TARGET_PROFILE_SET'], 'STATE_TARGET')
+        need(state_matches_target(old, target), 'STATE_TARGET')
         if old['status'] == 'committed':
             verify_public(old, target, url)
             print('PORTFOLIO_SUBSCRIPTION_OK=' + str(len(old['names'])))
@@ -600,6 +639,8 @@ def apply(target, url):
              'tls': target['TARGET_TLS_MODE'],
              'manifest_sha256': manifest_sha,
              'backup': str(backup), 'backup_sha256': backup_sha, **intent}
+    if target['TARGET_PROFILE_SET'] == 'custom':
+        state['profile_ids'] = target['TARGET_PROFILE_IDS']
     backup_rows(state)
     state_write(state)
     try:
@@ -641,9 +682,7 @@ def main(argv=None):
         else:
             state = state_read()
             need(state is not None and state['status'] == 'committed' and
-                 state['target'] == target['TARGET_IPV4'] and
-                 state['egress'] == target['TARGET_EGRESS_MODE'] and
-                 state['profile_set'] == target['TARGET_PROFILE_SET'], 'STATE_NOT_COMMITTED')
+                 state_matches_target(state, target), 'STATE_NOT_COMMITTED')
             verify_public(state, target, url)
             print('PORTFOLIO_SUBSCRIPTION_OK=' + str(len(state['names'])))
     finally:

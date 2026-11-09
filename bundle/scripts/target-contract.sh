@@ -15,6 +15,7 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_PROFILE_IDS=''
   TARGET_CERT_NAME=''
   TARGET_ADDITIONAL_IPV4=''
   TARGET_HAPP_PROVIDER_ID=''
@@ -27,13 +28,17 @@ TARGET_ADDRESS_MODE=${TARGET_ADDRESS_MODE:-domain}
 TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
+TARGET_PROFILE_IDS=${TARGET_PROFILE_IDS:-}
 case $TARGET_EGRESS_MODE in
   warp|direct|both) ;;
   *) printf 'ERROR: TARGET_EGRESS_MODE must be warp, direct or both\n' >&2; return 1;;
 esac
 case $TARGET_PROFILE_SET in
-  basic|dpi|all) ;;
-  *) printf 'ERROR: TARGET_PROFILE_SET must be basic, dpi or all\n' >&2; return 1;;
+  basic|dpi|all)
+    [[ -z $TARGET_PROFILE_IDS ]] || { printf 'ERROR: unexpected manual profile IDs\n' >&2; return 1; }
+    ;;
+  custom) ;;
+  *) printf 'ERROR: invalid profile set\n' >&2; return 1;;
 esac
 case $TARGET_TLS_MODE in
   letsencrypt) TARGET_PUBLIC_SCHEME=https; TARGET_PROTOCOL_COUNT=3; TARGET_PROFILE_COUNT=6;;
@@ -44,9 +49,23 @@ case $TARGET_PROFILE_SET in
   basic) TARGET_SELECTED_PROFILE_COUNT=$TARGET_PROTOCOL_COUNT;;
   dpi) [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: dpi requires a trusted certificate\n' >&2; return 1; }; TARGET_SELECTED_PROFILE_COUNT=49;;
   all) [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: all requires a trusted certificate\n' >&2; return 1; }; TARGET_SELECTED_PROFILE_COUNT=73;;
+  custom)
+    [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: custom requires a trusted certificate\n' >&2; return 1; }
+    _vpn_profile_counts=$(TARGET_PROFILE_IDS="$TARGET_PROFILE_IDS" python3 -I -B \
+      "${BASH_SOURCE[0]%/*}/../portfolio/portfolio_catalog.py" --set custom \
+      --egress "$TARGET_EGRESS_MODE" --label selection --counts) || return 1
+    read -r TARGET_SELECTED_PROFILE_COUNT TARGET_EXTRA_PROFILE_COUNT <<<"$_vpn_profile_counts"
+    unset _vpn_profile_counts
+    ;;
 esac
-if [[ $TARGET_EGRESS_MODE == both ]]; then TARGET_SELECTED_PROFILE_COUNT=$((TARGET_SELECTED_PROFILE_COUNT * 2)); fi
-export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT TARGET_SELECTED_PROFILE_COUNT
+if [[ $TARGET_PROFILE_SET != custom ]]; then
+  TARGET_EXTRA_PROFILE_COUNT=$((TARGET_SELECTED_PROFILE_COUNT - TARGET_PROTOCOL_COUNT))
+  if [[ $TARGET_EGRESS_MODE == both ]]; then
+    TARGET_SELECTED_PROFILE_COUNT=$((TARGET_SELECTED_PROFILE_COUNT * 2))
+    TARGET_EXTRA_PROFILE_COUNT=$((TARGET_EXTRA_PROFILE_COUNT * 2))
+  fi
+fi
+export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT TARGET_SELECTED_PROFILE_COUNT TARGET_EXTRA_PROFILE_COUNT
 [[ $TARGET_FQDN =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && $TARGET_FQDN == *.* && $TARGET_FQDN != *..* ]] || {
   printf 'ERROR: TARGET_FQDN must be a lowercase DNS name or public IPv4\n' >&2; return 1;
 }

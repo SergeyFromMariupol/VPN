@@ -87,10 +87,27 @@ wizard_reality_sni() {
   done
 }
 
+wizard_custom_profiles() {
+  local selector="${1%/*}/portfolio_catalog.py" numbers chosen profile_count
+  wizard_section 'Профили' 'Ручной выбор'
+  python3 -B "$selector" --menu --egress "$TARGET_EGRESS_MODE" || return 1
+  wizard_note 'Введите номера через пробел или запятую. Диапазон можно указать как 1-3.'
+  while true; do
+    wizard_read numbers 'Номера профилей: ' || return 1
+    if chosen=$(python3 -B "$selector" --choose="$numbers" --egress "$TARGET_EGRESS_MODE" 2>/dev/null); then
+      IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
+      wizard_note "Выбрано профилей: $profile_count."
+      return 0
+    fi
+    wizard_error 'Выберите хотя бы один профиль. Проверьте номера, диапазоны и повторы.'
+  done
+}
+
 collect_vpn_parameters() {
   local address_choice egress_choice profile_choice verifier=$2
   wizard_init
   TARGET_TLS_MODE=letsencrypt
+  TARGET_PROFILE_IDS=''
   wizard_header "$1"
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"
@@ -121,19 +138,21 @@ collect_vpn_parameters() {
   if [[ $TARGET_EGRESS_MODE == both ]]; then
     printf '  %b1. Основные 6%b\n' "$wizard_yellow" "$wizard_reset"
     printf '  %b2. Для DPI/ТСПУ — 98%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b3. Все проверенные рабочие — 146%b\n\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b3. Все проверенные рабочие — 146%b\n' "$wizard_yellow" "$wizard_reset"
   else
     printf '  %b1. Основные 3%b\n' "$wizard_yellow" "$wizard_reset"
     printf '  %b2. Для DPI/ТСПУ — 49%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b3. Все проверенные рабочие — 73%b\n\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b3. Все проверенные рабочие — 73%b\n' "$wizard_yellow" "$wizard_reset"
   fi
+  printf '  %b4. Выбрать профили вручную%b\n\n' "$wizard_yellow" "$wizard_reset"
   while true; do
     wizard_read profile_choice 'Выберите набор [1]: ' 1 || return 1
     case "$profile_choice" in
       1) TARGET_PROFILE_SET=basic; break;;
       2) TARGET_PROFILE_SET=dpi; break;;
       3) TARGET_PROFILE_SET=all; break;;
-      *) wizard_error 'Выберите 1, 2 или 3.';;
+      4) wizard_custom_profiles "$verifier" || return 1; TARGET_PROFILE_SET=custom; break;;
+      *) wizard_error 'Выберите 1, 2, 3 или 4.';;
     esac
   done
 
