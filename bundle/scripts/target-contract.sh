@@ -73,11 +73,11 @@ if mode not in ('domain', 'ip'):
     raise SystemExit('TARGET_ADDRESS_MODE must be domain or ip')
 if mode == 'ip' and os.environ['TARGET_FQDN'] != str(address):
     raise SystemExit('IP endpoint must equal TARGET_IPV4')
-aliases = [ipaddress.IPv4Address(value) for value in os.environ['TARGET_ADDITIONAL_IPV4'].split()]
+aliases = [ipaddress.IPv4Address(value) for value in os.environ.get('TARGET_ADDITIONAL_IPV4', '').split()]
 if (address in aliases or len(aliases) > 99 or len(set(aliases)) != len(aliases) or
         any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in aliases)):
     raise SystemExit('Invalid secondary IPv4 set')
-cert_name = os.environ['TARGET_CERT_NAME']
+cert_name = os.environ.get('TARGET_CERT_NAME') or os.environ['TARGET_FQDN']
 if mode == 'domain' and (aliases or cert_name != os.environ['TARGET_FQDN']):
     raise SystemExit('Domain installations require their domain certificate')
 if mode == 'ip' and cert_name != str(address) and not re.fullmatch(r'vpn-ip-[a-f0-9]{24}', cert_name):
