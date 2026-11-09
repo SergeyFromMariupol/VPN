@@ -117,18 +117,22 @@ def check_requests(address, provider_id, tls):
 
 def check_browser_copy_panel(tls):
     asset_path = '/android-app-bypass.js'
-    script_tag = b'<script src="/android-app-bypass.js" defer referrerpolicy="no-referrer"></script>'
+    assets = (b'<link rel="stylesheet" href="/android-app-bypass.css" referrerpolicy="no-referrer">'
+              b'<script src="/android-app-bypass.js" defer referrerpolicy="no-referrer"></script>')
     for query, extra in (('', {'Accept': 'text/html'}), ('?html=1', {}), ('?view=html', {})):
         raw, body = request(PUBLIC, 'Mozilla/5.0', tls, path=SUBSCRIPTION_PATH + query,
                             extra_headers={'Accept-Encoding': 'gzip', **extra})
         assert raw.startswith(b'HTTP/1.1 200'), query
-        assert body == HTML.replace(PAGE_MARKER, PAGE_MARKER + script_tag), query
+        assert body == HTML.replace(PAGE_MARKER, PAGE_MARKER + assets), query
     raw, script = request(PUBLIC, 'Mozilla/5.0', tls, path=asset_path)
     assert raw.startswith(b'HTTP/1.1 200')
     assert b'content-type: application/javascript; charset=utf-8\r\n' in raw.lower()
     packages = (BUNDLE / 'scripts/android-app-bypass.txt').read_text(encoding='ascii')
     assert b'const packages = ' + json.dumps(packages).encode() + b';' in script
     assert b'navigator.clipboard.writeText(packages)' in script
+    raw, styles = request(PUBLIC, 'Mozilla/5.0', tls, path='/android-app-bypass.css')
+    assert raw.startswith(b'HTTP/1.1 200') and b'content-type: text/css' in raw.lower()
+    assert styles == (BUNDLE / 'templates/android-app-bypass.css').read_bytes()
     _, info = request(PUBLIC, 'Mozilla/5.0', tls, path=SUBSCRIPTION_PATH + '?format=info')
     assert info == INFO
 

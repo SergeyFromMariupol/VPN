@@ -532,6 +532,7 @@ jq --arg fqdn "$PUBLIC_FQDN" \
   | .webListen="127.0.0.1" | .webPort=2053 | .webDomain="" | .webBasePath=$panel_path
   | .webCertFile="" | .webKeyFile="" | .trustedProxyCIDRs="127.0.0.1/32,::1/128"
   | .subEnable=true | .subJsonEnable=false | .subJsonAutoDetect=false
+  | .subTitle="GitHub VPN"
   | .subEnableRouting=true | .subRoutingRules=($happ_routing | rtrimstr("\n"))
   | .subListen="127.0.0.1" | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
   | .subCertFile=$cert | .subKeyFile=$key | .remarkTemplate="{{COMMENT}}"
@@ -550,6 +551,9 @@ for _ in $(seq 1 30); do
 done
 systemctl is-active --quiet x-ui.service || die 'x-ui failed after settings update'
 refresh_api_token
+api_post --output "$stage/settings-after.json" "$api_url/setting/all"
+jq --exit-status '.success == true and .obj.subTitle == "GitHub VPN"' "$stage/settings-after.json" >/dev/null ||
+  die 'subscription title GitHub VPN was not saved'
 
 api_post --data-urlencode "xraySetting@$stage/xray-global.json" \
   --data-urlencode 'outboundTestUrl=https://www.cloudflare.com/cdn-cgi/trace' \
