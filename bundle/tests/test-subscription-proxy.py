@@ -1,8 +1,9 @@
 """Exercise the public TLS proxy with a loopback subscription fixture."""
 from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
-from http.client import HTTPSConnection
+from http.client import HTTPSConnection, parse_headers
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,12 @@ PATH_PREFIX = 'a' * 40
 SUBSCRIPTION_PATH = f'/{PATH_PREFIX}/fixture'
 LABEL = 'Тест 🇩🇪 «Профиль»'
 INCY_AGENT = 'INCY/3.9.9/android Dalvik/2.1.0'
+COPY_URL = 'https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/bundle/scripts/android-app-bypass.txt'
+OWNER_METADATA = {
+    'Profile-Web-Page-Url': 'https://fixture.example/home',
+    'Announce': 'Owner notice',
+    'Announce-Url': 'https://fixture.example/notice',
+}
 
 
 def body_for(address):
@@ -45,6 +52,9 @@ class Subscription(BaseHTTPRequestHandler):
         if not self.headers.get('User-Agent', '').lower().startswith('incy/'):
             self.send_header('Routing', METADATA['routing_link'](LABEL))
             self.send_header('Routing-Enable', 'true')
+        if self.server.owner_metadata:
+            for key, value in OWNER_METADATA.items():
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body_for(PUBLIC))
 
@@ -76,7 +86,29 @@ def check_requests(address, provider_id, tls):
         if client == 'happ' and not provider_id:
             assert b'\r\nper-app-proxy-mode: bypass\r\n' in headers.lower(), (address, agent)
             assert b'\r\nproviderid:' not in headers.lower(), (address, agent)
+        metadata = parse_headers(BytesIO(headers.split(b'\r\n', 1)[1]))
+        website = [COPY_URL] if agent.lower().startswith(('happ/', 'incy/')) else None
+        assert metadata.get_all('Profile-Web-Page-Url') == website, (address, agent)
+        announce_url = [COPY_URL] if client == 'v2raytun' else None
+        assert metadata.get_all('Announce-Url') == announce_url, (address, agent)
+        if announce_url:
+            assert metadata.get('Announce', '').startswith('base64:'), (address, agent)
+        else:
+            assert metadata.get('Announce') is None, (address, agent)
         assert body == body_for(address), (address, agent)
+
+
+def check_owner_metadata(upstream, tls):
+    upstream.owner_metadata = True
+    try:
+        for address in (PUBLIC, ALIAS):
+            for agent in ('Happ/4.10.1/Android/37', INCY_AGENT, 'v2raytun/android'):
+                raw, _ = request(address, agent, tls)
+                headers = parse_headers(BytesIO(raw.split(b'\r\n', 1)[1]))
+                for key, value in OWNER_METADATA.items():
+                    assert headers.get_all(key) == [value], (address, agent, key)
+    finally:
+        upstream.owner_metadata = False
 
 
 def check_concurrent_alias_requests(upstream, tls):
@@ -124,6 +156,7 @@ with tempfile.TemporaryDirectory(prefix='vpn-subscription-proxy-') as directory:
     client_tls = ssl.create_default_context(cafile=str(cert))
     with ThreadingHTTPServer(('127.0.0.1', 2096), Subscription) as upstream:
         upstream.hold_requests = False
+        upstream.owner_metadata = False
         upstream.arrivals = queue.Queue()
         upstream.release_requests = threading.Event()
         upstream.socket = tls.wrap_socket(upstream.socket, server_side=True)
@@ -168,6 +201,7 @@ with tempfile.TemporaryDirectory(prefix='vpn-subscription-proxy-') as directory:
                         for address in (PUBLIC, ALIAS):
                             check_requests(address, provider_id, client_tls)
                         if provider_id:
+                            check_owner_metadata(upstream, client_tls)
                             check_concurrent_alias_requests(upstream, client_tls)
                     finally:
                         if nginx.poll() is None:

@@ -80,6 +80,9 @@ def subscription_proxy(target):
                          '    ssl_certificate_key /etc/krysyuk-standalone/tls/privkey.pem;\n'
                          '    ssl_protocols TLSv1.2 TLSv1.3;' if scheme == 'https' else ''),
         '__ANDROID_APP_LIST__': app_list(),
+        '__ANDROID_APP_LIST_URL__': 'https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/bundle/scripts/android-app-bypass.txt',
+        '__ANDROID_APP_LIST_ANNOUNCE__': 'base64:' + base64.b64encode(
+            'Скопировать список приложений Android'.encode('utf-8')).decode('ascii'),
         '__HAPP_PROVIDER_ID__': provider_id,
         '__INCY_ROUTING__': routing_link(target['TARGET_LABEL']),
         '__V2RAYTUN_ROUTING__': v2raytun_header(target['TARGET_LABEL']),
