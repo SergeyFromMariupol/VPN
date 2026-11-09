@@ -84,6 +84,11 @@
   });
 
   function placePanel() {
+    // The raw feed contains share links. The native sing-box client needs a JSON profile.
+    for (const name of app.querySelectorAll('.sub-app-grid .sub-app-name')) {
+      if (name.textContent === 'Sing-box') name.closest('.sub-row')?.setAttribute('hidden', '');
+    }
+
     if (panel.isConnected) return;
     const qr = app.querySelector('.sub-tabs .sub-rows > .sub-qr-card');
     if (qr) qr.before(panel);

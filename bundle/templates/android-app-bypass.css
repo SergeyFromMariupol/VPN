@@ -223,3 +223,7 @@
     text-align: center;
   }
 }
+
+.subscription-page .sub-app-grid > .sub-row[hidden] {
+  display: none;
+}
