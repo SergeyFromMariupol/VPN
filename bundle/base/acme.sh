@@ -61,7 +61,9 @@ if [[ $mode == verify-committed ]]; then
   printf 'ACME_COMMITTED_OK=1\n'
   exit 0
 fi
-[[ -z $(ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -vF " $TARGET_IPV4/") ]] || acme_fail ACME_IP_ADDRESS
+if [[ $TARGET_ADDRESS_MODE != ip ]]; then
+  [[ -z $(ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -vF " $TARGET_IPV4/") ]] || acme_fail ACME_IP_ADDRESS
+fi
 ip -4 -o address show dev "$TARGET_INTERFACE" scope global | grep -Fq " $TARGET_IPV4/" || acme_fail ACME_IP_ADDRESS
 systemctl is-enabled --quiet x-ui.service || acme_fail ACME_XUI_STATE
 unit_is_quiescent x-ui.service || {

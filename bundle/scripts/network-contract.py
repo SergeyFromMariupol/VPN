@@ -14,6 +14,7 @@ import time
 from typing import NamedTuple
 
 
+NGINX_EXECUTABLE = '/usr/sbin/nginx'
 DHCP_EXECUTABLES = frozenset(('/usr/lib/systemd/systemd-networkd', '/usr/sbin/dhclient'))
 XRAY_SHA256 = '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
 MAIN_XRAY = '/usr/local/x-ui/bin/xray-linux-amd64'
@@ -79,6 +80,34 @@ def trusted_process_executables(listeners):
             except (OSError, RuntimeError):
                 continue
     return executables
+
+
+def trusted_alias_owners(listeners, aliases):
+    """Authenticate the Nginx binaries holding additional subscription sockets."""
+    owners = set()
+    for listener in listeners:
+        if listener.address not in aliases or (listener.protocol, listener.port) != ('tcp', 2096):
+            continue
+        for pid in listener.pids:
+            try:
+                executable = Path('/proc') / str(pid) / 'exe'
+                canonical = str(executable.resolve(strict=True))
+                info = executable.stat()
+                if (canonical == NGINX_EXECUTABLE and stat.S_ISREG(info.st_mode) and
+                        info.st_uid == 0 and not stat.S_IMODE(info.st_mode) & 0o022):
+                    owners.add(pid)
+            except (OSError, RuntimeError):
+                continue
+    return owners
+
+
+def normalize_aliases(aliases, target_ipv4):
+    addresses = [ipaddress.IPv4Address(value) for value in aliases]
+    if (len(set(addresses)) != len(addresses) or
+            any(not address.is_global or address.is_multicast or
+                str(address) == target_ipv4 for address in addresses)):
+        raise ValueError('Invalid additional public IPv4 addresses')
+    return {str(address) for address in addresses}
 
 
 def is_expected_dhcp(listener, target_interface, process_executables, target_ipv4=None):
@@ -156,12 +185,13 @@ def normalized_portfolio_ports(ports):
 
 def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promoted,
                        process_executables=None, tls_mode='letsencrypt', portfolio_ports=None,
-                       egress_mode='both'):
+                       egress_mode='both', aliases=(), alias_owners=frozenset()):
     if tls_mode not in ('letsencrypt', 'none'):
         raise ValueError('Invalid certificate mode')
     if egress_mode not in ('warp', 'direct', 'both'):
         raise ValueError('Invalid egress mode')
     target_ipv4 = str(ipaddress.IPv4Address(target_ipv4))
+    aliases = normalize_aliases(aliases, target_ipv4)
     ssh_port = int(ssh_port)
     process_executables = process_executables or {}
     portfolio_ports = normalized_portfolio_ports(portfolio_ports)
@@ -173,7 +203,7 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
     required_tcp.update(port for port, protocol in portfolio_ports.items() if protocol == 'tcp')
     required_udp = ({443} if tls_mode == 'letsencrypt' else set()) | {
         port for port, protocol in portfolio_ports.items() if protocol == 'udp'}
-    found_tcp, found_udp = set(), set()
+    found_tcp, found_udp, found_aliases = set(), set(), set()
     for listener in listeners:
         if ipaddress.ip_address(listener.address).is_loopback:
             continue
@@ -185,6 +215,13 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
             if listener.address not in (target_ipv4, '0.0.0.0', '::'):
                 raise ValueError('SSH listener is not bound to the server address: ' + listener_summary(listener))
             found_tcp.add(ssh_port)
+        elif (listener.address in aliases and listener.protocol == 'tcp'
+                and listener.port == 2096):
+            if (tls_mode != 'letsencrypt' or listener.address in found_aliases or
+                    not listener.pids or not set(listener.pids) <= alias_owners):
+                raise ValueError('Unexpected subscription alias listener: ' +
+                                 listener_summary(listener))
+            found_aliases.add(listener.address)
         elif listener.address != target_ipv4:
             raise ValueError('Unexpected public listener address: ' + listener_summary(listener))
         elif listener.protocol == 'tcp' and listener.port in required_tcp:
@@ -193,13 +230,13 @@ def validate_listeners(listeners, target_ipv4, target_interface, ssh_port, promo
             found_udp.add(listener.port)
         else:
             raise ValueError('Unexpected public listener port: ' + listener_summary(listener))
-    if found_tcp != required_tcp or found_udp != required_udp:
+    if found_tcp != required_tcp or found_udp != required_udp or found_aliases != aliases:
         raise ValueError('Required public listener is missing')
 
 
 def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh_port,
                               promoted, wait_seconds=90, tls_mode='letsencrypt',
-                              portfolio_ports=None, egress_mode='both'):
+                              portfolio_ports=None, egress_mode='both', aliases=()):
     """Let owned self-test UDP sessions expire; PASS still needs the exact contract.
 
     Xray's outbound UDP sockets are unconnected and therefore appear in ss -l.
@@ -216,10 +253,11 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
     while True:
         listeners = read_listeners()
         dhcp_owners = trusted_process_executables(listeners)
+        alias_owners = trusted_alias_owners(listeners, aliases)
         try:
             validate_listeners(listeners, target_ipv4, target_interface, ssh_port,
                                promoted, dhcp_owners, tls_mode, portfolio_ports,
-                               egress_mode)
+                               egress_mode, aliases, alias_owners)
             return
         except ValueError as error:
             extras = [listener for listener in listeners
@@ -234,7 +272,7 @@ def wait_for_strict_listeners(read_listeners, target_ipv4, target_interface, ssh
             # and no other mismatch; this is only a retry eligibility check.
             validate_listeners([listener for listener in listeners if listener not in extras],
                                target_ipv4, target_interface, ssh_port, promoted, dhcp_owners,
-                               tls_mode, portfolio_ports, egress_mode)
+                               tls_mode, portfolio_ports, egress_mode, aliases, alias_owners)
             owners = trusted_managed_udp_owners(extras, promoted, bool(portfolio_ports))
             if any(not listener.pids or not set(listener.pids) <= owners for listener in extras):
                 raise error
@@ -348,7 +386,8 @@ def main():
                                  args.target_ip, args.interface, args.ssh_port,
                                  args.promoted == '1', tls_mode=args.tls_mode,
                                  portfolio_ports=portfolio_ports,
-                                 egress_mode=args.egress_mode)
+                                 egress_mode=args.egress_mode,
+                                 aliases=os.environ.get('TARGET_ADDITIONAL_IPV4', '').split())
         validate_ufw(output(['ufw', 'status', 'verbose']), args.target_ip, args.interface,
                      args.ssh_port, args.promoted == '1', Path('/etc/default/ufw').read_text(),
                      args.tls_mode, portfolio_ports, args.egress_mode)

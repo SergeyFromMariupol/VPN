@@ -7,7 +7,8 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.2.12'
+readonly release='v1.3.0'
+readonly source_ref='refs/tags/v1.3.0'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -213,11 +214,11 @@ if [[ ! -f $source_dir/tools/preflight.py ]]; then
   printf 'Загрузка VPN %s…\n' "$release"
   if command -v curl >/dev/null; then
     curl --disable --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 --max-time 300 \
-      "https://github.com/$repository/archive/refs/tags/$release.tar.gz" -o "$task_stage/source.tar.gz" 2>"$task_stage/download.log"
+      "https://github.com/$repository/archive/$source_ref.tar.gz" -o "$task_stage/source.tar.gz" 2>"$task_stage/download.log"
   else
     # Ubuntu already needs Python for the installer. Fetch source with its
     # trusted HTTPS client rather than installing curl before the questions.
-    python3 - "https://github.com/$repository/archive/refs/tags/$release.tar.gz" "$task_stage/source.tar.gz" 2>"$task_stage/download.log" <<'PY'
+    python3 - "https://github.com/$repository/archive/$source_ref.tar.gz" "$task_stage/source.tar.gz" 2>"$task_stage/download.log" <<'PY'
 import sys, time, urllib.parse, urllib.request
 class HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
@@ -431,6 +432,10 @@ phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-
 # Always recheck live state, including a resume after a later phase failed.
 installer_error_context verify "$state/verify.log"
 phase --always verify bash "$destination/tools/verify.sh"
+if [[ $TARGET_ADDRESS_MODE == ip ]]; then
+  installer_error_context ip-address "$state/ip-address.log"
+  phase ip-address bash "$runtime/base/install-ip-address.sh"
+fi
 installer_success 'VPN успешно установлен!'
 printf '\nСохраните данные доступа:\n\n'
 cat /etc/krysyuk-standalone/access.env

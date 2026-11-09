@@ -47,6 +47,9 @@ RESERVED_PATHS = (
     '/etc/apt/preferences.d/00-germanyvpn-warp-bootstrap-freeze',
     '/etc/systemd/system/warp-svc.service',
     '/etc/systemd/system/multi-user.target.wants/warp-svc.service',
+    '/etc/vpn-ip-addresses', '/usr/local/lib/vpn-ip-feed',
+    '/etc/systemd/system/vpn-ip-address.service', '/etc/systemd/system/vpn-ip-address.timer',
+    '/etc/systemd/system/vpn-ip-feed.service', '/etc/systemd/system/vpn-ip-aliases.service',
 )
 RESERVED_IDENTITIES = ('xui', 'xui-secrets', 'xraywarp', 'xhttp-test')
 
@@ -79,8 +82,9 @@ def validate_interface_addresses(records: list, env: dict) -> None:
     addresses = [address for record in records for address in record.get('addr_info', [])]
     if not any(address.get('local') == env['TARGET_IPV4'] for address in addresses):
         raise ValueError('IPv4 is not assigned to the selected interface')
-    if any(address.get('scope') == 'global' and address.get('local') != env['TARGET_IPV4']
-           for address in addresses):
+    if (env.get('TARGET_ADDRESS_MODE', 'domain') != 'ip' and
+            any(address.get('scope') == 'global' and address.get('local') != env['TARGET_IPV4']
+                for address in addresses)):
         raise ValueError('The selected interface must have only the target global IPv4; '
                          'multiple addresses require a reviewed configuration')
 

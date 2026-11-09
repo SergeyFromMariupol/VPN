@@ -147,7 +147,12 @@ collect_vpn_parameters() {
   while true; do
     wizard_read address_choice 'Выберите вариант [1]: ' 1 || return 1
     case "$address_choice" in
-      1) TARGET_ADDRESS_MODE=ip; TARGET_FQDN=$TARGET_IPV4; break ;;
+      1)
+        TARGET_ADDRESS_MODE=ip
+        TARGET_IPV4=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n1)
+        TARGET_INTERFACE=$(ip -o -4 address show | awk -v addr="$TARGET_IPV4" '{split($4,a,"/"); if(a[1]==addr) print $2}')
+        TARGET_FQDN=$TARGET_IPV4
+        break ;;
       2)
         TARGET_ADDRESS_MODE=domain
         wizard_note 'Нужна одна DNS A-запись на этот сервер, без AAAA и Cloudflare Proxy.'

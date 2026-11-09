@@ -1,0 +1,12 @@
+[Unit]
+Description=Load secondary VPN IPv4 translations
+After=network-online.target ufw.service nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/vpn-ip-addresses/aliases.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

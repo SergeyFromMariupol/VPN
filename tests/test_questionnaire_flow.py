@@ -127,6 +127,7 @@ printf 'PHASE:renewal\\n' >>"$FIXTURE_ROOT/events"
         'base/acme.sh': 'tls', 'scripts/configure-standalone.sh': 'direct',
         'scripts/expose-panel-https.sh': 'panel', 'base/install-nginx-restart.sh': 'nginx-restart',
         'base/install-cert-reconcile.sh': 'cert-reconcile',
+        'base/install-ip-address.sh': 'ip-address',
         'warp-egress/scripts/install-warp.sh': 'warp', 'scripts/enable-dual-egress.sh': 'dual',
         'tests/postboot-verify.sh': 'baseline-verify',
     }
@@ -463,7 +464,7 @@ class QuestionnaireFlow(unittest.TestCase):
         phases = [event for event in result['events'] if event.startswith('PHASE:')]
         self.assertEqual(phases, ['PHASE:' + name for name in
                          ('base', 'certbot', 'tls', 'direct', 'panel', 'nginx-restart',
-                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'verify')])
+                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'verify', 'ip-address')])
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')

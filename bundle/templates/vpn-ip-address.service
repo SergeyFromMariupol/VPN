@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile the VPN public IPv4 addresses and certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+TimeoutStartSec=25min
+TimeoutStopSec=6min
+ExecStart=/usr/bin/python3 -E -s -B /opt/vpn-installer/bundle/base/ip_reconcile.py

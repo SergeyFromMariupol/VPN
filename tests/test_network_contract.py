@@ -249,6 +249,61 @@ class ListenerContract(unittest.TestCase):
                 self.assertEqual(owners, {41: path} if expected else {})
 
 
+class AliasListenerContract(unittest.TestCase):
+    alias = '1.0.0.1'
+    owner = 123
+
+    def check(self, extra, *, aliases=None, owners=None):
+        aliases = (self.alias,) if aliases is None else aliases
+        owners = {self.owner} if owners is None else owners
+        network.validate_listeners(network.parse_ss(sockets() + extra), IP, INTERFACE,
+                                   SSH, True, aliases=aliases, alias_owners=owners)
+
+    def test_only_explicit_nginx_alias_subscription_is_allowed(self):
+        expected = socket('tcp', f'{self.alias}:2096', self.owner, 'nginx')
+        self.check(expected)
+        for invalid in ('', expected + expected,
+                        socket('tcp', f'{self.alias}%ens4:2096', self.owner),
+                        socket('tcp', f'{self.alias}:2096', 456, 'nginx'),
+                        socket('tcp', f'{self.alias}:443', self.owner, 'nginx'),
+                        socket('tcp', f'{self.alias}:{SSH}', self.owner),
+                        socket('udp', f'{self.alias}:2096', self.owner),
+                        socket('tcp', '8.8.8.8:2096', self.owner)):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.check(invalid)
+        with self.assertRaises(ValueError):
+            self.check(expected, aliases=())
+        with self.assertRaises(ValueError):
+            self.check(expected, owners=set())
+
+    def test_alias_inputs_are_canonical_unicast_and_distinct(self):
+        for aliases in ((IP,), (self.alias, self.alias), ('192.168.0.1',),
+                        ('224.1.2.3',), ('::1',), ('01.0.0.1',)):
+            with self.subTest(aliases=aliases), self.assertRaises(ValueError):
+                self.check('', aliases=aliases)
+
+    def test_nginx_alias_owner_uses_trusted_binary_not_process_name(self):
+        extra = socket('tcp', f'{self.alias}:2096', self.owner, 'nginx')
+        parsed = network.parse_ss(extra)
+        for executable, mode, expected in (
+                (network.NGINX_EXECUTABLE, 0o755, {self.owner}),
+                (network.NGINX_EXECUTABLE, 0o775, set()),
+                ('/tmp/nginx', 0o755, set())):
+            with self.subTest(executable=executable, mode=mode):
+                info = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | mode)
+                with patch.object(network.Path, 'resolve', return_value=PurePosixPath(executable)), \
+                        patch.object(network.Path, 'stat', return_value=info):
+                    self.assertEqual(network.trusted_alias_owners(parsed, {self.alias}),
+                                     expected)
+
+    def test_runtime_uses_authenticated_alias_socket(self):
+        extra = socket('tcp', f'{self.alias}:2096', self.owner)
+        with patch.object(network, 'trusted_alias_owners', return_value={self.owner}):
+            network.wait_for_strict_listeners(lambda: network.parse_ss(sockets() + extra),
+                                              IP, INTERFACE, SSH, True,
+                                              aliases=(self.alias,))
+
+
 class ListenerConvergence(unittest.TestCase):
     def listeners(self, extra=''):
         return network.parse_ss(sockets() + extra)

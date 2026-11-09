@@ -267,7 +267,7 @@ WantedBy=multi-user.target
 
 
 def hook_bytes(info):
-    lineage = "/etc/letsencrypt/live/" + info["TARGET_FQDN"]
+    lineage = "/etc/letsencrypt/live/" + info.get("TARGET_CERT_NAME", info["TARGET_FQDN"])
     need(re.fullmatch(r"/etc/letsencrypt/live/[A-Za-z0-9.-]{1,253}", lineage),
          "PORTFOLIO_RENEWAL_LINEAGE")
     return f"""#!/usr/bin/env bash
@@ -504,7 +504,7 @@ def verify(info, state, *, allow_pending=False):
          "PORTFOLIO_FILE_DRIFT")
     expected_tls_hash = sha(TLS_CERT.read_bytes())
     need(TLS_CERT.read_bytes() ==
-         (Path("/etc/letsencrypt/live") / info["TARGET_FQDN"] /
+         (Path("/etc/letsencrypt/live") / info.get("TARGET_CERT_NAME", info["TARGET_FQDN"]) /
           "fullchain.pem").read_bytes() and
          private(TLS_MARKER) == (expected_tls_hash + "\n").encode(),
          "PORTFOLIO_TLS_DEPLOYMENT")
@@ -728,7 +728,7 @@ def apply(info):
         command(["systemctl", "enable", "--now", UNIT_NAME],
                 step="SERVICE_START", timeout=90)
         command(["env", "RENEWED_LINEAGE=/etc/letsencrypt/live/" +
-                 info["TARGET_FQDN"], "/bin/bash", str(HOOK)],
+                 info.get("TARGET_CERT_NAME", info["TARGET_FQDN"]), "/bin/bash", str(HOOK)],
                 step="RENEWAL_HOOK", timeout=180)
         for rule in rules_for(info, ports):
             command(["ufw", *rule], step="UFW_ADD", timeout=30)
