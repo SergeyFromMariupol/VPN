@@ -232,6 +232,8 @@ def database_edits(connection, old, new, previous_addresses, addresses):
             url = urlsplit(raw)
             need(url.scheme == 'https' and url.netloc == old + ':2096', 'IP_DB_SUB_URI')
             updated = url._replace(netloc=new + ':2096').geturl()
+        elif key == 'subListen' and raw == '127.0.0.1':
+            continue  # The public subscription listener is managed by Nginx.
         else:
             need(raw == old, 'IP_DB_SUB_BIND')
             updated = new

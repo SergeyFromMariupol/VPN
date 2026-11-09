@@ -92,6 +92,9 @@ jobs:
               subprocess.run(['sudo', 'nginx', '-t', '-p', str(root), '-c', str(config)], check=True)
           print('CERTIFICATE_FREE_NGINX_CONFIG=PASS')
           PY
+      - name: Validate subscription metadata through Nginx
+        timeout-minutes: 2
+        run: python3 bundle/tests/test-subscription-proxy.py
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"

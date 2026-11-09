@@ -7,7 +7,7 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.3.0'
+readonly release='v1.3.1'
 readonly source_ref='bd707defe3083e68e8ad841ffe7c17fba7450331'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
@@ -278,9 +278,10 @@ if [[ $mode == --verify ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_HAPP_PROVIDER_ID=''
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
-  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET
+  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_HAPP_PROVIDER_ID
   if [[ -e $state/verify-command.log || -L $state/verify-command.log ]]; then
     [[ -f $state/verify-command.log && ! -L $state/verify-command.log &&
        $(stat -c '%u:%g:%a:%h' "$state/verify-command.log") == 0:0:600:1 ]] || die 'Небезопасный журнал проверки VPN'
@@ -298,6 +299,7 @@ if [[ $mode == --resume ]]; then
   TARGET_TLS_MODE=letsencrypt
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
+  TARGET_HAPP_PROVIDER_ID=''
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Сохранён режим без сертификата; этот установщик продолжает только HTTPS-установки'
   [[ -f $destination/SHA256SUMS ]] || die 'Отсутствует установленный bundle'
@@ -313,6 +315,7 @@ else
   source "$source_dir/tools/wizard.sh"
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
   export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
+  export TARGET_HAPP_PROVIDER_ID
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
   installer_error_context preflight "$task_stage/preflight-error.txt"
@@ -340,6 +343,7 @@ TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
 [[ $TARGET_EGRESS_MODE == warp || $TARGET_EGRESS_MODE == direct || $TARGET_EGRESS_MODE == both ]] || die 'Небезопасный режим выхода'
 [[ $TARGET_PROFILE_SET == basic || $TARGET_PROFILE_SET == dpi || $TARGET_PROFILE_SET == all ]] || die 'Небезопасный набор профилей'
 export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
+export TARGET_HAPP_PROVIDER_ID
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
