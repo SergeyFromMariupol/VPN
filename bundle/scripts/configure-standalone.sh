@@ -525,7 +525,7 @@ jq --exit-status '.success == true and (.obj|type=="object")' "$stage/settings-b
 python3 -I -B "$happ_routing" --link >"$stage/happ-routing.link"
 jq --arg fqdn "$PUBLIC_FQDN" \
   --arg panel_path "/$PANEL_BASE_PATH/" --arg sub_path "/$SUBSCRIPTION_PATH/" \
-  --arg sub_uri "$TARGET_PUBLIC_SCHEME://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
+  --arg sub_origin "$TARGET_PUBLIC_SCHEME://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
   --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" \
   --rawfile happ_routing "$stage/happ-routing.link" '
   .obj
@@ -534,7 +534,7 @@ jq --arg fqdn "$PUBLIC_FQDN" \
   | .subEnable=true | .subJsonEnable=false | .subJsonAutoDetect=false
   | .subTitle="GitHub VPN"
   | .subEnableRouting=true | .subRoutingRules=($happ_routing | rtrimstr("\n"))
-  | .subListen="127.0.0.1" | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
+  | .subListen="127.0.0.1" | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=($sub_origin + $sub_path)
   | .subCertFile=$cert | .subKeyFile=$key | .remarkTemplate="{{COMMENT}}"
 ' "$stage/settings-before.json" >"$stage/settings-intended.json"
 api_post --header 'Content-Type: application/json' --data-binary "@$stage/settings-intended.json" \
@@ -552,8 +552,9 @@ done
 systemctl is-active --quiet x-ui.service || die 'x-ui failed after settings update'
 refresh_api_token
 api_post --output "$stage/settings-after.json" "$api_url/setting/all"
-jq --exit-status '.success == true and .obj.subTitle == "GitHub VPN"' "$stage/settings-after.json" >/dev/null ||
-  die 'subscription title GitHub VPN was not saved'
+jq --exit-status --slurpfile intended "$stage/settings-intended.json" '
+  .success == true and .obj.subTitle == "GitHub VPN" and .obj.subURI == $intended[0].subURI
+' "$stage/settings-after.json" >/dev/null || die 'subscription title or public URI was not saved'
 
 api_post --data-urlencode "xraySetting@$stage/xray-global.json" \
   --data-urlencode 'outboundTestUrl=https://www.cloudflare.com/cdn-cgi/trace' \
@@ -728,6 +729,11 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 fi
 
 subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
+curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
+  --header 'Accept: application/json' --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
+  --output "$stage/subscription-info.json" --config - <<<"url = \"${subscription_url}?format=info\""
+[[ "$(jq -er '.subUrl' "$stage/subscription-info.json")" == "$subscription_url" ]] ||
+  die 'the subscription page (including its QR code) does not advertise the working subscription URL'
 curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
   --user-agent Happ --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
   --dump-header "$stage/subscription.headers" \
