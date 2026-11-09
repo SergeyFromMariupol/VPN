@@ -1,0 +1,185 @@
+.vpn-app-bypass {
+  --vpn-apps-border: var(--ant-color-border-secondary, #e1e5ec);
+  --vpn-apps-text: var(--ant-color-text, #202733);
+  --vpn-apps-muted: var(--ant-color-text-secondary, #536174);
+  --vpn-apps-surface: var(--ant-color-fill-quaternary, #f6f8fb);
+  --vpn-apps-input: var(--bg-card, #fff);
+  --vpn-apps-primary: #245aca;
+  --vpn-apps-primary-hover: #1949b2;
+  --vpn-apps-icon: #245aca;
+  --vpn-apps-tint: #e9f0ff;
+  --vpn-apps-focus: #5385f0;
+  color: var(--vpn-apps-text);
+  background: var(--vpn-apps-surface);
+  border: 1px solid var(--vpn-apps-border);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.subscription-page.is-dark .vpn-app-bypass {
+  --vpn-apps-border: var(--ant-color-border-secondary, #383d47);
+  --vpn-apps-text: var(--ant-color-text, #edf0f6);
+  --vpn-apps-muted: var(--ant-color-text-secondary, #b5bfcd);
+  --vpn-apps-surface: var(--ant-color-fill-quaternary, #292c33);
+  --vpn-apps-input: var(--bg-card, #23252b);
+  --vpn-apps-primary: #285bc3;
+  --vpn-apps-primary-hover: #3269d4;
+  --vpn-apps-icon: #a6c2ff;
+  --vpn-apps-tint: #293a59;
+  --vpn-apps-focus: #a6c2ff;
+}
+
+.vpn-app-bypass__top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.vpn-app-bypass__intro {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.vpn-app-bypass__icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--vpn-apps-icon);
+  background: var(--vpn-apps-tint);
+}
+
+.vpn-app-bypass__icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.vpn-app-bypass__title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.vpn-app-bypass__description {
+  margin: 0;
+  color: var(--vpn-apps-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.vpn-app-bypass__copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  padding: 8px 13px;
+  background: var(--vpn-apps-primary);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.vpn-app-bypass__copy:hover {
+  background: var(--vpn-apps-primary-hover);
+}
+
+.vpn-app-bypass__copy svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.vpn-app-bypass__copy:focus-visible,
+.vpn-app-bypass__summary:focus-visible,
+.vpn-app-bypass__list:focus-visible {
+  outline: 2px solid var(--vpn-apps-focus);
+  outline-offset: 2px;
+}
+
+.vpn-app-bypass__details {
+  margin-top: 13px;
+  padding-top: 10px;
+  border-top: 1px solid var(--vpn-apps-border);
+}
+
+.vpn-app-bypass__summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  min-height: 32px;
+  color: var(--vpn-apps-icon);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.vpn-app-bypass__summary::-webkit-details-marker {
+  display: none;
+}
+
+.vpn-app-bypass__summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.vpn-app-bypass__details[open] .vpn-app-bypass__summary::before {
+  transform: rotate(45deg);
+}
+
+.vpn-app-bypass__list {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 134px;
+  margin-top: 7px;
+  border: 1px solid var(--vpn-apps-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--vpn-apps-input);
+  color: var(--vpn-apps-text);
+  font: 12px/1.6 ui-monospace, Consolas, monospace;
+  resize: vertical;
+}
+
+.vpn-app-bypass__status {
+  display: block;
+  margin-top: 7px;
+  color: var(--vpn-apps-muted);
+  font-size: 12px;
+}
+
+.vpn-app-bypass__status:empty {
+  margin-top: 0;
+}
+
+@media (max-width: 600px) {
+  .vpn-app-bypass {
+    padding: 13px;
+  }
+
+  .vpn-app-bypass__top {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .vpn-app-bypass__copy {
+    width: 100%;
+  }
+}

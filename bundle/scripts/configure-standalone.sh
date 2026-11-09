@@ -532,6 +532,7 @@ jq --arg fqdn "$PUBLIC_FQDN" \
   | .webListen="127.0.0.1" | .webPort=2053 | .webDomain="" | .webBasePath=$panel_path
   | .webCertFile="" | .webKeyFile="" | .trustedProxyCIDRs="127.0.0.1/32,::1/128"
   | .subEnable=true | .subJsonEnable=false | .subJsonAutoDetect=false
+  | .subTitle=(if (.subTitle // "") == "" then env.TARGET_LABEL else .subTitle end)
   | .subEnableRouting=true | .subRoutingRules=($happ_routing | rtrimstr("\n"))
   | .subListen="127.0.0.1" | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
   | .subCertFile=$cert | .subKeyFile=$key | .remarkTemplate="{{COMMENT}}"

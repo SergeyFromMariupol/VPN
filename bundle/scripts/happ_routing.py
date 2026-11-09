@@ -73,8 +73,9 @@ def subscription_proxy(target):
     packages = app_list()
     script = template.with_name('android-app-bypass.js').read_text(encoding='utf-8')
     script = script.replace('__ANDROID_PACKAGES_JSON__', json.dumps(packages.replace(',', '\n') + '\n'))
-    if '$' in script:
-        raise ValueError('Unexpected Nginx variable in Android package script')
+    stylesheet = template.with_name('android-app-bypass.css').read_text(encoding='ascii')
+    if '$' in script or '$' in stylesheet:
+        raise ValueError('Unexpected Nginx variable in Android package assets')
     replacements = {
         '__SERVER_IPV4__': target['TARGET_IPV4'],
         '__PUBLIC_FQDN__': target['TARGET_FQDN'],
@@ -86,6 +87,7 @@ def subscription_proxy(target):
                          '    ssl_protocols TLSv1.2 TLSv1.3;' if scheme == 'https' else ''),
         '__ANDROID_APP_LIST__': packages,
         '__ANDROID_APPS_JS__': json.dumps(script, ensure_ascii=False),
+        '__ANDROID_APPS_CSS__': json.dumps(stylesheet),
         '__ANDROID_APP_LIST_URL__': 'https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/bundle/scripts/android-app-bypass.txt',
         '__ANDROID_APP_LIST_ANNOUNCE__': 'base64:' + base64.b64encode(
             'Скопировать список приложений Android'.encode('utf-8')).decode('ascii'),
