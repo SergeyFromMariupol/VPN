@@ -18,7 +18,7 @@
   title.style.whiteSpace = 'normal';
   const description = document.createElement('div');
   description.className = 'sub-muted';
-  description.textContent = 'По данным RKS Global, некоторые приложения отправляют статус VPN на серверы разработчиков. Добавьте пакеты в исключения, чтобы их трафик шёл напрямую, без IP VPN-сервера.';
+  description.textContent = 'Некоторые из этих приложений проверяют, включён ли VPN. Добавьте пакеты в исключения, чтобы их запросы шли с обычного IP.';
   const status = document.createElement('div');
   status.className = 'sub-muted';
   status.setAttribute('role', 'status');
