@@ -182,8 +182,11 @@ verify_served() {
 }
 if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then sni_option=(-noservername)
 else sni_option=(-servername "$fqdn"); fi
-verify_served "$TARGET_IPV4" 2096
-if [[ -e $nginx_config ]]; then verify_served "$TARGET_IPV4" 2053; fi
+verify_served 127.0.0.1 2096
+if [[ -e $nginx_config ]]; then
+  verify_served "$TARGET_IPV4" 2096
+  verify_served "$TARGET_IPV4" 2053
+fi
 if [[ ${TARGET_ADDRESS_MODE:-domain} == ip ]]; then
   read -r -a aliases <<<"${TARGET_ADDITIONAL_IPV4:-}"
   for address in "${aliases[@]}"; do

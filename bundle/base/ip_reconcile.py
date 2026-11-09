@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlsplit
 
 from ip_addresses import discover, public_ipv4
 from ip_certificate import LE_ROOT, issue, validate
-from ip_feed import rewrite_feed
+from ip_feed import ROUTING_HEADERS, rewrite_feed
 from ip_network import TABLE, fetch_feed, nginx_aliases, nft_rules, rebind_url, uri_lines
 from ip_runtime import CellEdit, edit_rows, plan_runtime
 
@@ -305,15 +305,16 @@ def activate(units, timers, panel=True):
 
 
 def verify_feeds(primary, aliases, path):
-    for ua in ("Happ", "v2RayTun", "Karing"):
+    happ_agent = "Happ"
+    for ua in (happ_agent, "INCY/1.0/android", "v2RayTun", "Karing"):
         body, headers = fetch_feed(primary, path, ua)
-        if ua == "Happ":
+        if ua == happ_agent:
             primary_links = uri_lines(body)
         for address in aliases:
             actual, alias_headers = fetch_feed(address, path, ua)
             if uri_lines(actual) != uri_lines(rewrite_feed(body, primary, address)):
                 raise RuntimeError("IP_ALIAS_SUBSCRIPTION")
-            for header in ("routing", "routing-enable"):
+            for header in ROUTING_HEADERS:
                 if alias_headers.get(header) != headers.get(header):
                     raise RuntimeError("IP_ALIAS_METADATA")
     return primary_links

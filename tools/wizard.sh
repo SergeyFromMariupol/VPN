@@ -172,6 +172,17 @@ collect_vpn_parameters() {
   wizard_note 'Email для уведомлений о сертификате можно оставить пустым.'
   wizard_read ACME_EMAIL 'Email для Let’s Encrypt (необязательно) [пусто]: ' '' || return 1
 
+  wizard_section 'Happ' 'Обход VPN для приложений Android'
+  wizard_note 'Для автоматической настройки в Happ нужен Provider ID. Настройте привязку к хосту подписки в кабинете happ-proxy.com.'
+  wizard_note 'С Provider ID Happ раз в сутки отправляет своему сервису ID устройства, название и версию ОС и хеш хоста подписки.'
+  while true; do
+    wizard_read TARGET_HAPP_PROVIDER_ID 'Happ Provider ID (необязательно) [пусто]: ' || return 1
+    if [[ -z $TARGET_HAPP_PROVIDER_ID || $TARGET_HAPP_PROVIDER_ID =~ ^[A-Za-z0-9]{8}$ ]]; then
+      break
+    fi
+    wizard_error 'Provider ID состоит из 8 латинских букв или цифр. Поле можно оставить пустым.'
+  done
+
   # Personal/friends default.
   TARGET_DEVICE_LIMIT=0
 }

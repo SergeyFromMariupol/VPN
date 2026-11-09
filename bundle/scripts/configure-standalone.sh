@@ -45,10 +45,10 @@ Usage:
   configure-standalone.sh --check-only
   configure-standalone.sh --apply
 
-Creates one standalone 3x-ui subscription with exactly three links:
+Prepares one standalone 3x-ui subscription with exactly three links:
 VLESS+REALITY gRPC/443, VLESS+XHTTP+TLS/H2 TCP/8443, and Hysteria2
 TLS/QUIC UDP/443. Initial provisioning keeps the panel backend loopback-only on
-TCP/2053 and publishes the native subscription over HTTPS on TCP/2096. Run the
+TCP/2053 and prepares the native subscription backend on TCP/2096. Run the
 separate reviewed expose-panel-https.sh transaction when public panel access is
 required.
 EOF
@@ -526,7 +526,7 @@ invalid_code=$(curl --proto '=http' --silent --show-error --max-time 10 \
 api_post --output "$stage/settings-before.json" "$api_url/setting/all"
 jq --exit-status '.success == true and (.obj|type=="object")' "$stage/settings-before.json" >/dev/null
 python3 -I -B "$happ_routing" --link >"$stage/happ-routing.link"
-jq --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" \
+jq --arg fqdn "$PUBLIC_FQDN" \
   --arg panel_path "/$PANEL_BASE_PATH/" --arg sub_path "/$SUBSCRIPTION_PATH/" \
   --arg sub_uri "$TARGET_PUBLIC_SCHEME://$PUBLIC_FQDN:$SUBSCRIPTION_PORT" \
   --arg cert "$TLS_FULLCHAIN" --arg key "$TLS_PRIVATE_KEY" \
@@ -536,7 +536,7 @@ jq --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" \
   | .webCertFile="" | .webKeyFile="" | .trustedProxyCIDRs="127.0.0.1/32,::1/128"
   | .subEnable=true | .subJsonEnable=false | .subJsonAutoDetect=false
   | .subEnableRouting=true | .subRoutingRules=($happ_routing | rtrimstr("\n"))
-  | .subListen=$ip | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
+  | .subListen="127.0.0.1" | .subPort=2096 | .subDomain=$fqdn | .subPath=$sub_path | .subURI=$sub_uri
   | .subCertFile=$cert | .subKeyFile=$key | .remarkTemplate="{{COMMENT}}"
 ' "$stage/settings-before.json" >"$stage/settings-intended.json"
 api_post --header 'Content-Type: application/json' --data-binary "@$stage/settings-intended.json" \
@@ -546,7 +546,7 @@ systemctl restart x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
      ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${SUBSCRIPTION_PORT}[[:space:]]"; then
+     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]"; then
     break
   fi
   sleep 1
@@ -681,7 +681,7 @@ systemctl start x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
      ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${SUBSCRIPTION_PORT}[[:space:]]" &&
+     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" &&
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
      ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
      { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
@@ -716,7 +716,7 @@ fi
 
 subscription_url="${TARGET_PUBLIC_SCHEME}://${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_PATH}/${SUBSCRIPTION_ID}"
 curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --fail --silent --show-error --max-time 30 \
-  --user-agent Happ --resolve "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:${SERVER_IPV4}" \
+  --user-agent Happ --connect-to "${PUBLIC_FQDN}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
   --dump-header "$stage/subscription.headers" \
   --output "$stage/subscription.body" "$subscription_url"
 python3 -I -B "$happ_routing" --check-headers <"$stage/subscription.headers"

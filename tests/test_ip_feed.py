@@ -1,13 +1,15 @@
 import base64
+import io
 import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import Mock, patch
 
 
 BASE = Path(__file__).resolve().parents[1] / "bundle/base"
 sys.path.insert(0, str(BASE))
-from ip_feed import rewrite_feed, rewrite_header
+from ip_feed import Handler, rewrite_feed, rewrite_header
 from ip_network import nginx_aliases, nft_rules, rebind_url, uri_lines
 
 
@@ -47,6 +49,36 @@ class AliasFeedTest(unittest.TestCase):
                          "happ://routing/onadd/dGVzdA==")
         with self.assertRaises(ValueError):
             rebind_url(source + "?unexpected", PRIMARY, ALIAS, 2096)
+
+    def test_alias_response_preserves_android_application_headers(self):
+        metadata = {
+            "ProviderID": "provider-fixture",
+            "Per-App-Proxy-Enable": "1",
+            "Per-App-Proxy-Mode": "bypass",
+            "Per-App-Proxy-List": "com.example.app,ru.example.app",
+        }
+        handler = object.__new__(Handler)
+        handler.path = f"/{PREFIX}/{ID}"
+        handler.command = "GET"
+        handler.headers = {"X-VPN-Alias": ALIAS, "User-Agent": "INCY/1.0/android"}
+        handler.server = Mock()
+        handler.server.settings.read_bytes.return_value = json.dumps({
+            "primary": PRIMARY, "addresses": [PRIMARY, ALIAS],
+        }).encode()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = io.BytesIO()
+        with patch("ip_feed.http.client.HTTPSConnection") as connect:
+            response = connect.return_value.getresponse.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = f"vless://key@{PRIMARY}:443#profile\n".encode()
+            response.getheaders.return_value = metadata.items()
+            handler.serve_feed()
+        handler.send_response.assert_called_once_with(200)
+        for name, value in metadata.items():
+            handler.send_header.assert_any_call(name, value)
+        self.assertEqual(handler.wfile.getvalue(), f"vless://key@{ALIAS}:443#profile\n".encode())
 
     def test_secondary_ports_are_exact_and_hy2_is_translated(self):
         rules = nft_rules(PRIMARY, [ALIAS], "ens3", {(443, "tcp"), (8444, "tcp"), (443, "udp")}).decode()

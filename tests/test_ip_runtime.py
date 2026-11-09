@@ -166,10 +166,25 @@ class PlanTest(unittest.TestCase):
                              .fetchone(), (f'https://{OLD}:2096/remote',))
             self.assertEqual(database.execute('SELECT DISTINCT listen FROM inbounds').fetchall(),
                              [(NEW,)])
+            self.assertEqual(database.execute("SELECT value FROM settings WHERE key='subListen'")
+                             .fetchone(), (NEW,))
             plan.restore_database(database)
             plan.restore_database(database)
             self.assertEqual(database.execute('SELECT DISTINCT listen FROM inbounds').fetchall(),
                              [(OLD,)])
+            database.rollback()
+
+    def test_migration_keeps_loopback_subscription_backend(self):
+        with closing(sqlite3.connect(self.db)) as database:
+            database.execute("UPDATE settings SET value='127.0.0.1' WHERE key='subListen'")
+            database.commit()
+            plan = self.plan()
+            database.execute('BEGIN IMMEDIATE')
+            plan.apply_database(database)
+            settings = dict(database.execute('SELECT key, value FROM settings'))
+            self.assertEqual(settings['subListen'], '127.0.0.1')
+            self.assertEqual(settings['subDomain'], NEW)
+            self.assertEqual(settings['subURI'], f'https://{NEW}:2096')
             database.rollback()
 
     def test_readback_rejects_foreign_runtime_and_database(self):

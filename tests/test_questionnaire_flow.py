@@ -34,7 +34,8 @@ events = root / 'events'
 real_python = sys.executable
 keys = ('TARGET_ADDRESS_MODE', 'TARGET_TLS_MODE', 'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET',
         'TARGET_IPV4', 'TARGET_FQDN', 'TARGET_INTERFACE',
-        'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL')
+        'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL',
+        'TARGET_HAPP_PROVIDER_ID')
 
 def event(value):
     with events.open('a', encoding='utf-8') as output:
@@ -206,6 +207,8 @@ def questionnaire_steps():
                  settings.get('label_answers', [settings.get('label', 'Мой VPN')]))
     steps.append(('Email для Let’s Encrypt (необязательно) [пусто]:',
                   settings.get('email', '')))
+    steps.extend(('Happ Provider ID (необязательно) [пусто]:', value) for value in
+                 settings.get('provider_answers', ['']))
     for index, value in settings.get('override', {}).items():
         marker, _ = steps[int(index)]
         steps[int(index)] = (marker, value)
@@ -285,13 +288,15 @@ try:
             target.write_text(re.sub(r'^TARGET_TLS_MODE=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_selection'):
             target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET)=.*\n', '', target.read_text(), flags=re.M))
+        if settings.get('legacy_without_provider'):
+            target.write_text(re.sub(r'^TARGET_HAPP_PROVIDER_ID=.*\n', '', target.read_text(), flags=re.M))
         before = target.read_bytes()
         before_events = len(observed)
         env = environment()
         # Deliberately conflicting values must not replace saved answers.
         env.update(TARGET_LABEL='caller-must-not-win', ACME_EMAIL='caller@example.invalid',
                    TARGET_TLS_MODE='none' if settings.get('legacy_without_tls_mode') else 'letsencrypt',
-                   TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all')
+                   TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all', TARGET_HAPP_PROVIDER_ID='Caller99')
         child = subprocess.run(['/bin/bash', str(installed / 'install.sh'), '--resume'],
                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                start_new_session=True, timeout=30)
@@ -360,6 +365,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('1. По умолчанию max.ru', labels)
         self.assertIn('2. Свой', labels)
         self.assertIn('Email для Let’s Encrypt (необязательно) [пусто]:', wizard)
+        self.assertIn('Happ Provider ID (необязательно) [пусто]:', wizard)
         self.assertNotIn('Выберите режим сертификата', wizard)
         self.assertNotIn('Без сертификата', wizard)
         self.assertNotRegex(wizard, r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
@@ -368,8 +374,8 @@ class QuestionnaireFlow(unittest.TestCase):
             self.assertNotIn(removed, wizard)
 
     def test_eof_at_each_question_publishes_nothing(self):
-        # Console: egress, set, port, address, domain, SNI, name, email.
-        for index in range(8):
+        # Console: egress, set, port, address, domain, SNI, name, email, provider ID.
+        for index in range(9):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
@@ -395,14 +401,15 @@ class QuestionnaireFlow(unittest.TestCase):
                         TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_IPV4='8.8.4.4',
                         TARGET_FQDN='8.8.4.4', TARGET_INTERFACE='enp1s0',
                         TARGET_SSH_PORT='2222', TARGET_DEVICE_LIMIT='0',
-                        TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='')
+                        TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='',
+                        TARGET_HAPP_PROVIDER_ID='')
         self.assertEqual(result['persisted'], expected)
         self.assertEqual({key: result['phase_inputs'].get(key) for key in expected}, expected)
         self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
         events = result['events']
         self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(6)])
+                         ['ANSWER:' + str(index) for index in range(7)])
         self.assertLess(events.index('ANSWER:3'), events.index('SNI_PROBE:max.ru'))
         self.assertLess(events.index('SNI_PROBE:max.ru'), events.index('SNI_TLS:max.ru'))
         self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:4'))
@@ -447,7 +454,7 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['persisted']['ACME_EMAIL'], '')
                 self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:' + str(index) for index in range(7)])
+                                 ['ANSWER:' + str(index) for index in range(8)])
                 self.assertEqual('Домен VPN:' in result['output'], domain)
                 self.assertEqual('SSH порт [22]' in result['output'], not domain)
                 self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('SNI_PROBE:max.ru'))
@@ -471,17 +478,23 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['resume']['events'], ['PHASE:verify'])
         self.assertNotIn('Выберите режим сертификата', result['resume']['output'])
 
-    def test_optional_acme_contact_is_saved_and_invalid_email_stops_before_bootstrap(self):
+    def test_optional_settings_are_saved_and_invalid_inputs_stop_before_bootstrap(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              email='owner+vpn@example.org', resume=True)
+                              email='owner+vpn@example.org',
+                              provider_answers=['bad;id', 'Aa123456'], resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual(result['persisted']['ACME_EMAIL'], 'owner+vpn@example.org')
         self.assertEqual(result['phase_inputs']['ACME_EMAIL'], 'owner+vpn@example.org')
         self.assertEqual(result['resume']['phase_inputs']['ACME_EMAIL'], 'owner+vpn@example.org')
+        self.assertEqual(result['persisted']['TARGET_HAPP_PROVIDER_ID'], 'Aa123456')
+        self.assertEqual(result['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], 'Aa123456')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], 'Aa123456')
         self.assertTrue(result['resume']['target_unchanged'])
 
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
                                              address_choice='1', email='bad@@example.org'))
+        self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
+                                             address_choice='1', provider_answers=['bad;id', None]))
 
     def test_legacy_resume_defaults_to_letsencrypt(self):
         legacy = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
@@ -541,11 +554,12 @@ class QuestionnaireFlow(unittest.TestCase):
 
     def test_legacy_saved_selection_defaults_ignore_caller_environment(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              resume=True, legacy_without_selection=True)
+                              resume=True, legacy_without_selection=True, legacy_without_provider=True)
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_EGRESS_MODE'], 'both')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_SET'], 'basic')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], '')
 
     def test_invalid_menu_retries_and_eof_cannot_start_installation(self):
         result = self.fixture(menu_answers=['invalid', '3', '2'])

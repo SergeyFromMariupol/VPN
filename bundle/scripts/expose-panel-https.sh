@@ -8,6 +8,7 @@ readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_FQDN="$TARGET_FQDN"
 readonly PUBLIC_INTERFACE="$TARGET_INTERFACE"
 readonly PANEL_PORT='2053'
+readonly SUBSCRIPTION_PORT='2096'
 readonly runtime_root='/etc/krysyuk-standalone'
 readonly runtime_env="$runtime_root/server.env"
 readonly access_file="$runtime_root/access.env"
@@ -26,10 +27,9 @@ Usage:
   expose-panel-https.sh --check-only
   expose-panel-https.sh --apply
 
-Publishes the existing loopback-only 3X-UI backend through an HTTPS nginx
-listener on the explicit target FQDN at TCP/2053. Only the private panel base path is
-proxied; other paths return 404. POST requests and concurrent connections are
-rate-limited per source address.
+Publishes the loopback 3X-UI panel and subscription through nginx on the
+target address at TCP/2053 and TCP/2096. Only the private base paths are
+proxied. Panel POST requests and concurrent connections are rate-limited.
 EOF
 }
 
@@ -59,6 +59,7 @@ done
 # shellcheck disable=SC1090
 source "$runtime_env"
 [[ "${PANEL_BASE_PATH:-}" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || die 'panel base path is invalid'
+[[ "${SUBSCRIPTION_PATH:-}" =~ ^[a-f0-9]{40}$ ]] || die 'subscription base path is invalid'
 
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 [[ -f "$tls_fullchain" && ! -L "$tls_fullchain" ]] || die 'TLS full chain is missing or unsafe'
@@ -82,6 +83,8 @@ ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
 if ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]"; then
   die 'public TCP/2053 is already occupied'
 fi
+ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" ||
+  die '3X-UI subscription backend is not loopback-only on TCP/2096'
 if ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW"; then
   die 'UFW already permits TCP/2053; reviewed merge required'
 fi
@@ -207,6 +210,8 @@ for key,value in {
     text=text.replace(key,value)
 Path(os.environ['NGINX_RENDERED']).write_text(text)
 PY
+SUBSCRIPTION_PATH="$SUBSCRIPTION_PATH" python3 -I -B "$bundle_root/scripts/happ_routing.py" --nginx \
+  >>"$stage/3x-ui-public.conf"
 grep -Fq '__' "$stage/3x-ui-public.conf" && die 'unresolved nginx template placeholder'
 install -o root -g root -m 0600 "$stage/3x-ui-public.conf" "$nginx_config"
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
@@ -264,6 +269,7 @@ systemctl is-active --quiet x-ui.service
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then systemctl is-active --quiet certbot.timer; fi
 
 bash "$bundle_root/tests/panel-login-acceptance.sh" >/dev/null
+bash "$bundle_root/tests/verify-happ-routing.sh"
 touch "$backup/PROVISION_COMMITTED"
 chmod 0600 "$backup/PROVISION_COMMITTED"
 committed=1
