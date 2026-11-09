@@ -8,7 +8,7 @@ unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONIN
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
 readonly release='v1.3.0'
-readonly source_ref='refs/heads/ip-auto-happ-v1.3.0'
+readonly source_ref='bd707defe3083e68e8ad841ffe7c17fba7450331'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
