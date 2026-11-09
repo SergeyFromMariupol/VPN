@@ -14,12 +14,15 @@
   main.className = 'sub-row-main';
   const title = document.createElement('div');
   title.className = 'sub-row-title';
-  title.textContent = 'Пакеты приложений Android';
+  title.textContent = 'Приложения, которые ищут VPN';
+  title.style.whiteSpace = 'normal';
+  const description = document.createElement('div');
+  description.className = 'sub-muted';
+  description.textContent = 'Некоторые из этих приложений проверяют, включён ли VPN. Добавьте пакеты в исключения, чтобы их запросы шли с обычного IP.';
   const status = document.createElement('div');
   status.className = 'sub-muted';
   status.setAttribute('role', 'status');
-  status.textContent = 'Вставьте список в меню импорта приложений VPN-клиента.';
-  main.append(title, status);
+  main.append(title, description, status);
 
   const copy = document.createElement('button');
   copy.type = 'button';
