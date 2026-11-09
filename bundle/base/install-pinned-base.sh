@@ -6,11 +6,12 @@ umask 077
 source "$(cd -- "$(dirname -- "$0")/../scripts" && pwd -P)/target-contract.sh"
 readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_INTERFACE="$TARGET_INTERFACE"
-readonly XUI_VERSION='3.7.0'
-readonly XUI_URL='https://github.com/MHSanaei/3x-ui/releases/download/v3.7.0/x-ui-linux-amd64.tar.gz'
-readonly XUI_ARCHIVE_SHA256='0f8dd7baef3458f6591574e24814f322cf7f5e1e27f0a594683745e50be84ec5'
-readonly XUI_BINARY_SHA256='4738190332c5480ec96fd72e10a21157ee4bcf91c240a9b4b061d14f15092298'
-readonly XRAY_BINARY_SHA256='64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
+readonly XUI_VERSION='3.11.0'
+# Official v3.11.0 amd64 asset. The release page download can fail at a GitHub edge.
+readonly XUI_URL='https://api.github.com/repos/MHSanaei/3x-ui/releases/assets/675882005?download=1'
+readonly XUI_ARCHIVE_SHA256='0ddfa4702f595442e2962acd81addc768fdacaa4ff2672c971a0463dae744916'
+readonly XUI_BINARY_SHA256='fb7b3776334fce69299f90168c8c31377b69f89c7787088e6dbf561d07b3d345'
+readonly XRAY_BINARY_SHA256='a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e'
 readonly xui_root='/usr/local/x-ui'
 readonly db_root='/etc/x-ui'
 readonly service_path='/etc/systemd/system/x-ui.service'
@@ -49,7 +50,9 @@ done
 
 bundle_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 readonly bundle_root
+readonly service_source="$bundle_root/templates/x-ui.service"
 readonly hardening_source="$bundle_root/templates/20-krysyuk-nonroot-hardening.conf"
+[[ -f $service_source && ! -L $service_source ]] || die 'owned x-ui service template is missing'
 [[ -f $hardening_source && ! -L $hardening_source ]] || die 'non-root hardening template is missing'
 # shellcheck source=apt-options.sh
 source "$bundle_root/base/apt-options.sh"
@@ -272,7 +275,8 @@ nginx -t
 ! ss -H -lnt | grep -Eq '(:|\])80[[:space:]]' || die 'unexpected TCP/80 listener'
 
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-  --retry 2 --connect-timeout 15 --max-time 300 --output "$stage/x-ui.tar.gz" "$XUI_URL"
+  --retry 2 --connect-timeout 15 --max-time 300 --header 'Accept: application/octet-stream' \
+  --output "$stage/x-ui.tar.gz" "$XUI_URL"
 printf '%s  %s\n' "$XUI_ARCHIVE_SHA256" "$stage/x-ui.tar.gz" | sha256sum --check --strict -
 tar -tzf "$stage/x-ui.tar.gz" >"$stage/archive-files.txt"
 python3 - "$stage/archive-files.txt" <<'PY'
@@ -287,7 +291,7 @@ tar -xzf "$stage/x-ui.tar.gz" -C "$stage/extracted"
 mapfile -t xui_sources < <(find "$stage/extracted" -mindepth 1 -maxdepth 3 -type f -name x-ui -printf '%h\n' | sort -u)
 [[ ${#xui_sources[@]} == 1 ]] || die 'unexpected x-ui archive layout'
 xui_source=${xui_sources[0]}
-[[ -f $xui_source/x-ui.service.debian && ! -L $xui_source/x-ui ]] || die 'missing/unsafe release files'
+[[ -f $xui_source/x-ui && ! -L $xui_source/x-ui ]] || die 'missing/unsafe release binary'
 printf '%s  %s\n' "$XUI_BINARY_SHA256" "$xui_source/x-ui" | sha256sum --check --strict -
 printf '%s  %s\n' "$XRAY_BINARY_SHA256" "$xui_source/bin/xray-linux-amd64" | sha256sum --check --strict -
 # The official archive may store the bundled core without an executable bit.
@@ -295,7 +299,7 @@ printf '%s  %s\n' "$XRAY_BINARY_SHA256" "$xui_source/bin/xray-linux-amd64" | sha
 chmod 0755 "$xui_source/x-ui" "$xui_source/bin/xray-linux-amd64"
 [[ $("$xui_source/x-ui" -v 2>&1) == "$XUI_VERSION" ]] || die 'x-ui release version mismatch'
 xray_version_output=$("$xui_source/bin/xray-linux-amd64" version 2>&1) || die 'Xray version command failed'
-grep -Eq '^Xray[[:space:]]+26[.]7[.]28([[:space:]]|$)' <<<"$xray_version_output" || die 'Xray release version mismatch'
+grep -Eq '^Xray[[:space:]]+26[.]10[.]21([[:space:]]|$)' <<<"$xray_version_output" || die 'Xray release version mismatch'
 unset xray_version_output
 
 groups_created=1
@@ -308,7 +312,7 @@ cp -a -- "$xui_source/." "$xui_root/"
 chown -R root:root "$xui_root"
 find "$xui_root" -type d -exec chmod 0755 {} +
 chmod 0755 "$xui_root/x-ui" "$xui_root/x-ui.sh" "$xui_root/bin/xray-linux-amd64"
-install -o root -g root -m 0644 "$xui_root/x-ui.service.debian" "$service_path"
+install -o root -g root -m 0644 "$service_source" "$service_path"
 install -d -o root -g root -m 0755 "$hardening_root/x-ui.service.d"
 install -o root -g root -m 0644 "$hardening_source" "$hardening_root/x-ui.service.d/20-krysyuk-nonroot-hardening.conf"
 systemctl daemon-reload
@@ -342,6 +346,6 @@ LC_ALL=C comm -13 "$backup/packages.installed.before" "$backup/packages.installe
 printf '%s\n' "$XUI_ARCHIVE_SHA256 x-ui-linux-amd64.tar.gz" "$XUI_BINARY_SHA256 x-ui" "$XRAY_BINARY_SHA256 xray-linux-amd64" >"$backup/PINNED_SHA256"
 touch "$backup/BASE_COMMITTED"
 committed=1
-printf 'PINNED_BASE_OK=1 XUI=3.7.0 XRAY=26.7.28\n'
+printf 'PINNED_BASE_OK=1 XUI=3.11.0 XRAY=26.10.21\n'
 printf 'XUI_ENABLED_STOPPED=1 INBOUNDS=0 NGINX_STOPPED_NO_SITES=1 CERTBOT_TIMER=active\n'
 printf 'SNAPSHOT=%s\n' "$backup"

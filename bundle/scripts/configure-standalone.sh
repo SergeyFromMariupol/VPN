@@ -16,9 +16,9 @@ readonly REALITY_TARGET="$TARGET_REALITY_SNI"
 readonly PANEL_PORT='2053'
 readonly SUBSCRIPTION_PORT='2096'
 readonly XHTTP_PORT='8443'
-readonly XUI_VERSION='3.7.0'
-readonly XRAY_VERSION='26.7.28'
-readonly XRAY_SHA256='64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'
+readonly XUI_VERSION='3.11.0'
+readonly XRAY_VERSION='26.10.21'
+readonly XRAY_SHA256='a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e'
 
 readonly xui='/usr/local/x-ui/x-ui'
 readonly xray='/usr/local/x-ui/bin/xray-linux-amd64'
@@ -443,9 +443,7 @@ ufw allow "$TARGET_SSH_PORT/tcp" comment 'SSH key-only' >/dev/null
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then ufw allow 80/tcp comment 'ACME HTTP-01' >/dev/null; fi
 ufw --force enable >/dev/null
 
-# The supported CLI places password/base path in argv. On this verified clean,
-# stopped database use the same bcrypt cost and schema as upstream v3.7.0
-# internal/web/service/panel/user.go. This does not bypass fresh preconditions.
+# Seed the stopped fresh database before 3X-UI starts its first-user setup.
 python3 - <<'PY'
 import bcrypt
 import os
@@ -456,13 +454,12 @@ try:
     with db:
         if db.execute('select count(*) from inbounds').fetchone()[0] != 0:
             raise SystemExit('initial credentials require a clean zero-inbound DB')
-        users = db.execute('select id from users').fetchall()
-        if len(users) != 1:
-            raise SystemExit('initial credentials require exactly one bootstrap user')
+        if db.execute('select count(*) from users').fetchone()[0] != 0:
+            raise SystemExit('initial credentials require a clean zero-user DB')
         password = bcrypt.hashpw(os.environ['PANEL_PASSWORD'].encode(),
                                  bcrypt.gensalt(rounds=10, prefix=b'2a')).decode()
-        db.execute('update users set username=?,password=?,login_epoch=coalesce(login_epoch,0)+1 where id=?',
-                   (os.environ['PANEL_USERNAME'], password, users[0][0]))
+        db.execute('insert into users(username,password,login_epoch) values(?,?,0)',
+                   (os.environ['PANEL_USERNAME'], password))
         for key, value in {
             'webListen': '127.0.0.1', 'webPort': '2053',
             'webBasePath': '/' + os.environ['PANEL_BASE_PATH'] + '/',
@@ -494,7 +491,7 @@ fi
 
 refresh_api_token() {
   local token_output token
-  token_output=$("$xui" setting -getApiToken true 2>&1)
+  token_output=$("$xui" setting -getApiToken=true -tokenName vpn-installer -tokenScope admin 2>&1)
   token=$(sed -nE 's/^apiToken:[[:space:]]*//p' <<<"$token_output" | sed -n '1p')
   [[ "$token" =~ ^[A-Za-z0-9._-]{32,256}$ ]] || die 'could not obtain a safe local API bearer'
   printf '%s\n' "$token" >"$api_token_file"
@@ -702,6 +699,18 @@ for candidate_pid in "${xray_children[@]}"; do
 done
 [[ "$xray_count" -eq 1 && "$(ps -o user= -p "$xray_pid" | tr -d '[:space:]')" == xui ]] ||
   die 'Xray child is not running as xui'
+for pid in "$main_pid" "$xray_pid"; do
+  # Linux CAP_NET_BIND_SERVICE is bit 10 (hex 400). A process may drop it.
+  awk '
+    $1 == "CapBnd:" { bounded = ($2 ~ /^0*400$/) }
+    $1 == "CapEff:" || $1 == "CapAmb:" {
+      checked++
+      if ($2 !~ /^0*(400)?$/) unexpected = 1
+    }
+    $1 == "NoNewPrivs:" { locked = ($2 == 1) }
+    END { exit !(bounded && locked && checked == 2 && !unexpected) }
+  ' "/proc/$pid/status" || die 'x-ui/Xray process privileges exceed the managed contract'
+done
 
 ufw allow "$SUBSCRIPTION_PORT/tcp" comment '3x-ui HTTPS subscription' >/dev/null
 ufw allow 443/tcp comment 'VLESS REALITY' >/dev/null

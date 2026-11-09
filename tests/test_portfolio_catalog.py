@@ -85,8 +85,8 @@ class PortfolioCatalogTests(unittest.TestCase):
 
     def test_recipe_fields_and_no_target_specific_values(self):
         data = load_catalog()
-        self.assertEqual(data["pinned_3x_ui"], "v3.7.0")
-        self.assertEqual(data["pinned_xray"], "26.7.28")
+        self.assertEqual(data["pinned_3x_ui"], "v3.11.0")
+        self.assertEqual(data["pinned_xray"], "26.10.21")
         for row in data["entries"]:
             self.assertIn(row["tier"], {"A", "B1", "B2", "C", "D", "E"})
             self.assertIn(row["egress"], {"warp", "direct"})

@@ -3,8 +3,8 @@
   "source_matrix_sha256": "d8f41a14946d7338818bf39158d2c5272d2a029e47afec1a82e5730570720160",
   "source_working_catalog_sha256": "b5b8307409365a57c4527d7141f705cf7a3b4f7a8c4e166a238342c1511e87ff",
   "source_mobile_receipt_sha256": "363f1726b1ef29aaf501e6198b7087f2cb50875c2c7052bdaae7c4eb0d03034b",
-  "pinned_3x_ui": "v3.7.0",
-  "pinned_xray": "26.7.28",
+  "pinned_3x_ui": "v3.11.0",
+  "pinned_xray": "26.10.21",
   "port_base_recommendation": 30000,
   "port_offset_count": 127,
   "entries": [

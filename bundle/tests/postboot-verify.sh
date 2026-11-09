@@ -60,11 +60,11 @@ trap 'exit 129' HUP
 grep -Fxq 'ID=ubuntu' /etc/os-release
 grep -Fxq 'VERSION_ID="24.04"' /etc/os-release
 [[ $(uname -m) == x86_64 ]]
-[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.7.0 ]]
-printf '%s  %s\n' '64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d' "$xray" |
+[[ $(/usr/local/x-ui/x-ui -v 2>&1) == 3.11.0 ]]
+printf '%s  %s\n' 'a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e' "$xray" |
   sha256sum --check --strict - >/dev/null
 xray_version_output=$("$xray" version 2>&1)
-grep -Eq '^Xray 26[.]7[.]28 ' <<<"$xray_version_output"
+grep -Eq '^Xray 26[.]10[.]21 ' <<<"$xray_version_output"
 unset xray_version_output
 sshd_effective=$(sshd -T)
 if grep -Fxq 'passwordauthentication no' <<<"$sshd_effective" &&
@@ -289,7 +289,8 @@ jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
   --rawfile warp_xhttp "$stage/warp-xhttp.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
-  ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]) as $rs
+  .obj |= map(.settings.clients |= sort_by(.email|startswith("germany-warp-")|not))
+  | ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")]) as $rs
   | ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")]) as $hs
   | ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")]) as $xs
   | .success==true and (.obj|length)==3 and ($rs|length)==1 and ($hs|length)==1 and ($xs|length)==1

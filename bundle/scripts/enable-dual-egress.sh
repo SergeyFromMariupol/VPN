@@ -95,7 +95,7 @@ trap 'exit 129' HUP
 [[ $EUID -eq 0 ]] || die 'must run as root'
 [[ ${CONFIRM_STANDALONE_DUAL_EGRESS:-} == "ENABLE-WARP-AND-DIRECT-$TARGET_IPV4" ]] || \
   die 'exact CONFIRM_STANDALONE_DUAL_EGRESS value is required'
-for command_name in cat chmod cp curl date grep install ip jq mktemp nft python3 rm seq sha256sum sqlite3 ss systemctl tar tr ufw; do
+for command_name in cat chmod cp curl date grep install ip jq mktemp nft python3 rm runuser seq sha256sum sqlite3 ss systemctl tar tr ufw; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing dependency: $command_name"
 done
 [[ -r "$runtime_env" && -r "$api_token_file" && -s "$db" && -x "$xray" ]] || \
@@ -409,11 +409,17 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then inbound_payloads=("$stage/reality
 for payload in "${inbound_payloads[@]}"; do
   inbound_id=$(jq -r '.id' "$payload")
   [[ "$inbound_id" =~ ^[1-9][0-9]*$ ]] || die 'managed inbound ID is invalid'
-  api_post --header 'Content-Type: application/json' --data-binary "@$payload" \
-    --output "$stage/inbound-${inbound_id}.response" "$api_url/inbounds/update/$inbound_id"
-  jq --exit-status '.success==true' "$stage/inbound-${inbound_id}.response" >/dev/null || \
-    die '3x-ui rejected dual-client inbound update'
-  wait_ready || die 'listeners did not recover after inbound update'
+  # 3X-UI 3.11 preserves clients on inbound edits and requires unique subIds
+  # when adding clients through its API. Stage each WARP identity separately.
+  python3 -c 'import secrets; print(secrets.token_hex(32))' >"$stage/$inbound_id.staged-sub"
+  jq --rawfile sub "$stage/$inbound_id.staged-sub" '
+    {client:(.settings.clients[0] | .subId=($sub|rtrimstr("\n"))), inboundIds:[.id]}
+  ' "$payload" >"$stage/warp-client.json"
+  api_post --header 'Content-Type: application/json' --data-binary "@$stage/warp-client.json" \
+    --output "$stage/warp-client.response" "$api_url/clients/add"
+  jq --exit-status '.success==true' "$stage/warp-client.response" >/dev/null || \
+    die '3x-ui rejected WARP client creation'
+  wait_ready || die 'listeners did not recover after WARP client creation'
 done
 
 api_post --header 'Content-Type: application/json' --data-binary "@$stage/external-links.json" \
@@ -422,7 +428,66 @@ api_post --header 'Content-Type: application/json' --data-binary "@$stage/extern
 jq --exit-status '.success==true' "$stage/external-links.response" >/dev/null || \
   die '3x-ui rejected ordered direct external links'
 
-systemctl restart x-ui.service
+# Publish the existing multi-client subscription format while the daemon is
+# stopped. Keep both SQLite representations in sync under the existing rollback.
+systemctl stop x-ui.service
+grouped_subscription_sql=$(cat <<'PY'
+import json
+import sqlite3
+import sys
+
+plan = json.load(sys.stdin)
+with sqlite3.connect(f'file:{sys.argv[1]}?mode=rw', uri=True, timeout=20) as db:
+    db.execute('BEGIN IMMEDIATE')
+    for intended, staged_id in plan['inbounds']:
+        inbound_id = intended['id']
+        warp, direct = intended['settings']['clients']
+        row = db.execute('SELECT settings, sub_sort_index FROM inbounds WHERE id=?',
+                         (inbound_id,)).fetchone()
+        if row is None or row[1] != intended['subSortIndex']:
+            raise SystemExit('dual-egress subscription order precondition changed')
+        settings = json.loads(row[0])
+        clients = settings['clients']
+        if len(clients) != 2 or {client['email'] for client in clients} != {warp['email'], direct['email']}:
+            raise SystemExit('dual-egress inbound client membership changed')
+        key, column = ('auth', 'auth') if intended['protocol'] == 'hysteria' else ('id', 'uuid')
+        for wanted, old_sub_id in ((warp, staged_id), (direct, plan['public_id'])):
+            email = wanted['email']
+            current = next(client for client in clients if client['email'] == email)
+            if current.get(key) != wanted[key] or current.get('subId') != old_sub_id:
+                raise SystemExit('dual-egress embedded client precondition changed')
+            result = db.execute(f'''UPDATE clients SET sub_id=?, comment=?
+                WHERE email=? AND sub_id=? AND {column}=?
+                AND id IN (SELECT client_id FROM client_inbounds WHERE inbound_id=?)''',
+                (wanted['subId'], wanted['comment'], email, old_sub_id, wanted[key], inbound_id))
+            if result.rowcount != 1:
+                raise SystemExit('dual-egress normalized client precondition changed')
+            current.update(subId=wanted['subId'], comment=wanted['comment'])
+        db.execute('UPDATE inbounds SET settings=? WHERE id=?',
+                   (json.dumps(settings, ensure_ascii=False, separators=(',', ':')), inbound_id))
+    if db.execute('PRAGMA quick_check').fetchone() != ('ok',):
+        raise SystemExit('dual-egress grouped subscription database check failed')
+PY
+)
+# The database and WAL belong to xui inside its sticky directory. Use the
+# same identity as the running panel, with the private plan passed on stdin.
+python3 - "$stage" "${inbound_payloads[@]}" <<'PY' | \
+  runuser -u xui -- python3 -I -B -c "$grouped_subscription_sql" "$db"
+import json
+from pathlib import Path
+import sys
+
+stage, *payloads = sys.argv[1:]
+root = Path(stage)
+inbounds = []
+for payload in payloads:
+    intended = json.loads(Path(payload).read_text())
+    staged_id = (root / f"{intended['id']}.staged-sub").read_text().strip()
+    inbounds.append((intended, staged_id))
+json.dump({'public_id': (root / 'public-sub.id').read_text().strip(),
+           'inbounds': inbounds}, sys.stdout)
+PY
+systemctl start x-ui.service
 wait_ready || die 'x-ui did not recover after final reconciliation'
 sqlite3 "$db" 'PRAGMA quick_check;' | grep -qx ok || die 'live SQLite quick_check failed'
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test \
@@ -436,7 +501,8 @@ jq --exit-status --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile warp_reality "$stage/warp-reality.uuid" --rawfile warp_xhttp "$stage/warp-xhttp.uuid" \
   --rawfile warp_hysteria "$stage/warp-hysteria.auth" '
   def clean: rtrimstr("\n");
-  .success==true and (.obj|length==((env.TARGET_PROTOCOL_COUNT // "3")|tonumber)) and all(.obj[];.enable==true and (.settings.clients|length)==2)
+  .obj |= map(.settings.clients |= sort_by(.email|startswith("germany-warp-")|not))
+  | .success==true and (.obj|length==((env.TARGET_PROTOCOL_COUNT // "3")|tonumber)) and all(.obj[];.enable==true and (.settings.clients|length)==2)
   and ([.obj[]|select(.remark=="VPN VLESS REALITY TCP 443")|.subSortIndex])==[1]
   and ([.obj[]|select(.remark=="VPN Hysteria2 UDP 443")|.subSortIndex])==(if env.TARGET_TLS_MODE=="none" then [] else [2] end)
   and ([.obj[]|select(.remark=="VPN VLESS XHTTP TLS 8443")|.subSortIndex])==[(if env.TARGET_TLS_MODE=="none" then 2 else 3 end)]

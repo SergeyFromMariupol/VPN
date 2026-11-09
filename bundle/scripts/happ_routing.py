@@ -82,6 +82,7 @@ def subscription_proxy(target):
         '__ANDROID_APP_LIST__': app_list(),
         '__HAPP_PROVIDER_ID__': provider_id,
         '__HAPP_APP_MODE__': 'bypass' if provider_id else '',
+        '__INCY_ROUTING__': routing_link(target['TARGET_LABEL']),
         '__V2RAYTUN_ROUTING__': v2raytun_header(target['TARGET_LABEL']),
     }
     config = template.read_text(encoding='ascii')
