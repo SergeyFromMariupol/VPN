@@ -44,9 +44,12 @@ m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 if sys.argv[1:]==['--nginx']:sys.stdout.write(m.render(os.environ))
 elif sys.argv[1:]==['--default-page']:sys.stdout.write(m.BODY)
 elif sys.argv[1:] in (['--probe-target'],['--probe-tls']):
-    sys.exit(1 if (Path(os.environ['VPN_DECOY_FIXTURE'])/'fail-probe').exists() else 0)
+    r=Path(os.environ['VPN_DECOY_FIXTURE'])
+    sys.exit(1 if (r/'fail-probe').exists() or (sys.argv[1:]==['--probe-target'] and (r/'php-only-page').exists()) else 0)
 else:sys.exit(2)
 ''')
+        (self.root / 'bundle/base/enable-reality-decoy-php.sh').write_text(
+            '#!/usr/bin/env bash\nprintf called >"$VPN_DECOY_FIXTURE/php-helper-called"\n')
         self.stub('systemctl', r'''
 import json,os,sys
 from pathlib import Path
@@ -79,9 +82,11 @@ p.write_text(json.dumps(s))
 import json,os
 from pathlib import Path
 r=Path(os.environ['VPN_DECOY_FIXTURE']);s=json.loads((r/'state.json').read_text())
-if s['active'] and (r/'etc/nginx/conf.d/vpn-reality-decoy.conf').exists():
+if (s['active'] and (r/'etc/nginx/conf.d/vpn-reality-decoy.conf').exists()) or (r/'occupied-target').exists():
     print('LISTEN 0 128 127.0.0.1:9443 0.0.0.0:*')
     if (r/'extra-public-listener').exists():print('LISTEN 0 128 0.0.0.0:9443 0.0.0.0:*')
+if (r/'large-socket-inventory').exists():
+    for i in range(20000):print('LISTEN 0 128 203.0.113.10:'+str(30000+i)+' 0.0.0.0:*')
 ''')
         self.stub('nginx', "import os,sys\nfrom pathlib import Path\nsys.exit(1 if (Path(os.environ['VPN_DECOY_FIXTURE'])/'fail-nginx').exists() else 0)\n")
         self.stub('openssl', "import sys\nprint('same-public-key')\n")
@@ -174,6 +179,34 @@ with sqlite3.connect(a[0]) as db:
         self.assertIn('REALITY_DECOY_ROLLBACK_OK=0', result.stderr)
         self.assertTrue(self.config.is_file())
         self.assertTrue(self.site.is_dir())
+
+    def test_php_only_upload_can_enable_php_without_loosening_tls_proof(self):
+        self.run_script()
+        (self.site / 'public/index.html').unlink()
+        (self.site / 'public/index.php').write_text('<?php echo "My PHP landing";')
+        (self.root / 'php-only-page').touch()
+        # Before PHP enable the root page is unavailable, but TLS remains valid.
+        self.run_script('--check-only', success=False)
+        self.run_script('--enable-php')
+        self.assertEqual((self.root / 'php-helper-called').read_text(), 'called')
+
+    def test_php_enable_still_rejects_failed_tls_before_calling_the_php_helper(self):
+        self.run_script()
+        (self.root / 'fail-probe').touch()
+        self.run_script('--enable-php', success=False)
+        self.assertFalse((self.root / 'php-helper-called').exists())
+
+    def test_occupied_target_is_rejected_with_a_socket_inventory_larger_than_a_pipe_buffer(self):
+        panel = self.config.with_name('3x-ui-public.conf')
+        panel.write_text('# preserved public panel'); panel.chmod(0o600)
+        (self.root / 'state.json').write_text(json.dumps({'active': True, 'enabled': 'enabled'}))
+        (self.root / 'occupied-target').touch()
+        (self.root / 'large-socket-inventory').touch()
+        result = self.run_script('--manage-apply', success=False)
+        self.assertIn('target port is occupied', result.stderr)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.site.exists())
+        self.assertEqual(list((self.root / 'var/backups').iterdir()), [])
 
 
 if __name__ == '__main__':

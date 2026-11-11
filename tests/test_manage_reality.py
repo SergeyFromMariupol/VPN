@@ -321,6 +321,17 @@ class ManagementPlanTests(unittest.TestCase):
             kill.assert_called_once_with(1234, MODULE.signal.SIGTERM)
         self.assertEqual(process.communicate.call_count, 2)
 
+    def test_baseline_failure_has_safe_actionable_stage_without_child_output(self):
+        process = Mock()
+        process.returncode = process.poll.return_value = 1
+        process.communicate.return_value = (b'private URL fixture', b'private key fixture')
+        with patch.object(MODULE.subprocess, 'Popen', return_value=process), \
+             patch.object(MODULE.os, 'name', 'posix'), \
+             patch.object(MODULE.os, 'killpg', create=True, side_effect=ProcessLookupError):
+            with self.assertRaisesRegex(RuntimeError, '^MANAGE_REALITY_BASELINE_VERIFY$') as captured:
+                MODULE.command(['fixture'], step='BASELINE_VERIFY')
+        self.assertNotIn('private', str(captured.exception))
+
     def test_quiescence_rejects_activating_or_queued_certificate_jobs(self):
         for state, pid, job, accepted in (('inactive', '0', '', True), ('failed', '0', '0', True),
                                          ('activating', '0', '', False), ('active', '12', '', False),

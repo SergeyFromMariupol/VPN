@@ -43,9 +43,9 @@ for unit in x-ui.service nginx.service certbot.timer; do
   ! systemctl is-active --quiet "$unit" || die "unexpected active unit: $unit"
 done
 for port in 80 443 2053 2096 8443; do
-  ! ss -H -lnt | grep -Eq "(:|\\])${port}[[:space:]]" || die "TCP/$port is occupied"
+  ! ss -H -lnt | grep -E "(:|\\])${port}[[:space:]]" >/dev/null || die "TCP/$port is occupied"
 done
-! ss -H -lnu | grep -Eq '(:|\])443[[:space:]]' || die 'UDP/443 is occupied'
+! ss -H -lnu | grep -E '(:|\])443[[:space:]]' >/dev/null || die 'UDP/443 is occupied'
 [[ $(df -Pk /var/tmp | awk 'NR==2 {print $4}') -ge 1048576 ]] || die 'at least 1 GiB free staging space is required'
 
 bundle_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -241,7 +241,7 @@ vpn_apt_get check >/dev/null
 [[ -z $(dpkg --audit) ]] || die 'package database is not clean after Ubuntu upgrade'
 /usr/sbin/sshd -t || die 'SSH configuration failed after Ubuntu upgrade'
 ssh_activation_ready || die 'SSH service or matching activation socket is unavailable after Ubuntu upgrade'
-ss -H -lnt | grep -Eq "(:|\\])${TARGET_SSH_PORT}[[:space:]]" || die 'SSH listener disappeared after Ubuntu upgrade'
+ss -H -lnt | grep -E "(:|\\])${TARGET_SSH_PORT}[[:space:]]" >/dev/null || die 'SSH listener disappeared after Ubuntu upgrade'
 dpkg-query -W -f='${binary:Package}\t${Version}\t${db:Status-Status}\n' >"$backup/package-versions.after-os-upgrade"
 touch "$backup/OS_UPGRADE_COMMITTED"
 base_packages=(
@@ -263,7 +263,7 @@ vpn_apt_get check >/dev/null
 touch "$backup/APT_PREREQUISITES_COMMITTED"
 
 [[ $(ufw status | sed -n '1p') == 'Status: inactive' ]] || die 'UFW unexpectedly active after package installation'
-ufw show added | grep -Fq '(None)' || die 'unexpected UFW user rules'
+ufw show added | grep -F '(None)' >/dev/null || die 'unexpected UFW user rules'
 systemctl disable --now nginx.service >/dev/null 2>&1 || true
 if [[ -e /etc/nginx/sites-enabled/default || -L /etc/nginx/sites-enabled/default ]]; then
   [[ -L /etc/nginx/sites-enabled/default && $(readlink -f /etc/nginx/sites-enabled/default) == /etc/nginx/sites-available/default ]] ||
@@ -272,7 +272,7 @@ if [[ -e /etc/nginx/sites-enabled/default || -L /etc/nginx/sites-enabled/default
 fi
 [[ -z $(find /etc/nginx/sites-enabled /etc/nginx/conf.d -mindepth 1 -maxdepth 1 -type f -o -type l) ]] || die 'unexpected enabled nginx configuration'
 nginx -t
-! ss -H -lnt | grep -Eq '(:|\])80[[:space:]]' || die 'unexpected TCP/80 listener'
+! ss -H -lnt | grep -E '(:|\])80[[:space:]]' >/dev/null || die 'unexpected TCP/80 listener'
 
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   --retry 2 --connect-timeout 15 --max-time 300 --header 'Accept: application/octet-stream' \
@@ -337,7 +337,7 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
 fi
 ! systemctl is-active --quiet nginx.service || die 'nginx must remain stopped'
 for port in 80 443 2053 2096 8443; do
-  ! ss -H -lnt | grep -Eq "(:|\\])${port}[[:space:]]" || die "unexpected final TCP/$port listener"
+  ! ss -H -lnt | grep -E "(:|\\])${port}[[:space:]]" >/dev/null || die "unexpected final TCP/$port listener"
 done
 routes_snapshot >"$backup/main-routes.after"
 cmp -s "$backup/main-routes.before" "$backup/main-routes.after" || die 'host main routes/rules changed'

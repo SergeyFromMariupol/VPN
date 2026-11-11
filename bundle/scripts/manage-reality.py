@@ -270,14 +270,16 @@ with closing(sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=rw',uri=True,timeout=2
 '''
 
 
-def command(args, *, timeout=60, data=None, env=None, combined=False):
+def command(args, *, timeout=60, data=None, env=None, combined=False, step='COMMAND'):
+    need(re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', step), 'COMMAND_STEP')
+    failure = 'MANAGE_REALITY_' + step
     process = None
     try:
         process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True, env=env or SAFE_ENV)
         stdout, stderr = process.communicate(input=data, timeout=timeout)
         if process.returncode:
-            raise RuntimeError('MANAGE_REALITY_COMMAND')
+            raise RuntimeError(failure)
         return stdout + (stderr if combined else b'')
     except BaseException as error:
         if process is not None:
@@ -304,12 +306,13 @@ def command(args, *, timeout=60, data=None, env=None, combined=False):
                 process.communicate()
         if isinstance(error, (InterruptedError, KeyboardInterrupt, SystemExit)):
             raise
-        raise RuntimeError('MANAGE_REALITY_COMMAND') from None
+        raise RuntimeError(failure) from None
 
 
 def database(edits, *, restore=False):
     command(['runuser', '-u', 'xui', '--', 'python3', '-I', '-B', '-c', WORKER],
-            data=x.canonical({'edits': edits, 'restore': restore}))
+            data=x.canonical({'edits': edits, 'restore': restore}),
+            step='DATABASE_RESTORE' if restore else 'DATABASE_APPLY')
 
 
 def private(path, *, root=True):
@@ -488,7 +491,7 @@ def validate_candidates(plan, directory):
                   Path('/usr/local/lib/germanyvpn-xhttp-test/xray'))
         need(x.sha(binary.read_bytes()) == x.XRAY_SHA, 'XRAY_PIN')
         command([str(binary), 'run', '-test', '-config', str(candidate)],
-                env={**SAFE_ENV, 'XRAY_LOCATION_ASSET': str(binary.parent)})
+                env={**SAFE_ENV, 'XRAY_LOCATION_ASSET': str(binary.parent)}, step='XRAY_PREFLIGHT')
 
 
 def payload_checks(uris, target, secret, extra_entries):
@@ -562,7 +565,7 @@ def adopt_backend(journal, before):
     journal.save()
     # An incomplete backend without COMMITTED cannot be silently adopted. Its
     # own private snapshot is retained for a reviewed recovery after SIGKILL.
-    command(['bash', str(BUNDLE / 'base/install-reality-decoy.sh'), '--check-only'])
+    command(['bash', str(BUNDLE / 'base/install-reality-decoy.sh'), '--check-only'], step='LOCAL_TARGET_VERIFY')
     journal.record_backend(missing_files)
     record.setdefault('backend_created_dirs', []).extend(
         [[str(path), directory_state(path)] for path in missing_dirs])
@@ -606,7 +609,8 @@ def apply(plan, initial, secret):
             journal.record['backend_dirs_before'] = {str(path): directory_state(path) for path in DECOY_DIRS}
             journal.save()
             try:
-                command(['bash', str(BUNDLE / 'base/install-reality-decoy.sh'), '--manage-apply'], timeout=240)
+                command(['bash', str(BUNDLE / 'base/install-reality-decoy.sh'), '--manage-apply'], timeout=240,
+                        step='LOCAL_TARGET_PREPARE')
             finally:
                 # The child has exited or its entire process group has been
                 # stopped. Defer signals only during this short registration.
@@ -625,7 +629,7 @@ def apply(plan, initial, secret):
         extras = x.strict_json(LINKS.read_bytes())['entries'] if LINKS.exists() else []
         tested, pending = payload_checks(feeds, plan.after, secret, extras)
         start(journal.record['paused_timers'])
-        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900)
+        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900, step='FINAL_VERIFY')
         journal.record['status'] = 'committed'
         journal.save()
         PENDING.unlink()
@@ -655,7 +659,7 @@ def recover():
     need(record.get('version') == 1 and record.get('status') in ('prepared', 'committed', 'rolled_back'),
          'RECOVERY_RECORD')
     if record['status'] == 'committed':
-        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900)
+        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900, step='RECOVERY_VERIFY')
         PENDING.unlink()
         print('REALITY_MANAGEMENT_RECOVERED=committed')
         return
@@ -694,7 +698,7 @@ def main(argv=None):
         before = x.parse_env(private(TARGET))
         after = request_target(before, request)
         secret = x.parse_env(private(SERVER_ENV))
-        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900)
+        command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900, step='BASELINE_VERIFY')
         if (before.get('TARGET_REALITY_MODE', 'external') == after['TARGET_REALITY_MODE'] and
                 before['TARGET_REALITY_SNI'] == after['TARGET_REALITY_SNI']):
             print('REALITY_MANAGEMENT_UNCHANGED=1')
@@ -725,4 +729,7 @@ if __name__ == '__main__':
     except BaseException as error:
         code = str(error) if re.fullmatch(r'MANAGE_REALITY_[A-Z0-9_]+', str(error)) else 'MANAGE_REALITY_FAILED'
         print('VPN_ERROR_CODE=' + code, file=sys.stderr)
+        if code == 'MANAGE_REALITY_BASELINE_VERIFY':
+            print('Текущее состояние VPN не прошло проверку; настройки не изменены. Выполните vpn verify.',
+                  file=sys.stderr)
         raise SystemExit(1)

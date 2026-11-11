@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ss -H -lntu | grep -Eq ":(${socks_port}|${dns_port}|${quic_port})[[:space:]]"; then
+if ss -H -lntu | grep -E ":(${socks_port}|${dns_port}|${quic_port})[[:space:]]" >/dev/null; then
   die 'an E2E test port is already in use'
 fi
 
@@ -256,16 +256,16 @@ run_connector_e2e() {
   client_pid=$!
   for _ in $(seq 1 40); do
     kill -0 "$client_pid" 2>/dev/null || die "${label} E2E Xray client exited early"
-    if ss -H -lnt | grep -Eq ":${socks_port}[[:space:]]" \
-      && ss -H -lnt | grep -Eq ":${dns_port}[[:space:]]" \
-      && ss -H -lnu | grep -Eq ":(${dns_port}|${quic_port})[[:space:]]"; then
+    if ss -H -lnt | grep -E ":${socks_port}[[:space:]]" >/dev/null \
+      && ss -H -lnt | grep -E ":${dns_port}[[:space:]]" >/dev/null \
+      && ss -H -lnu | grep -E ":(${dns_port}|${quic_port})[[:space:]]" >/dev/null; then
       break
     fi
     sleep 0.25
   done
-  ss -H -lnt | grep -Eq ":${socks_port}[[:space:]]" || \
+  ss -H -lnt | grep -E ":${socks_port}[[:space:]]" >/dev/null || \
     die "${label} E2E SOCKS listener did not start"
-  ss -H -lnu | grep -Eq ":${quic_port}[[:space:]]" || \
+  ss -H -lnu | grep -E ":${quic_port}[[:space:]]" >/dev/null || \
     die "${label} E2E QUIC listener did not start"
 
   exit_address=$(probe_cloudflare_warp_trace "$label" "$socks_port")

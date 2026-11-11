@@ -105,14 +105,14 @@ PY
 
 verify_panel_publication() {
   local public_status root_status
-  ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
+  ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null ||
     die 'loopback 3X-UI backend disappeared'
-  ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" ||
+  ss -H -lnt | grep -E "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" >/dev/null ||
     die 'public HTTPS panel listener is missing'
-  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+  if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
     die 'panel proxy unexpectedly listens on a wildcard address'
   fi
-  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]"; then
+  if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]" >/dev/null; then
     die 'nginx unexpectedly occupies public TCP/80'
   fi
   public_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
@@ -210,9 +210,9 @@ systemctl is-active --quiet x-ui.service || die 'x-ui is not active'
 systemctl is-enabled --quiet x-ui.service || die 'x-ui is not enabled'
 ip -4 -o address show dev "$PUBLIC_INTERFACE" scope global | grep -Fq " $SERVER_IPV4/" ||
   die 'public IPv4 is not assigned to the expected interface'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null ||
   die '3X-UI backend is not loopback-only on TCP/2053'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" ||
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null ||
   die '3X-UI subscription backend is not loopback-only on TCP/2096'
 [[ "$(ufw status | sed -n '1p')" == 'Status: active' ]] || die 'UFW is not active'
 
@@ -236,10 +236,10 @@ if [[ $mode == apply && (-e $nginx_config || -L $nginx_config) ]]; then
   recover_committed_panel
   exit 0
 fi
-if ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]"; then
+if ss -H -lnt | grep -E "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'public TCP/2053 is already occupied'
 fi
-if ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW"; then
+if ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null; then
   die 'UFW already permits TCP/2053; reviewed merge required'
 fi
 verify_nginx_sites 0 ||
@@ -359,7 +359,7 @@ systemctl is-enabled --quiet nginx.service
 
 ufw allow in on "$PUBLIC_INTERFACE" to "$SERVER_IPV4" port "$PANEL_PORT" \
   proto tcp comment '3x-ui HTTPS panel' >/dev/null
-ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" ||
+ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null ||
   die 'UFW did not permit TCP/2053'
 
 render_access "$access_file" >"$stage/access.env"

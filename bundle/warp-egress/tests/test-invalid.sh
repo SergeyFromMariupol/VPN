@@ -48,7 +48,7 @@ cleanup() {
   rm -rf -- "$stage"
 }
 trap cleanup EXIT
-ss -H -lnt | grep -Eq ":${socks_port}[[:space:]]" && die 'invalid test port is in use'
+ss -H -lnt | grep -E ":${socks_port}[[:space:]]" >/dev/null && die 'invalid test port is in use'
 
 expect_rejected() {
   local label="$1" connector_port="$2" attempted_id="$3"
@@ -74,10 +74,10 @@ expect_rejected() {
   client_pid=$!
   for _ in $(seq 1 40); do
     kill -0 "$client_pid" 2>/dev/null || die "${label} test client exited early"
-    ss -H -lnt | grep -Eq ":${socks_port}[[:space:]]" && break
+    ss -H -lnt | grep -E ":${socks_port}[[:space:]]" >/dev/null && break
     sleep 0.25
   done
-  ss -H -lnt | grep -Eq ":${socks_port}[[:space:]]" || \
+  ss -H -lnt | grep -E ":${socks_port}[[:space:]]" >/dev/null || \
     die "${label} SOCKS listener did not start"
 
   code=$(curl -4sS --connect-timeout 5 --max-time 12 \

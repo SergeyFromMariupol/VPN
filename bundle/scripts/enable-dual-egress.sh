@@ -38,11 +38,11 @@ wait_ready() {
   local ready=false
   for _ in $(seq 1 60); do
     if systemctl is-active --quiet x-ui.service \
-      && ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" \
-      && ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" \
-      && ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" \
-      && { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; } \
-      && ss -H -lnt | grep -Eq "${SERVER_IPV4}:${SUBSCRIPTION_PORT}[[:space:]]"; then
+      && ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null \
+      && ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null \
+      && ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null \
+      && { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null; } \
+      && ss -H -lnt | grep -E "${SERVER_IPV4}:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null; then
       ready=true
       break
     fi
@@ -122,9 +122,9 @@ systemctl is-active --quiet krysyuk-xray-warp-egress.service || \
   die 'WARP connector Xray is not active'
 systemctl is-active --quiet krysyuk-warp-netns-configure.service || \
   die 'isolated WARP configuration is not active'
-ss -H -lnt | grep -Eq '127[.]0[.]0[.]1:24443[[:space:]]' || \
+ss -H -lnt | grep -E '127[.]0[.]0[.]1:24443[[:space:]]' >/dev/null || \
   die 'WARP connector is not loopback-listening'
-if ss -H -lnt | grep -Eq "(${SERVER_IPV4}|0[.]0[.]0[.]0|[*]|\[::\]):24443[[:space:]]"; then
+if ss -H -lnt | grep -E "(${SERVER_IPV4}|0[.]0[.]0[.]0|[*]|\[::\]):24443[[:space:]]" >/dev/null; then
   die 'WARP connector is unexpectedly public'
 fi
 /opt/krysyuk-warp-egress/tests/test-smoke.sh >/dev/null

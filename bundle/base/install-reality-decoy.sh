@@ -56,7 +56,7 @@ verify_site() {
   done <<<"$sites"
   nginx -t >/dev/null 2>&1 || return 1
   systemctl is-active --quiet nginx.service && systemctl is-enabled --quiet nginx.service || return 1
-  ss -H -lnt | awk '$4 ~ /:9443$/ {if ($4 != "127.0.0.1:9443") exit 1; found=1} END {if (!found) exit 1}' || return 1
+  ss -H -lnt | awk '$4 ~ /:9443$/ {if ($4 != "127.0.0.1:9443") bad=1; found=1} END {exit (!found || bad)}' || return 1
   python3 -I -B "$source_root/reality-decoy.py" "$probe_mode"
 }
 verify_installed() {
@@ -85,7 +85,9 @@ if [[ $1 == --reset-page || $1 == --reset-site ]]; then
   exit 0
 fi
 if [[ $1 == --enable-php ]]; then
-  verify_installed || die 'local REALITY target must verify before enabling PHP'
+  # A PHP-only upload may intentionally have no working static index yet.
+  # Keep all TLS/ownership checks; PHP and site payload are checked after enable.
+  verify_installed --probe-tls || die 'local REALITY target must verify before enabling PHP'
   bash "$source_root/enable-reality-decoy-php.sh"
   exit 0
 fi
@@ -113,7 +115,7 @@ else
   [[ -z $(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print -quit) ]] || die 'existing Nginx sites require a reviewed merge'
   ! systemctl is-active --quiet nginx.service || die 'Nginx must be stopped before preparing its first site'
 fi
-! ss -H -lnt | grep -Eq '(:|\])9443[[:space:]]' || die 'local REALITY target port is occupied'
+! ss -H -lnt | grep -E '(:|\])9443[[:space:]]' >/dev/null || die 'local REALITY target port is occupied'
 [[ -f /etc/x-ui/x-ui.db && ! -L /etc/x-ui/x-ui.db ]] || die 'X-UI database missing or unsafe'
 backup=$(mktemp -d -p /var/backups vpn-reality-decoy.XXXXXXXX)
 chmod 0700 "$backup"

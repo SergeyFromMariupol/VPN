@@ -21,7 +21,8 @@ if [[ -e $marker || -L $marker ]]; then
   [[ -f $pool && ! -L $pool && $(stat -c '%u:%g:%a:%h' "$pool") == 0:0:644:1 ]] || die 'unsafe PHP pool'
   cmp -s "$pool" <(python3 -I -B "$source_root/reality-decoy-php.py" --pool) || die 'managed PHP pool differs'
   systemctl is-active --quiet php8.3-fpm.service
-  python3 -I -B "$source_root/reality-decoy-php.py" --probe-php
+  python3 -I -B "$source_root/reality-decoy-php.py" --wait-fpm
+  python3 -I -B "$source_root/reality-decoy-php.py" --wait-php
   exit 0
 fi
 source /etc/os-release
@@ -143,7 +144,7 @@ mv -nT -- "$temporary" "$pool"
 php-fpm8.3 --test >"$backup/fpm-test.txt" 2>&1
 systemctl enable --now php8.3-fpm.service
 systemctl reload php8.3-fpm.service
-[[ -S /run/php/vpn-decoy.sock ]] || die 'dedicated PHP socket missing'
+python3 -I -B "$source_root/reality-decoy-php.py" --wait-fpm
 temporary=$(mktemp "${marker%/*}/.PHP_ENABLED.XXXXXXXX")
 printf 'enabled\n' >"$temporary"
 chmod 0600 "$temporary"
@@ -157,8 +158,8 @@ config_inode=$(stat -c '%d:%i' "$temporary")
 mv -Tf -- "$temporary" "$config"
 nginx -t
 systemctl reload nginx.service
+python3 -I -B "$source_root/reality-decoy-php.py" --wait-php
 bash "$source_root/install-reality-decoy.sh" --check-only
-python3 -I -B "$source_root/reality-decoy-php.py" --probe-php
 : >"$backup/COMMITTED"
 chmod 0600 "$backup/COMMITTED"
 committed=1

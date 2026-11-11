@@ -155,7 +155,7 @@ renew_hook_source="$bundle_root/templates/60-krysyuk-standalone-xui"
   die 'certificate renewal hook source is missing or unsafe'
 [[ "$(ufw status | sed -n '1p')" == 'Status: inactive' ]] ||
   die 'this first-install transaction expects inactive UFW'
-ufw show added | grep -Fq '(None)' || die 'this first-install transaction expects no UFW user rules'
+ufw show added | grep -F '(None)' >/dev/null || die 'this first-install transaction expects no UFW user rules'
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="$backup_root/${stamp}-standalone-provision"
@@ -485,14 +485,14 @@ PY
 systemctl start x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]"; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null; then
     break
   fi
   sleep 1
 done
 systemctl is-active --quiet x-ui.service || die 'x-ui did not start for local API configuration'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" || die 'panel is not loopback-only'
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null || die 'panel is not loopback-only'
+if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'panel unexpectedly listens publicly'
 fi
 
@@ -550,8 +550,8 @@ jq --exit-status '.success == true' "$stage/settings-update.json" >/dev/null
 systemctl restart x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]"; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null; then
     break
   fi
   sleep 1
@@ -630,19 +630,19 @@ for inbound_id in "${inbound_ids[@]}"; do
 done
 
 for _ in $(seq 1 30); do
-  if ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
+  if ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null &&
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null; }; then
     break
   fi
   sleep 1
 done
-ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'REALITY listener is absent'
-ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" || die 'XHTTP listener is absent'
+ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'REALITY listener is absent'
+ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null || die 'XHTTP listener is absent'
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'Hysteria2 listener is absent'
+  ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'Hysteria2 listener is absent'
 else
-  ! ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'unexpected Hysteria2 listener in certificate-free mode'
+  ! ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'unexpected Hysteria2 listener in certificate-free mode'
 fi
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config /usr/local/x-ui/bin/config.json >/dev/null
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
@@ -689,11 +689,11 @@ systemctl start x-ui.service
 
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null &&
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null; }; then
     break
   fi
   sleep 1
@@ -833,11 +833,11 @@ jq --exit-status --arg host443 "$PUBLIC_FQDN:443" \
   and ([.obj[].isDisabled]|all(.==false))
 ' "$stage/hosts-final.json" >/dev/null
 
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'panel became publicly reachable'
 fi
-ufw status | grep -Fq 'Status: active' || die 'UFW is not active'
-ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" &&
+ufw status | grep -F 'Status: active' >/dev/null || die 'UFW is not active'
+ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null &&
   die 'panel port is allowed by UFW'
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config /usr/local/x-ui/bin/config.json >/dev/null
