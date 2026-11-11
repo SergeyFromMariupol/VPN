@@ -79,6 +79,34 @@ with open(os.environ['FIXTURE_EVENTS'],'a') as stream:
     stream.write('SNI:'+json.dumps({'argv':sys.argv[1:],'value':value})+'\\n')
 print('FIXTURE_SNI_OK=1')
 ''')
+write(runtime / 'scripts/manage-profile-name.py', '''import json,os,re,shlex,sys,unicodedata
+from pathlib import Path
+if sys.argv[1:]==['--recover']:
+    with open(os.environ['FIXTURE_EVENTS'],'a') as stream: stream.write('NAME_RECOVER\\n')
+    Path(os.environ['FIXTURE_NAME_PENDING']).unlink(missing_ok=True)
+    print('FIXTURE_NAME_RECOVERED=1')
+    sys.exit(0)
+value=json.load(sys.stdin)
+assert set(value)=={'label'}
+with open(os.environ['FIXTURE_EVENTS'],'a') as stream:
+    stream.write('NAME:'+json.dumps({'argv':sys.argv[1:],'value':value})+'\\n')
+label=value['label']
+if (not isinstance(label,str) or not 1<=len(label)<=80 or not label.strip() or
+        any(unicodedata.category(char) in {'Cc','Zl','Zp'} for char in label)):
+    print('FIXTURE_NAME_INVALID=1',file=sys.stderr)
+    sys.exit(2)
+if os.environ.get('FIXTURE_NAME_BASELINE_FAILURE')=='1':
+    print('FIXTURE_NAME_BASELINE_FAILED=1',file=sys.stderr)
+    sys.exit(1)
+if sys.argv[1:]==['--check-only'] and os.environ.get('FIXTURE_NAME_PENDING_AFTER_CHECK')=='1':
+    Path(os.environ['FIXTURE_NAME_PENDING']).write_text('concurrent pending name change')
+if sys.argv[1:]==['--apply']:
+    target=Path(os.environ['FIXTURE_TARGET'])
+    text,count=re.subn('^TARGET_LABEL=.*$',lambda match:'TARGET_LABEL='+shlex.quote(label),target.read_text(),flags=re.M)
+    assert count==1
+    target.write_text(text)
+print('FIXTURE_NAME_OK=1')
+''')
 write(runtime / 'base/install-reality-decoy.sh', shell + '''
 if flock -n "$FIXTURE_LOCK" true; then printf 'MUTATION_WITHOUT_INSTALLER_LOCK\\n' >&2; exit 92; fi
 case $1 in --reset-page|--enable-php) ;; *) exit 93;; esac
@@ -104,9 +132,17 @@ manifest(runtime, 'SOURCE_SHA256SUMS')
 environment = dict(os.environ, PATH=str(binary)+':/usr/sbin:/usr/bin:/sbin:/bin',
                    FIXTURE_EVENTS=str(events), FIXTURE_LOCK=str(lock),
                    FIXTURE_REAL_FLOCK=shutil.which('flock'),
-                   FIXTURE_PENDING=str(state / 'reality-management.pending'))
+                   FIXTURE_PENDING=str(state / ('profile-name-management.pending' if settings.get('pending_during_lock')=='name'
+                       else 'update.pending' if settings.get('pending_during_lock')=='update' else 'reality-management.pending')),
+                   FIXTURE_NAME_PENDING=str(state / 'profile-name-management.pending'), FIXTURE_TARGET=str(target),
+                   FIXTURE_NAME_PENDING_AFTER_CHECK='1' if settings.get('name_pending_after_check') else '0',
+                   FIXTURE_NAME_BASELINE_FAILURE='1' if settings.get('name_baseline_failure') else '0')
 if settings.get('pending'):
     write(state / 'reality-management.pending', 'private snapshot fixture')
+if settings.get('name_pending'):
+    write(state / 'profile-name-management.pending', 'private name snapshot fixture')
+if settings.get('update_pending'):
+    write(state / 'update.pending', 'private update snapshot fixture')
 if settings.get('tamper'):
     path = source / 'install.sh' if settings['tamper']=='source' else runtime / 'scripts/manage-reality.py'
     path.write_text(path.read_text()+'\n# changed after manifest\n')
@@ -171,6 +207,7 @@ class ManageMenu(unittest.TestCase):
         result = self.fixture(input='0\n')
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertIn('VPN — управление', result['output'])
+        self.assertIn('8. Сменить имя профилей', result['output'])
         self.assertNotIn('FIXTURE_EXPLICIT_ACCESS', result['output'])
         self.assertEqual(result['events'], [])
 
@@ -178,6 +215,7 @@ class ManageMenu(unittest.TestCase):
         status = self.fixture(arguments=['status'])
         self.assertEqual(status['exit'], 0, status['output'])
         self.assertIn('Клиентский SNI: max.ru', status['output'])
+        self.assertIn('Имя профилей: Fixture VPN', status['output'])
         self.assertEqual(status['events'], ['SERVICE:is-active x-ui.service', 'SERVICE:is-active nginx.service'])
         for action, argument, marker in (('verify','--verify','FIXTURE_VERIFIED'),
                                           ('access','--show-access','FIXTURE_EXPLICIT_ACCESS')):
@@ -214,6 +252,84 @@ class ManageMenu(unittest.TestCase):
         self.assertEqual(absent['exit'], 0, absent['output'])
         self.assertEqual(absent['events'], [])
 
+    def test_profile_name_changes_use_stdin_and_main_menu_item_eight(self):
+        label = 'Мария «VPN» $(touch "$FIXTURE_ROOT/injected") `literal`'
+        for arguments, answers in ((['name'], label+'\n'), ([], '8\n'+label+'\n1\n0\n')):
+            with self.subTest(arguments=arguments):
+                result = self.fixture(arguments=arguments, input=answers)
+                self.assertEqual(result['exit'], 0, result['output'])
+                self.assertIn('Текущее имя профилей: Fixture VPN', result['output'])
+                requests = [json.loads(event.removeprefix('NAME:')) for event in result['events']
+                            if event.startswith('NAME:')]
+                self.assertEqual(requests, [{'argv':[argument], 'value':{'label':label}}
+                                            for argument in ('--check-only','--apply')])
+                if not arguments:
+                    self.assertIn('Имя профилей: '+label, result['output'])
+                self.assertFalse(result['injected'])
+
+    def test_profile_name_validation_retries_and_empty_input_cancels(self):
+        for invalid in ('   ', 'x'*81, 'bad\x01name'):
+            with self.subTest(invalid=invalid):
+                result = self.fixture(arguments=['name'], input=invalid+'\nНовое имя\n')
+                self.assertEqual(result['exit'], 0, result['output'])
+                requests = [json.loads(event[5:]) for event in result['events']]
+                self.assertEqual([row['argv'] for row in requests],
+                                 [['--check-only'],['--check-only'],['--apply']])
+                self.assertEqual(requests[-1]['value'], {'label':'Новое имя'})
+        cancelled = self.fixture(arguments=['name'], input='\n')
+        self.assertEqual(cancelled['exit'], 0, cancelled['output'])
+        self.assertEqual(cancelled['events'], [])
+
+    def test_profile_name_pending_dispatches_recovery_and_two_pending_operations_hold(self):
+        idle = self.fixture(name_pending=True, input='0\n')
+        self.assertEqual(idle['exit'], 0, idle['output'])
+        self.assertIn('Есть незавершённая смена имени профилей: vpn recover', idle['output'])
+        self.assertEqual(idle['events'], [])
+        recovered = self.fixture(name_pending=True, arguments=['recover'])
+        self.assertEqual(recovered['exit'], 0, recovered['output'])
+        self.assertEqual(recovered['events'], ['NAME_RECOVER'])
+        both = self.fixture(pending=True, name_pending=True, arguments=['recover'])
+        self.assertNotEqual(both['exit'], 0)
+        self.assertIn('две незавершённые операции', both['output'])
+        self.assertEqual(both['events'], [])
+
+    def test_profile_name_baseline_failure_stops_without_reprompt_or_apply(self):
+        result = self.fixture(arguments=['name'], input='Новое имя\nВторое имя\n', name_baseline_failure=True)
+        self.assertEqual(result['exit'], 1, result['output'])
+        self.assertEqual(result['output'].count('Новое имя профилей (пусто — отмена): '), 1)
+        requests = [json.loads(event[5:]) for event in result['events']]
+        self.assertEqual(requests, [{'argv':['--check-only'], 'value':{'label':'Новое имя'}}])
+
+    def test_pending_operations_block_rename_and_sni_before_backend_check(self):
+        for pending in ({'pending':True}, {'name_pending':True}):
+            for arguments, answer in ((['name'],'Новое имя\n'), (['sni'],'2\nmax.ru\n')):
+                with self.subTest(pending=pending, arguments=arguments):
+                    result = self.fixture(arguments=arguments, input=answer, **pending)
+                    self.assertNotEqual(result['exit'], 0)
+                    self.assertIn('vpn recover', result['output'])
+                    self.assertEqual(result['events'], [])
+        concurrent = self.fixture(arguments=['name'], input='Новое имя\n', name_pending_after_check=True)
+        self.assertNotEqual(concurrent['exit'], 0)
+        self.assertEqual(len(concurrent['events']), 1)
+        self.assertEqual(json.loads(concurrent['events'][0][5:])['argv'], ['--check-only'])
+
+    def test_pending_update_uses_fresh_loader_recovery_and_blocks_code_actions(self):
+        recovery = 'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --recover-update'
+        for arguments, answer in ((['name'],'Новое имя\n'), (['sni'],'2\nmax.ru\n'),
+                                   (['site'],'1\n'), (['php'],''), (['recover'],''), (['verify'],'')):
+            with self.subTest(action=arguments):
+                result = self.fixture(arguments=arguments, input=answer, update_pending=True)
+                self.assertNotEqual(result['exit'], 0)
+                self.assertIn(recovery, result['output'])
+                self.assertEqual(result['events'], [])
+        status = self.fixture(arguments=['status'], update_pending=True)
+        self.assertEqual(status['exit'], 0, status['output'])
+        self.assertIn(recovery, status['output'])
+        access = self.fixture(arguments=['access'], update_pending=True)
+        self.assertEqual(access['exit'], 0, access['output'])
+        self.assertIn(recovery, access['output'])
+        self.assertEqual(access['events'], ['INSTALL:--show-access'])
+
     def test_site_reset_and_php_hold_the_installer_lock(self):
         for arguments, answer, expected in ((['site'],'1\n','--reset-page'),
                                              (['php'],'','--enable-php')):
@@ -225,21 +341,23 @@ class ManageMenu(unittest.TestCase):
         self.assertNotEqual(inactive['exit'], 0)
         self.assertEqual(inactive['events'], [])
 
-    def test_pending_sni_recovery_blocks_php_and_site_reset_without_mutating_backend(self):
-        for arguments, answer in ((['site'], '1\n'), (['php'], '')):
-            with self.subTest(action=arguments):
-                result = self.fixture(arguments=arguments, input=answer, pending=True)
-                self.assertNotEqual(result['exit'], 0, result['output'])
-                self.assertIn('vpn recover', result['output'])
-                self.assertEqual(result['events'], [])
+    def test_pending_recovery_blocks_php_and_site_reset_without_mutating_backend(self):
+        for pending in ({'pending':True}, {'name_pending':True}):
+            for arguments, answer in ((['site'], '1\n'), (['php'], '')):
+                with self.subTest(action=arguments, pending=pending):
+                    result = self.fixture(arguments=arguments, input=answer, **pending)
+                    self.assertNotEqual(result['exit'], 0, result['output'])
+                    self.assertIn('vpn recover', result['output'])
+                    self.assertEqual(result['events'], [])
 
     def test_pending_created_during_lock_acquisition_is_checked_before_backend_action(self):
-        for arguments, answer in ((['site'], '1\n'), (['php'], '')):
-            with self.subTest(action=arguments):
-                result = self.fixture(arguments=arguments, input=answer, pending_during_lock=True)
-                self.assertNotEqual(result['exit'], 0, result['output'])
-                self.assertIn('vpn recover', result['output'])
-                self.assertEqual(result['events'], [])
+        for kind in ('sni', 'name', 'update'):
+            for arguments, answer in ((['site'], '1\n'), (['php'], '')):
+                with self.subTest(action=arguments, kind=kind):
+                    result = self.fixture(arguments=arguments, input=answer, pending_during_lock=kind)
+                    self.assertNotEqual(result['exit'], 0, result['output'])
+                    self.assertIn('--recover-update' if kind=='update' else 'vpn recover', result['output'])
+                    self.assertEqual(result['events'], [])
 
     def test_tampered_files_unsafe_permissions_and_busy_installer_block_actions(self):
         for settings in ({'tamper':'source'},{'tamper':'runtime'}, {'writable':True}, {'busy':True}):
