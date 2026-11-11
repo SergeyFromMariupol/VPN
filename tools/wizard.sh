@@ -62,27 +62,70 @@ wizard_probe_sni() {
   return "$probe_status"
 }
 
+wizard_validate_local_site() {
+  TARGET_REALITY_MODE=self-steal TARGET_REALITY_SNI="$1" TARGET_FQDN="$1" \
+    TARGET_ADDRESS_MODE=domain TARGET_TLS_MODE="$TARGET_TLS_MODE" \
+    python3 -B "$2" --check-reality-selection >/dev/null 2>&1
+}
+
+wizard_reality_domain() {
+  local verifier=$1 site_domain
+  if [[ $TARGET_ADDRESS_MODE == domain ]] && wizard_validate_local_site "$TARGET_FQDN" "$verifier"; then
+    return 0
+  fi
+  wizard_note 'Для self-steal нужен свой домен. Он станет адресом VPN, сайта, панели и подписки.'
+  wizard_note 'Направьте одну DNS A-запись на сервер; AAAA и Cloudflare Proxy должны быть выключены.'
+  while true; do
+    wizard_required site_domain 'Домен сайта, VPN, панели и подписки: ' || return 1
+    if wizard_validate_local_site "$site_domain" "$verifier"; then
+      TARGET_FQDN=$site_domain
+      TARGET_ADDRESS_MODE=domain
+      return 0
+    fi
+    wizard_error 'Введите свой домен без https://, порта и пути; IP-адрес для self-steal не подходит.'
+  done
+}
+
 wizard_reality_sni() {
   local verifier=$1 sni_choice
   wizard_section 'SNI' 'REALITY'
-  printf '  %b1. По умолчанию max.ru%b\n' "$wizard_yellow" "$wizard_reset"
-  printf '  %b2. Свой%b\n\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b1. Собственный сайт · self-steal%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b2. Собственный сайт + другой клиентский SNI%b\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b3. Внешний сайт · SNI вручную%b\n\n' "$wizard_yellow" "$wizard_reset"
   while true; do
-    wizard_read sni_choice 'Выберите SNI [1]: ' 1 || return 1
+    wizard_read sni_choice 'Выберите режим REALITY [1]: ' 1 || return 1
     case "$sni_choice" in
       1)
-        TARGET_REALITY_SNI=max.ru
-        if wizard_probe_sni "$verifier"; then return 0; fi
-        wizard_error 'SNI не прошёл проверку TLS 1.3, H2 и сертификата. Выберите другой.'
+        TARGET_REALITY_MODE=self-steal
+        wizard_reality_domain "$verifier" || return 1
+        TARGET_REALITY_SNI=$TARGET_FQDN
+        wizard_note 'SNI совпадает с вашим доменом. DNS проверится до выпуска сертификата, TLS сайта — после создания.'
+        return 0
         ;;
       2)
+        TARGET_REALITY_MODE=decoy
+        wizard_note 'Проверяющий получит сертификат вашего сайта, в том числе при запросе по IP или без SNI.'
+        wizard_note 'Клиентский SNI останется виден в сети; с чужим именем сертификат сайта не совпадёт. Защита от блокировок не гарантируется.'
         while true; do
-          wizard_required TARGET_REALITY_SNI 'Свой SNI: ' || return 1
+          wizard_required TARGET_REALITY_SNI 'Клиентский SNI: ' || return 1
+          if TARGET_REALITY_MODE="$TARGET_REALITY_MODE" TARGET_REALITY_SNI="$TARGET_REALITY_SNI" \
+            TARGET_FQDN="$TARGET_FQDN" TARGET_IPV4="$TARGET_IPV4" TARGET_ADDRESS_MODE="$TARGET_ADDRESS_MODE" \
+            TARGET_TLS_MODE="$TARGET_TLS_MODE" python3 -B "$verifier" --check-reality-selection >/dev/null 2>&1; then
+            return 0
+          fi
+          wizard_error 'Введите DNS-имя без https://, порта и пути. Cloudflare и IP-адреса не подходят для клиентского SNI.'
+        done
+        ;;
+      3)
+        TARGET_REALITY_MODE=external
+        wizard_note 'Внешний сайт должен поддерживать TLS 1.3, H2 и доверенный сертификат для выбранного SNI.'
+        while true; do
+          wizard_required TARGET_REALITY_SNI 'Внешний SNI: ' || return 1
           if wizard_probe_sni "$verifier"; then return 0; fi
           wizard_error 'SNI не подходит: нужны TLS 1.3, H2 и доверенный сертификат. Введите другой.'
         done
         ;;
-      *) wizard_error 'Выберите 1 или 2.' ;;
+      *) wizard_error 'Выберите 1, 2 или 3.' ;;
     esac
   done
 }

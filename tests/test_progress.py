@@ -44,6 +44,7 @@ if [[ $CASE == prep ]]; then
   for name in base certbot tls; do date -u +%FT%TZ >"$state/$name.done"; done
 fi
 installer_progress_init "$FIXTURE_ROOT/progress" "$PROGRESS_PYTHON"
+_installer_progress_phases >"$FIXTURE_ROOT/phases"
 # Observe the real renderer owned by each phase subshell, without changing it.
 definition=$(declare -f installer_progress_begin)
 eval "${definition/installer_progress_begin/_fixture_real_progress_begin}"
@@ -83,8 +84,12 @@ case $CASE in
     : >"$FIXTURE_ROOT/started"
     kill -STOP "$BASHPID";;
   count)
-    if [[ $TARGET_TLS_MODE == none ]]; then names='base direct panel nginx-restart warp dual xhttp'
-    else names='base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal'; fi
+    if [[ $TARGET_TLS_MODE == none ]]; then names='base direct panel nginx-restart warp dual xhttp menu'
+    else
+      names='base certbot tls'
+      if [[ $TARGET_REALITY_MODE != external ]]; then names+=' reality-decoy'; fi
+      names+=' direct panel nginx-restart cert-reconcile warp dual xhttp renewal menu'
+    fi
     for name in $names; do
       phase "$name" instant
       if [[ $name == base ]]; then phase base instant; fi
@@ -94,13 +99,16 @@ case $CASE in
 esac
 ''', encoding='utf-8')
 driver.chmod(0o700)
-environment = dict(os.environ, FIXTURE_ROOT=str(root), CASE=config['case'], CANARY=canary,
+environment = {key: value for key, value in os.environ.items() if not key.startswith('TARGET_')}
+environment.update(FIXTURE_ROOT=str(root), CASE=config['case'], CANARY=canary,
                    PROGRESS_LIBRARY=str(source / 'tools/progress.sh'),
                    PHASE_LIBRARY=str(source / 'tools/phases.sh'),
                    PROGRESS_PYTHON=str(source / 'tools/progress.py'),
                    PROGRESS_STAGE=config.get('stage', ''),
                    PROGRESS_RESULT=str(config.get('result', '0')),
                    TARGET_TLS_MODE=config.get('tls_mode', 'letsencrypt'),
+                   TARGET_REALITY_MODE=config.get('reality_mode', 'external'),
+                   TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_ADDRESS_MODE='domain',
                    TERM=config.get('term', 'xterm-256color'), LC_ALL='C', LANG='C')
 environment.pop('NO_COLOR', None)
 if config.get('no_color'): environment['NO_COLOR'] = '1'
@@ -139,7 +147,7 @@ def frames(raw, label, preparatory=False):
     text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', raw.decode('utf-8', 'replace'))
     result = []
     for line in re.split(r'[\r\n]', text):
-        count = re.search(r'\[(\d+)/(?:8|12)\]', line)
+        count = re.search(r'\[(\d+)/(\d+)\]', line)
         clock = re.search(r'\b(\d+):(\d{2})\b', line)
         spinner = re.search('[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]', line)
         if clock and label in line and (count or (preparatory and spinner)):
@@ -156,6 +164,7 @@ held_counts = []
 held_elapsed = held_seconds = 0
 checkpoint_before = False
 started_at = None
+phase_names = []
 deadline = time.monotonic() + 45
 try:
     while True:
@@ -168,6 +177,7 @@ try:
             if not block: break
             data += block
         if not (root / 'started').exists() or released or owner_killed: continue
+        if not phase_names: phase_names = (root / 'phases').read_text().splitlines()
         if started_at is None: started_at = time.monotonic()
         records = history()
         live = [record for record in records if alive(record)]
@@ -190,7 +200,7 @@ try:
         elif case.startswith('killed-') and live and observed:
             os.kill(live[-1][1], signal.SIGKILL)
             killed = ready = True
-        elif case == 'count': ready = any(count == (7 if config.get('tls_mode') == 'none' else 11) for count, elapsed in observed)
+        elif case == 'count': ready = any(count == len(phase_names) - 1 for count, elapsed in observed)
         elif config.get('term') == 'dumb':
             ready = len({elapsed for count, elapsed in observed}) >= 2 and max(elapsed for count, elapsed in observed) >= 10
         else: ready = len({elapsed for count, elapsed in observed}) >= 2
@@ -217,7 +227,7 @@ try:
         return subprocess.run(['/bin/bash', '-c', 'source "$1"; installer_checkpoint_valid "$2"',
                                '_', str(source / 'tools/phases.sh'), str(root / 'state' / (name + '.done'))],
                               capture_output=True).returncode == 0
-    names = 'base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp renewal verify'.split()
+    names = (root / 'phases').read_text().splitlines()
     verify = root / 'state/verify.done'
     replaced = ((root / 'verify.before').read_text().strip() != f'{verify.stat().st_dev}:{verify.stat().st_ino}') if config['case'] == 'count' else False
     output = data.decode('utf-8', 'strict')
@@ -227,6 +237,7 @@ try:
           held_elapsed=held_elapsed, held_seconds=held_seconds, killed=killed,
           command_parent_matches=(int((root / 'command-parent').read_text()) == records[-1][0]) if config['case'] == 'group-term' else None,
           direct_valid=valid('direct'), valid_count=sum(valid(name) for name in names),
+          phase_names=names, totals=[int(value) for value in re.findall(r'\[\d+/(\d+)\]', output)],
           verify_replaced=replaced, canary_logged=any(canary in path.read_text() for path in (root / 'state').glob('*.log')))))
 finally:
     current_owner = identity(pid)
@@ -283,7 +294,7 @@ class Progress(unittest.TestCase):
         self.assertTrue(result['direct_valid'])
         self.assertTrue(result['canary_logged'])
         self.assertIn('Общий прогресс: ', result['output'])
-        self.assertIn('[1/12]', result['output'])
+        self.assertIn('[1/13]', result['output'])
         self.assertIn('░', result['output'])
         self.assertNotIn('\x1b', result['output'])
 
@@ -299,18 +310,20 @@ class Progress(unittest.TestCase):
                 if case == 'group-term': self.assertTrue(result['command_parent_matches'])
                 if case.startswith('killed-'): self.assertTrue(result['killed'])
 
-    def test_true_twelve_count_excludes_historical_verify_and_duplicate_skip(self):
+    def test_count_includes_menu_but_excludes_historical_verify_and_duplicate_skip(self):
         result = self.fixture('count')
         self.assertEqual(result['code'], 0, result['output'])
-        self.assertEqual(result['valid_count'], 12)
+        self.assertEqual(result['valid_count'], 13)
         self.assertTrue(result['verify_replaced'])
-        self.assertEqual(set(result['held_counts']), {11})
-        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 100% \[12/12\]')
+        self.assertEqual(set(result['held_counts']), {12})
+        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 100% \[13/13\]')
         self.assertIn('✓ Итоговая проверка', result['output'])
         self.assertIn('✓ Подготовка Ubuntu (уже завершено)', result['output'])
-        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 8% \[1/12\]')
+        self.assertIn('menu', result['phase_names'])
+        self.assertEqual(set(result['totals']), {13})
+        self.assertRegex(result['output'], r'Общий прогресс: \[[█░]+\] 7% \[1/13\]')
         self.assertNotRegex(result['output'], r'[^\r\n]*%[^\r\n]*(?:готово|уже завершено)')
-        self.assertNotRegex(result['output'], r'\[(?:1[3-9]|[2-9][0-9])/12\]')
+        self.assertNotRegex(result['output'], r'\[(?:1[4-9]|[2-9][0-9])/13\]')
 
     def test_preparatory_pty_activity_and_outcomes_have_no_overall_percentage(self):
         stages = {'sni-check': 'Проверка REALITY SNI', 'preflight': 'Проверка сервера',
@@ -328,20 +341,33 @@ class Progress(unittest.TestCase):
                     self.assertEqual(result['valid_count'], 3)
                     self.assertTrue(result['canary_logged'])
                     self.assertIn(outcome.format(label=label), result['output'])
-                    self.assertNotRegex(result['output'], r'%|/12|[█░]')
+                    self.assertNotRegex(result['output'], r'%|\[\d+/\d+\]|[█░]')
                     self.assertRegex(result['output'], r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][^\r\n]*' + label)
                     if code == '1': self.assertNotIn('готово', result['output'])
 
-    def test_certificate_free_mode_counts_eight_real_phases_and_reaches_full_bar(self):
+    def test_certificate_free_mode_counts_menu_and_reaches_full_bar(self):
         result = self.fixture('count', tls_mode='none')
         self.assertEqual(result['code'], 0, result['output'])
-        self.assertEqual(result['valid_count'], 8)
+        self.assertEqual(result['valid_count'], 9)
         self.assertTrue(result['verify_replaced'])
-        self.assertEqual(set(result['held_counts']), {7})
-        self.assertIn('Общий прогресс: [████████████] 100% [8/8]', result['output'])
+        self.assertEqual(set(result['held_counts']), {8})
+        self.assertIn('Общий прогресс: [████████████] 100% [9/9]', result['output'])
         self.assertIn('Четыре профиля VPN', result['output'])
         self.assertIn('HTTP-панель', result['output'])
-        self.assertNotIn('/12]', result['output'])
+        self.assertEqual(set(result['totals']), {9})
+
+    def test_local_reality_modes_include_the_site_and_menu_in_fourteen_phases(self):
+        for mode in ('self-steal', 'decoy'):
+            with self.subTest(mode=mode):
+                result = self.fixture('count', reality_mode=mode)
+                self.assertEqual(result['code'], 0, result['output'])
+                self.assertEqual(result['valid_count'], 14)
+                self.assertEqual(set(result['held_counts']), {13})
+                self.assertEqual(set(result['totals']), {14})
+                self.assertEqual(result['phase_names'][2:5], ['tls', 'reality-decoy', 'direct'])
+                self.assertEqual(result['phase_names'][-2:], ['menu', 'verify'])
+                self.assertIn('Общий прогресс: [████████████] 100% [14/14]', result['output'])
+                self.assertTrue(result['verify_replaced'])
 
     def test_plain_preparatory_status_has_no_renderer_or_overall_percentage(self):
         for stage, label in (('sni-check', 'Проверка REALITY SNI'),
@@ -354,14 +380,14 @@ class Progress(unittest.TestCase):
                 self.assertEqual(result['valid_count'], 3)
                 self.assertIn(label + ' — выполняется…', result['output'])
                 self.assertIn('✓ ' + label + ' — готово', result['output'])
-                self.assertNotRegex(result['output'], r'%|/12|[█░\r\x1b]')
+                self.assertNotRegex(result['output'], r'%|\[\d+/\d+\]|[█░\r\x1b]')
 
     def test_plain_pipe_has_no_renderer_and_dumb_pty_has_real_ten_second_heartbeat(self):
         pipe = self.fixture('live', tty=False)
         self.assertEqual(pipe['code'], 0, pipe['output'])
         self.assertEqual(pipe['renderer_count'], 0)
-        self.assertIn('[0/12]', pipe['output'])
-        self.assertIn('[1/12]', pipe['output'])
+        self.assertIn('[0/13]', pipe['output'])
+        self.assertIn('[1/13]', pipe['output'])
         self.assertNotRegex(pipe['output'], r'[\r\x1b]')
         dumb = self.fixture('live', term='dumb')
         self.assertEqual(dumb['code'], 0, dumb['output'])

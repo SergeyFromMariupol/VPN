@@ -85,6 +85,39 @@ class DirectPromotionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'DIRECT_ONLY_OUTBOUNDS'):
             MODULE.build_direct(main, TARGET, 'p' * 43, 'abcdef0123456789', '/private')
 
+    def test_reality_modes_have_exact_target_and_client_sni(self):
+        main = {
+            'dns': {'servers': [{'tag': 'dns_cf', 'address': '1.1.1.1'}]},
+            'inbounds': [{'port': 8443, 'settings': {'clients': [
+                {'id': SECRET['VLESS_UUID'], 'email': 'germany-xhttp', 'flow': ''}
+            ]}}],
+            'outbounds': [{'tag': 'DIRECT', 'protocol': 'freedom'},
+                          {'tag': 'BLOCK', 'protocol': 'blackhole'}],
+        }
+        for mode, address_mode, address, sni, destination in (
+                (None, 'domain', TARGET['TARGET_FQDN'], 'example.org', 'example.org:443'),
+                ('external', 'domain', TARGET['TARGET_FQDN'], 'max.ru', 'max.ru:443'),
+                ('self-steal', 'domain', TARGET['TARGET_FQDN'], TARGET['TARGET_FQDN'],
+                 '127.0.0.1:9443'),
+                ('decoy', 'domain', TARGET['TARGET_FQDN'], 'max.ru', '127.0.0.1:9443'),
+                ('decoy', 'ip', TARGET['TARGET_IPV4'], 'max.ru', '127.0.0.1:9443')):
+            target = dict(TARGET, TARGET_ADDRESS_MODE=address_mode, TARGET_FQDN=address,
+                          TARGET_REALITY_SNI=sni)
+            if mode:
+                target['TARGET_REALITY_MODE'] = mode
+            with self.subTest(mode=mode, address_mode=address_mode):
+                config = MODULE.build_direct(main, target, 'p' * 43,
+                                             'abcdef0123456789', '/private')
+                reality = config['inbounds'][0]['streamSettings']['realitySettings']
+                self.assertEqual(reality['target'], destination)
+                self.assertEqual(reality['serverNames'], [sni])
+                self.assertEqual(reality['xver'], 0)
+                self.assertEqual([out['tag'] for out in config['outbounds']],
+                                 ['DIRECT', 'BLOCK'])
+                uri = MODULE.x.uri_for(config, 'b' * 43, 'Test')
+                self.assertEqual(MODULE.x.query(uri)[1]['sni'], sni)
+                self.assertNotIn('127.0.0.1', uri)
+
     def test_firewall_requires_owned_transition(self):
         old = "ufw allow 8443/tcp comment 'VLESS XHTTP TLS H2'\n"
         new = ("ufw allow in on ens3 to 45.67.89.10 port 8444 "

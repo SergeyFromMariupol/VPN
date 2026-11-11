@@ -87,7 +87,7 @@ acme_contact_arguments || { printf 'ERROR: invalid optional ACME_EMAIL\n' >&2; a
 [[ $mode == apply ]] || { printf 'ACME_PREFLIGHT_OK=1\n'; exit 0; }
 [[ ! -e $lineage && ! -L $lineage ]] || { printf 'ERROR: existing certificate requires reviewed renewal\n' >&2; acme_fail ACME_EXISTING_CERT; }
 [[ ! -e $commit_marker && ! -L $commit_marker ]] || acme_fail ACME_EXISTING_COMMIT
-! ss -H -lnt | grep -Eq '(:|\])80[[:space:]]' || acme_fail ACME_PORT80
+! ss -H -lnt | grep -E '(:|\])80[[:space:]]' >/dev/null || acme_fail ACME_PORT80
 readonly acme_lock_root=/run/vpn-acme-bootstrap
 if [[ ! -e $acme_lock_root && ! -L $acme_lock_root ]]; then mkdir -m 0700 "$acme_lock_root"; fi
 [[ -d $acme_lock_root && ! -L $acme_lock_root && $(stat -c '%u:%g:%a' "$acme_lock_root") == 0:0:700 ]] || acme_fail ACME_LOCK

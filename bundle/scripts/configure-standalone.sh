@@ -13,6 +13,7 @@ fi
 readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_FQDN="$TARGET_FQDN"
 readonly REALITY_TARGET="$TARGET_REALITY_SNI"
+readonly REALITY_DEST="$TARGET_REALITY_DEST"
 readonly PANEL_PORT='2053'
 readonly SUBSCRIPTION_PORT='2096'
 readonly XHTTP_PORT='8443'
@@ -107,13 +108,19 @@ if [[ $TARGET_ADDRESS_MODE == domain ]]; then
   done
 fi
 
-reality_probe=$(timeout 15 openssl s_client \
-  -connect "$REALITY_TARGET:443" -servername "$REALITY_TARGET" \
-  -alpn h2 -tls1_3 -verify_return_error -verify_hostname "$REALITY_TARGET" \
-  </dev/null 2>&1) || die 'REALITY target TLS preflight failed'
-grep -Fq 'Verification: OK' <<<"$reality_probe" || die 'REALITY target verification failed'
-grep -Fq 'ALPN protocol: h2' <<<"$reality_probe" || die 'REALITY target lacks negotiated H2'
-unset reality_probe
+if [[ $TARGET_REALITY_MODE == external ]]; then
+  reality_probe=$(timeout 15 openssl s_client \
+    -connect "$REALITY_DEST" -servername "$TARGET_REALITY_TARGET_SNI" \
+    -alpn h2 -tls1_3 -verify_return_error -verify_hostname "$TARGET_REALITY_TARGET_SNI" \
+    </dev/null 2>&1) || die 'REALITY target TLS preflight failed'
+  grep -Fq 'Verification: OK' <<<"$reality_probe" || die 'REALITY target verification failed'
+  grep -Fq 'ALPN protocol: h2' <<<"$reality_probe" || die 'REALITY target lacks negotiated H2'
+  unset reality_probe
+else
+  # The decoy checker separately proves the site's own trusted identity and
+  # compatibility with the advertised client SNI (which may be different).
+  bash "$(dirname -- "${BASH_SOURCE[0]}")/../base/install-reality-decoy.sh" --check-only
+fi
 
 inbound_count=$(sqlite3 /etc/x-ui/x-ui.db 'select count(*) from inbounds;')
 [[ "$inbound_count" =~ ^[0-9]+$ ]] || die 'could not inspect inbound count'
@@ -148,7 +155,7 @@ renew_hook_source="$bundle_root/templates/60-krysyuk-standalone-xui"
   die 'certificate renewal hook source is missing or unsafe'
 [[ "$(ufw status | sed -n '1p')" == 'Status: inactive' ]] ||
   die 'this first-install transaction expects inactive UFW'
-ufw show added | grep -Fq '(None)' || die 'this first-install transaction expects no UFW user rules'
+ufw show added | grep -F '(None)' >/dev/null || die 'this first-install transaction expects no UFW user rules'
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="$backup_root/${stamp}-standalone-provision"
@@ -364,14 +371,14 @@ jq -n '
 ' >"$stage/xray-global.json"
 
 jq -n \
-  --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
+  --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" --arg dest "$REALITY_DEST" \
   --arg uuid "$VLESS_UUID" --arg sub "$SUBSCRIPTION_ID" \
   --arg private_key "$REALITY_PRIVATE_KEY" --arg public_key "$REALITY_PUBLIC_KEY" \
   --arg short_id "$REALITY_SHORT_ID" '
   {
     enable:false,remark:"VPN VLESS REALITY TCP 443",listen:$ip,port:443,protocol:"vless",expiryTime:0,total:0,
     settings:{clients:[{id:$uuid,email:"germany-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+(if env.TARGET_EGRESS_MODE=="direct" then " \u00b7 🖥️ IP сервера" else "" end)+" \u00b7 REALITY"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
-    streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:($target+":443"),serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
+    streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:$dest,serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:1
   }
@@ -478,14 +485,14 @@ PY
 systemctl start x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]"; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null; then
     break
   fi
   sleep 1
 done
 systemctl is-active --quiet x-ui.service || die 'x-ui did not start for local API configuration'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" || die 'panel is not loopback-only'
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null || die 'panel is not loopback-only'
+if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'panel unexpectedly listens publicly'
 fi
 
@@ -543,8 +550,8 @@ jq --exit-status '.success == true' "$stage/settings-update.json" >/dev/null
 systemctl restart x-ui.service
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]"; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null; then
     break
   fi
   sleep 1
@@ -623,19 +630,19 @@ for inbound_id in "${inbound_ids[@]}"; do
 done
 
 for _ in $(seq 1 30); do
-  if ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
+  if ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null &&
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null; }; then
     break
   fi
   sleep 1
 done
-ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'REALITY listener is absent'
-ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" || die 'XHTTP listener is absent'
+ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'REALITY listener is absent'
+ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null || die 'XHTTP listener is absent'
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
-  ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'Hysteria2 listener is absent'
+  ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'Hysteria2 listener is absent'
 else
-  ! ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]" || die 'unexpected Hysteria2 listener in certificate-free mode'
+  ! ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null || die 'unexpected Hysteria2 listener in certificate-free mode'
 fi
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config /usr/local/x-ui/bin/config.json >/dev/null
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
@@ -682,11 +689,11 @@ systemctl start x-ui.service
 
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet x-ui.service &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:443[[:space:]]" &&
-     ss -H -lnt | grep -Eq "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" &&
-     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -Eq "${SERVER_IPV4}:443[[:space:]]"; }; then
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null &&
+     ss -H -lnt | grep -E "${SERVER_IPV4}:${XHTTP_PORT}[[:space:]]" >/dev/null &&
+     { [[ $TARGET_TLS_MODE == none ]] || ss -H -lnu | grep -E "${SERVER_IPV4}:443[[:space:]]" >/dev/null; }; then
     break
   fi
   sleep 1
@@ -826,11 +833,11 @@ jq --exit-status --arg host443 "$PUBLIC_FQDN:443" \
   and ([.obj[].isDisabled]|all(.==false))
 ' "$stage/hosts-final.json" >/dev/null
 
-if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'panel became publicly reachable'
 fi
-ufw status | grep -Fq 'Status: active' || die 'UFW is not active'
-ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" &&
+ufw status | grep -F 'Status: active' >/dev/null || die 'UFW is not active'
+ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null &&
   die 'panel port is allowed by UFW'
 sqlite3 /etc/x-ui/x-ui.db 'PRAGMA quick_check;' | grep -qx ok
 XRAY_LOCATION_ASSET=/usr/local/x-ui/bin "$xray" run -test -config /usr/local/x-ui/bin/config.json >/dev/null

@@ -42,18 +42,46 @@ owned_file() {
   [[ -f $1 && ! -L $1 && $(stat -c '%u:%g:%a:%h' -- "$1") == "0:0:$2:1" ]]
 }
 
+local_reality_target() {
+  [[ ${TARGET_REALITY_MODE:-external} == self-steal || ${TARGET_REALITY_MODE:-external} == decoy ]]
+}
+
+verify_nginx_sites() {
+  local require_panel=$1 site
+  if local_reality_target; then
+    bash "$bundle_root/base/install-reality-decoy.sh" --check-only >/dev/null || return 1
+  fi
+  while IFS= read -r site; do
+    [[ -n $site ]] || continue
+    if [[ $require_panel == 1 && $site == "$nginx_config" ]]; then
+      owned_file "$site" 600 || return 1
+    elif local_reality_target && [[ $site == /etc/nginx/conf.d/vpn-reality-decoy.conf ]]; then
+      : # Exact content, ownership and live TLS were checked above.
+    elif local_reality_target && [[ $require_panel == 1 && $site == /etc/nginx/conf.d/vpn-ip-subscription.conf ]]; then
+      : # The decoy check validates the exact managed secondary-IP renderer.
+    else return 1; fi
+  done < <(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print)
+  if [[ $require_panel == 1 ]]; then owned_file "$nginx_config" 600; fi
+}
+
 render_nginx_config() {
   PANEL_BASE_PATH="$PANEL_BASE_PATH" NGINX_TEMPLATE="$nginx_template" python3 - <<'PY'
 import os
 from pathlib import Path
+import re
 import sys
 
 text = Path(os.environ['NGINX_TEMPLATE']).read_text()
-for key, value in {
+replacements = {
     '__SERVER_IPV4__': os.environ['TARGET_IPV4'], '__PUBLIC_FQDN__': os.environ['TARGET_FQDN'],
     '__PANEL_BASE_PATH__': os.environ['PANEL_BASE_PATH'],
-}.items():
-    text = text.replace(key, value)
+}
+def replace_placeholder(match):
+    try:
+        return replacements[match.group()]
+    except KeyError:
+        raise ValueError('Unknown panel Nginx template placeholder') from None
+text = re.sub(r'__[A-Za-z][A-Za-z0-9_]*__', replace_placeholder, text)
 sys.stdout.write(text)
 PY
   SUBSCRIPTION_PATH="$SUBSCRIPTION_PATH" python3 -I -B "$bundle_root/scripts/happ_routing.py" --nginx
@@ -77,14 +105,14 @@ PY
 
 verify_panel_publication() {
   local public_status root_status
-  ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
+  ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null ||
     die 'loopback 3X-UI backend disappeared'
-  ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" ||
+  ss -H -lnt | grep -E "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" >/dev/null ||
     die 'public HTTPS panel listener is missing'
-  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]"; then
+  if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):${PANEL_PORT}[[:space:]]" >/dev/null; then
     die 'panel proxy unexpectedly listens on a wildcard address'
   fi
-  if ss -H -lnt | grep -Eq "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]"; then
+  if ss -H -lnt | grep -E "(0[.]0[.]0[.]0|[*]|\[::\]):80[[:space:]]" >/dev/null; then
     die 'nginx unexpectedly occupies public TCP/80'
   fi
   public_status=$(curl --proto "=$TARGET_PUBLIC_SCHEME" --tlsv1.2 --silent --show-error --max-time 20 \
@@ -115,8 +143,7 @@ recover_committed_panel() (
     owned_file "$backup/SHA256SUMS" 600 && owned_file "$backup/access.env" 600 &&
     (cd -- "$backup"; sha256sum --check --strict SHA256SUMS >/dev/null) ||
     die 'existing public panel has no intact committed provisioning snapshot'
-  sites=$(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print)
-  [[ $sites == "$nginx_config" ]] && owned_file "$nginx_config" 600 ||
+  verify_nginx_sites 1 ||
     die 'existing Nginx configuration is not the managed panel and subscription configuration'
   stage=$(mktemp -d -p /run panel-readback.XXXXXXXX)
   trap 'rm -rf -- "$stage"' EXIT
@@ -183,9 +210,9 @@ systemctl is-active --quiet x-ui.service || die 'x-ui is not active'
 systemctl is-enabled --quiet x-ui.service || die 'x-ui is not enabled'
 ip -4 -o address show dev "$PUBLIC_INTERFACE" scope global | grep -Fq " $SERVER_IPV4/" ||
   die 'public IPv4 is not assigned to the expected interface'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" ||
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${PANEL_PORT}[[:space:]]" >/dev/null ||
   die '3X-UI backend is not loopback-only on TCP/2053'
-ss -H -lnt | grep -Eq "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" ||
+ss -H -lnt | grep -E "127[.]0[.]0[.]1:${SUBSCRIPTION_PORT}[[:space:]]" >/dev/null ||
   die '3X-UI subscription backend is not loopback-only on TCP/2096'
 [[ "$(ufw status | sed -n '1p')" == 'Status: active' ]] || die 'UFW is not active'
 
@@ -209,15 +236,19 @@ if [[ $mode == apply && (-e $nginx_config || -L $nginx_config) ]]; then
   recover_committed_panel
   exit 0
 fi
-if ss -H -lnt | grep -Eq "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]"; then
+if ss -H -lnt | grep -E "${SERVER_IPV4}:${PANEL_PORT}[[:space:]]" >/dev/null; then
   die 'public TCP/2053 is already occupied'
 fi
-if ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW"; then
+if ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null; then
   die 'UFW already permits TCP/2053; reviewed merge required'
 fi
-[[ -z $(find /etc/nginx/conf.d /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print -quit) ]] ||
+verify_nginx_sites 0 ||
   die 'nginx contains enabled sites/configs; reviewed merge required'
-! systemctl is-active --quiet nginx.service || die 'nginx must be stopped before panel transaction'
+if local_reality_target; then
+  systemctl is-active --quiet nginx.service || die 'local REALITY target Nginx must remain active'
+else
+  ! systemctl is-active --quiet nginx.service || die 'nginx must be stopped before panel transaction'
+fi
 if [[ "$mode" == check ]]; then
   [[ ! -e "$nginx_config" ]] || die 'managed nginx config already exists'
   [[ ! -e "$renew_hook" ]] || die 'managed renewal hook already exists'
@@ -242,13 +273,14 @@ if [[ $TARGET_TLS_MODE == letsencrypt ]]; then xui_snapshot_paths+=(etc/letsencr
 tar --acls --xattrs --numeric-owner -cpf "$backup/xui-before.tar" -C / "${xui_snapshot_paths[@]}"
 tar -tf "$backup/xui-before.tar" >/dev/null
 systemctl is-enabled nginx.service >"$backup/nginx-enabled-before.txt" 2>/dev/null || true
+systemctl is-active nginx.service >"$backup/nginx-active-before.txt" 2>/dev/null || true
 nft -s list ruleset >"$backup/nft-before.txt"
 sqlite3 /etc/x-ui/x-ui.db ".backup '$backup/x-ui.db'"
 chmod 0600 "$backup/x-ui.db"
 sqlite3 "$backup/x-ui.db" 'PRAGMA quick_check;' | grep -qx ok || die 'SQLite snapshot failed'
 (
   cd "$backup"
-  sha256sum access.env ufw.user.rules ufw.user6.rules x-ui.db nginx-before.tar xui-before.tar nft-before.txt >SHA256SUMS
+  sha256sum access.env ufw.user.rules ufw.user6.rules x-ui.db nginx-before.tar xui-before.tar nft-before.txt nginx-active-before.txt >SHA256SUMS
   sha256sum -c SHA256SUMS >/dev/null
 )
 printf 'SNAPSHOT=%s\n' "$backup"
@@ -284,6 +316,11 @@ transaction_exit() {
       enabled_after=$(systemctl is-enabled nginx.service 2>/dev/null)
       [[ $enabled_after == "$(cat "$backup/nginx-enabled-before.txt")" ]] || rollback_ok=0
       [[ ! -e $nginx_config && ! -L $nginx_config && ! -e $renew_hook && ! -L $renew_hook ]] || rollback_ok=0
+      if [[ ${TARGET_REALITY_MODE:-external} == self-steal || ${TARGET_REALITY_MODE:-external} == decoy ]] &&
+          grep -Fxq active "$backup/nginx-active-before.txt"; then
+        nginx -t >/dev/null 2>&1 && systemctl start nginx.service >/dev/null 2>&1 || rollback_ok=0
+        bash "$bundle_root/base/install-reality-decoy.sh" --check-only >/dev/null 2>&1 || rollback_ok=0
+      fi
     else
       printf 'PANEL_ROLLBACK_NGINX_RESOURCES_RETAINED=1\n' >&2
     fi
@@ -308,7 +345,6 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 render_nginx_config >"$stage/3x-ui-public.conf"
-grep -Fq '__' "$stage/3x-ui-public.conf" && die 'unresolved nginx template placeholder'
 install -o root -g root -m 0600 "$stage/3x-ui-public.conf" "$nginx_config"
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   install -o root -g root -m 0755 "$renew_hook_source" "$renew_hook"
@@ -317,12 +353,13 @@ nginx -t
 
 systemctl unmask nginx.service >/dev/null
 systemctl enable --now nginx.service
+if local_reality_target; then systemctl reload nginx.service; fi
 systemctl is-active --quiet nginx.service
 systemctl is-enabled --quiet nginx.service
 
 ufw allow in on "$PUBLIC_INTERFACE" to "$SERVER_IPV4" port "$PANEL_PORT" \
   proto tcp comment '3x-ui HTTPS panel' >/dev/null
-ufw status | grep -Eq "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" ||
+ufw status | grep -E "(^|[[:space:]])${PANEL_PORT}(/tcp)?([[:space:]]|$).*ALLOW" >/dev/null ||
   die 'UFW did not permit TCP/2053'
 
 render_access "$access_file" >"$stage/access.env"

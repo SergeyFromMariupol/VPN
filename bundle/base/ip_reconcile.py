@@ -41,6 +41,7 @@ MAIN = Path("/usr/local/x-ui/bin/config.json")
 TLS = ACCESS.parent / "tls"
 TLS_MARKER = ACCESS.parent / "tls-deployed.sha256"
 PANEL = Path("/etc/nginx/conf.d/3x-ui-public.conf")
+DECOY = PANEL.with_name("vpn-reality-decoy.conf")
 ALIASES = PANEL.with_name("vpn-ip-subscription.conf")
 DROPIN = Path("/etc/systemd/system/certbot.service.d/30-vpn-active-ip.conf")
 UFW = Path("/etc/ufw/user.rules")
@@ -51,6 +52,20 @@ IP_TIMERS = ("certbot.timer", "vpn-cert-reconcile.timer")
 BASE_UNITS = ("x-ui.service", "germanyvpn-xhttp-test.service")
 WARP_UNITS = ("krysyuk-xray-warp-egress.service", "germanyvpn-xhttp-warp.service")
 SOURCE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "LANG": "C"}
+
+
+def decoy_configuration(target):
+    """Move the local target to the newly issued IP certificate in the journal."""
+    if target.get("TARGET_REALITY_MODE", "external") == "external":
+        if not DECOY.exists():
+            return None
+        # A previously installed local site can remain dormant while REALITY
+        # uses an external target. Keep its own certificate usable too.
+        target = {**target, "TARGET_REALITY_MODE": "decoy"}
+    spec = importlib.util.spec_from_file_location("ip_reality_decoy", Path(__file__).with_name("reality-decoy.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.render_active(target).encode("utf-8")
 
 
 def run(*args, timeout=60, env=None):
@@ -576,6 +591,11 @@ def reconcile():
         transaction.change(TARGET, serialize(target))
         transaction.change(ACCESS, serialize(access))
         transaction.change(PANEL, replace_address(PANEL.read_bytes(), old, primary))
+        decoy = decoy_configuration(target)
+        if decoy is not None:
+            if state(DECOY) is None:
+                raise RuntimeError("IP_REALITY_DECOY_MISSING")
+            transaction.change(DECOY, decoy)
         transaction.change(UFW, replace_address(UFW.read_bytes(), old, primary))
         transaction.change(ROOT / "proxy.json", json.dumps(current).encode(), 0o644)
         transaction.change(ROOT / "aliases.nft", expected)

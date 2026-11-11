@@ -30,7 +30,8 @@ class CertificateFreeMainContract(unittest.TestCase):
             (self.root / name).write_text(value)
         self.env = dict(os.environ, CONTRACT_STAGE=str(self.root),
                         TARGET_FQDN='vpn.example.org', TARGET_IPV4='198.51.100.42',
-                        TARGET_REALITY_SNI='max.ru', TARGET_DEVICE_LIMIT='0')
+                        TARGET_REALITY_SNI='max.ru', TARGET_REALITY_DEST='max.ru:443',
+                        TARGET_DEVICE_LIMIT='0')
         self.source = []
         for port, protocol in ((443, 'reality'), (8443, 'xhttp')):
             clients = []
@@ -96,6 +97,10 @@ class CertificateFreeMainContract(unittest.TestCase):
         self.check(False)
         self.source[0]['settings']['clients'][0]['id'] = self.secrets['warp-reality.uuid']
         self.hosts[1]['sni'] = 'other.example.org'
+        self.check(False)
+
+    def test_rejects_changed_source_reality_destination(self):
+        self.source[0]['streamSettings']['realitySettings']['target'] = '127.0.0.1:9443'
         self.check(False)
 
 

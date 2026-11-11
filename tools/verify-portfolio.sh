@@ -5,6 +5,12 @@ umask 077
 [[ $EUID == 0 ]] || exit 1
 readonly bundle=/var/lib/vpn-installer/bundle
 source "$bundle/scripts/target-contract.sh"
+if [[ $TARGET_REALITY_MODE != external ]]; then
+  bash "$bundle/base/install-reality-decoy.sh" --check-only
+fi
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  bash "$bundle/base/install-menu.sh" --check-only
+fi
 [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]] || exit 1
 
 units=(x-ui nginx germanyvpn-xhttp-test.service)
@@ -24,7 +30,7 @@ if [[ $TARGET_EGRESS_MODE == direct ]]; then
     germanyvpn-xhttp-warp.service; do
     ! systemctl is-active --quiet "$unit"
   done
-  ! ss -H -lnt | grep -Eq '127[.]0[.]0[.]1:24443[[:space:]]'
+  ! ss -H -lnt | grep -E '127[.]0[.]0[.]1:24443[[:space:]]' >/dev/null
 fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   bash "$bundle/base/install-certbot.sh" --check-only
@@ -65,7 +71,16 @@ if [[ $TARGET_EGRESS_MODE == direct ]]; then
   python3 -I -B "$bundle/scripts/finalize-direct-xhttp.py" --verify-selected
 else
   for warp_test in test-smoke.sh test-main-route-isolation.sh test-e2e-local.sh test-invalid.sh; do
-    bash "/opt/krysyuk-warp-egress/tests/$warp_test" >/dev/null
+    if ! bash "/opt/krysyuk-warp-egress/tests/$warp_test" >/dev/null; then
+      case $warp_test in
+        test-smoke.sh) code=VERIFY_WARP_SMOKE;;
+        test-main-route-isolation.sh) code=VERIFY_WARP_ROUTING;;
+        test-e2e-local.sh) code=VERIFY_WARP_E2E;;
+        test-invalid.sh) code=VERIFY_WARP_REJECT;;
+      esac
+      printf 'VPN_ERROR_CODE=%s\n' "$code" >&2
+      exit 1
+    fi
   done
 fi
 

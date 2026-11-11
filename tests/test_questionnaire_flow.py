@@ -35,7 +35,7 @@ real_python = sys.executable
 keys = ('TARGET_ADDRESS_MODE', 'TARGET_TLS_MODE', 'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET',
         'TARGET_PROFILE_IDS',
         'TARGET_IPV4', 'TARGET_FQDN', 'TARGET_INTERFACE',
-        'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL',
+        'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_MODE', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL',
         'TARGET_HAPP_PROVIDER_ID')
 
 def event(value):
@@ -65,6 +65,9 @@ def prepare():
         assert old in text, old
         text = text.replace(old, new)
     entrypoint.write_text(text, encoding='utf-8')
+    contract = source / 'bundle/scripts/target-contract.sh'
+    contract.write_text(contract.read_text().replace('/etc/germanyvpn-target.env', str(target)),
+                        encoding='utf-8')
     (root / 'os-release').write_text('ID=ubuntu\nVERSION_ID=24.04\n')
     (root / 'access.env').write_text('FIXTURE_ACCESS_ONLY=1\n')
     binary = root / 'bin'
@@ -104,6 +107,9 @@ if [[ ${1:-} == */tools/preflight.py ]]; then
   elif [[ ${1:-} == --check-reality-sni ]]; then
     printf 'SNI_PROBE:%s\\n' "$TARGET_REALITY_SNI" >>"$FIXTURE_ROOT/events"
     exec "$FIXTURE_PYTHON" -B "$script" --check-reality-sni
+  elif [[ ${1:-} == --check-reality-selection ]]; then
+    printf 'REALITY_SELECTION\\n' >>"$FIXTURE_ROOT/events"
+    exec "$FIXTURE_PYTHON" -B "$script" --check-reality-selection
   else printf 'FULL_PREFLIGHT\\n' >>"$FIXTURE_ROOT/events"; fi
   exec "$FIXTURE_PYTHON" -B "$script" --inputs-only
 fi
@@ -127,6 +133,8 @@ printf 'PHASE:renewal\\n' >>"$FIXTURE_ROOT/events"
     paths = {
         'base/install-pinned-base.sh': 'base', 'base/install-certbot.sh': 'certbot',
         'base/acme.sh': 'tls', 'scripts/configure-standalone.sh': 'direct',
+        'base/install-reality-decoy.sh': 'reality-decoy',
+        'base/install-menu.sh': 'menu',
         'scripts/expose-panel-https.sh': 'panel', 'base/install-nginx-restart.sh': 'nginx-restart',
         'base/install-cert-reconcile.sh': 'cert-reconcile',
         'base/install-ip-address.sh': 'ip-address',
@@ -161,6 +169,7 @@ apt-get upgrade -y --no-remove
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:portfolio-publish\\n")\n')
     executable(source / 'tools/verify.sh', shell + '''
 printf 'PHASE:verify\\n' >>"$FIXTURE_ROOT/events"
+source "$FIXTURE_ROOT/source/bundle/scripts/target-contract.sh"
 "$FIXTURE_PYTHON" -I -c 'import json,os,pathlib;pathlib.Path(os.environ["FIXTURE_ROOT"],"verify-inputs.json").write_text(json.dumps({k:v for k,v in os.environ.items() if k.startswith("TARGET_") or k=="ACME_EMAIL"}))'
 ''')
     # The test changes only its private copy. Recompute its actual source
@@ -206,11 +215,19 @@ def questionnaire_steps():
     if 'sni_steps' in settings:
         steps.extend(settings['sni_steps'])
     else:
-        sni_choice = settings.get('sni_choice', '1')
-        steps.append(('Выберите SNI [1]:', sni_choice))
+        # Most historical flow tests deliberately retain their external target;
+        # dedicated tests below exercise the new self-steal default.
+        sni_choice = settings.get('sni_choice', '3')
+        steps.append(('Выберите режим REALITY [1]:', sni_choice))
+        if sni_choice in ('', '1') and menu[-1] in ('', '1'):
+            steps.extend(('Домен сайта, VPN, панели и подписки:', value) for value in
+                         settings.get('site_domain_answers', ['vpn.example.com']))
         if sni_choice == '2':
-            steps.extend(('Свой SNI:', value) for value in
-                         settings.get('custom_sni_answers', ['example.org']))
+            steps.extend(('Клиентский SNI:', value) for value in
+                         settings.get('custom_sni_answers', ['max.ru']))
+        if sni_choice == '3':
+            steps.extend(('Внешний SNI:', value) for value in
+                         settings.get('custom_sni_answers', ['max.ru']))
     steps.extend(('Ваше имя для названий профилей:', value) for value in
                  settings.get('label_answers', [settings.get('label', 'Мой VPN')]))
     steps.append(('Email для Let’s Encrypt (необязательно) [пусто]:',
@@ -292,7 +309,8 @@ try:
             text = target.read_text()
             for key, value in settings['saved_resume_inputs'].items():
                 assert key in ('ACME_EMAIL', 'TARGET_LABEL', 'TARGET_REALITY_SNI', 'TARGET_DEVICE_LIMIT',
-                               'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET', 'TARGET_TLS_MODE')
+                               'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET', 'TARGET_TLS_MODE',
+                               'TARGET_REALITY_MODE')
                 text, replaced = re.subn('^' + key + '=.*$',
                                          lambda match: key + '=' + shlex.quote(value), text, flags=re.M)
                 assert replaced == 1
@@ -303,6 +321,8 @@ try:
             target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET|PROFILE_IDS)=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_provider'):
             target.write_text(re.sub(r'^TARGET_HAPP_PROVIDER_ID=.*\n', '', target.read_text(), flags=re.M))
+        if settings.get('legacy_without_reality_mode'):
+            target.write_text(re.sub(r'^TARGET_REALITY_MODE=.*\n', '', target.read_text(), flags=re.M))
         before = target.read_bytes()
         before_events = len(observed)
         env = environment()
@@ -310,7 +330,9 @@ try:
         env.update(TARGET_LABEL='caller-must-not-win', ACME_EMAIL='caller@example.invalid',
                    TARGET_TLS_MODE='none' if settings.get('legacy_without_tls_mode') else 'letsencrypt',
                    TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all',
-                   TARGET_PROFILE_IDS='vless-reality-grpc-direct', TARGET_HAPP_PROVIDER_ID='Caller99')
+                   TARGET_PROFILE_IDS='vless-reality-grpc-direct', TARGET_HAPP_PROVIDER_ID='Caller99',
+                   TARGET_REALITY_MODE='decoy', TARGET_REALITY_DEST='caller.invalid:1',
+                   TARGET_REALITY_TARGET_SNI='caller.invalid')
         child = subprocess.run(['/bin/bash', str(installed / 'install.sh'), '--resume'],
                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                start_new_session=True, timeout=30)
@@ -376,8 +398,10 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('3. Оба варианта профилей', labels)
         self.assertIn('1. По IP-адресу', labels)
         self.assertIn('2. По доменному имени', labels)
-        self.assertIn('1. По умолчанию max.ru', labels)
-        self.assertIn('2. Свой', labels)
+        self.assertIn('1. Собственный сайт · self-steal', labels)
+        self.assertIn('2. Собственный сайт + другой клиентский SNI', labels)
+        self.assertIn('3. Внешний сайт · SNI вручную', labels)
+        self.assertNotIn('По умолчанию max.ru', wizard)
         self.assertIn('Email для Let’s Encrypt (необязательно) [пусто]:', wizard)
         self.assertIn('Happ Provider ID (необязательно) [пусто]:', wizard)
         self.assertNotIn('Выберите режим сертификата', wizard)
@@ -388,8 +412,9 @@ class QuestionnaireFlow(unittest.TestCase):
             self.assertNotIn(removed, wizard)
 
     def test_eof_at_each_question_publishes_nothing(self):
-        # Console: egress, set, port, address, domain, SNI, name, email, provider ID.
-        for index in range(9):
+        # Console: egress, set, port, address, domain, mode, external SNI,
+        # name, email, provider ID.
+        for index in range(10):
             with self.subTest(eof=index):
                 self.assert_unpublished(self.fixture(eof=index))
         self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION,
@@ -400,14 +425,15 @@ class QuestionnaireFlow(unittest.TestCase):
             with self.subTest(field=index):
                 self.assert_unpublished(self.fixture(override={str(index): value}))
 
-    def test_default_sni_starts_install_and_resume_preserves_saved_parameters(self):
+    def test_manual_external_sni_starts_install_and_resume_preserves_saved_parameters(self):
         injected = dict(ACME_EMAIL='caller@example.invalid', TARGET_LABEL='Caller VPN',
                         TARGET_REALITY_SNI='example.org', TARGET_DEVICE_LIMIT='99',
-                        TARGET_TLS_MODE='none', TARGET_PROFILE_IDS='vless-reality-grpc-warp')
+                        TARGET_TLS_MODE='none', TARGET_PROFILE_IDS='vless-reality-grpc-warp',
+                        TARGET_REALITY_MODE='self-steal')
         saved = dict(ACME_EMAIL='legacy@example.com', TARGET_LABEL='Старый VPN',
                      TARGET_REALITY_SNI='example.net', TARGET_DEVICE_LIMIT='17')
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='', resume=True,
-                              sni_choice='', term='xterm-256color', caller_inputs=injected,
+                              sni_choice='3', term='xterm-256color', caller_inputs=injected,
                               saved_resume_inputs=saved)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assert_wizard_labels_and_no_ip(result)
@@ -416,7 +442,7 @@ class QuestionnaireFlow(unittest.TestCase):
                         TARGET_IPV4='8.8.4.4',
                         TARGET_FQDN='8.8.4.4', TARGET_INTERFACE='enp1s0',
                         TARGET_SSH_PORT='2222', TARGET_DEVICE_LIMIT='0',
-                        TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='',
+                        TARGET_REALITY_MODE='external', TARGET_REALITY_SNI='max.ru', TARGET_LABEL='Мой VPN', ACME_EMAIL='',
                         TARGET_HAPP_PROVIDER_ID='')
         self.assertEqual(result['persisted'], expected)
         self.assertEqual({key: result['phase_inputs'].get(key) for key in expected}, expected)
@@ -424,11 +450,11 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
         events = result['events']
         self.assertEqual([event for event in events if event.startswith('ANSWER:')],
-                         ['ANSWER:' + str(index) for index in range(7)])
-        self.assertLess(events.index('ANSWER:3'), events.index('SNI_PROBE:max.ru'))
+                         ['ANSWER:' + str(index) for index in range(8)])
+        self.assertLess(events.index('ANSWER:4'), events.index('SNI_PROBE:max.ru'))
         self.assertLess(events.index('SNI_PROBE:max.ru'), events.index('SNI_TLS:max.ru'))
-        self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:4'))
-        self.assertLess(events.index('ANSWER:4'), events.index('INPUT_VALIDATION'))
+        self.assertLess(events.index('SNI_TLS:max.ru'), events.index('ANSWER:5'))
+        self.assertLess(events.index('ANSWER:5'), events.index('INPUT_VALIDATION'))
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('FULL_PREFLIGHT'))
         self.assertLess(events.index('FULL_PREFLIGHT'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('PHASE:base'))
@@ -448,10 +474,10 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertNotIn('Установить VPN', resumed['output'])
         self.assertNotIn('Домен VPN', resumed['output'])
         self.assertNotIn('Выберите вариант', resumed['output'])
-        self.assertNotIn('Выберите SNI', resumed['output'])
+        self.assertNotIn('Выберите режим REALITY', resumed['output'])
         self.assertNotIn('\x1b[', resumed['output'])
 
-    def test_domain_name_and_console_port_precede_default_sni_choice(self):
+    def test_domain_name_and_console_port_precede_manual_external_sni_choice(self):
         for domain in (True, False):
             with self.subTest(domain=domain):
                 values = (dict(ssh_connection=SSH_CONNECTION, address_choice='2') if domain
@@ -469,10 +495,10 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertEqual(result['persisted']['ACME_EMAIL'], '')
                 self.assertEqual(result['phase_inputs']['ACME_EMAIL'], '')
                 self.assertEqual([event for event in result['events'] if event.startswith('ANSWER:')],
-                                 ['ANSWER:' + str(index) for index in range(8)])
+                                 ['ANSWER:' + str(index) for index in range(9)])
                 self.assertEqual('Домен VPN:' in result['output'], domain)
                 self.assertEqual('SSH порт [22]' in result['output'], not domain)
-                self.assertLess(result['events'].index('ANSWER:4'), result['events'].index('SNI_PROBE:max.ru'))
+                self.assertLess(result['events'].index('ANSWER:5'), result['events'].index('SNI_PROBE:max.ru'))
                 self.assertNotIn('\x1b[', result['output'])
 
     def test_certificate_is_automatic_and_resume_preserves_it(self):
@@ -486,7 +512,7 @@ class QuestionnaireFlow(unittest.TestCase):
         phases = [event for event in result['events'] if event.startswith('PHASE:')]
         self.assertEqual(phases, ['PHASE:' + name for name in
                          ('base', 'certbot', 'tls', 'direct', 'panel', 'nginx-restart',
-                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'verify', 'ip-address')])
+                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'menu', 'verify', 'ip-address')])
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
@@ -610,13 +636,17 @@ class QuestionnaireFlow(unittest.TestCase):
 
     def test_legacy_saved_selection_defaults_ignore_caller_environment(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              resume=True, legacy_without_selection=True, legacy_without_provider=True)
+                              resume=True, legacy_without_selection=True, legacy_without_provider=True,
+                              legacy_without_reality_mode=True)
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_EGRESS_MODE'], 'both')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_SET'], 'basic')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_IDS'], '')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], '')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_MODE'], 'external')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_SNI'], 'max.ru')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_DEST'], 'max.ru:443')
 
     def test_invalid_menu_retries_and_eof_cannot_start_installation(self):
         result = self.fixture(menu_answers=['invalid', '3', '2'])
@@ -624,12 +654,12 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
         self.assertEqual(result['persisted']['TARGET_FQDN'], 'vpn.example.com')
         self.assertEqual(result['output'].count('Выберите вариант [1]:'), 3)
-        self.assertLess(result['events'].index('ANSWER:9'), result['events'].index('FULL_PREFLIGHT'))
+        self.assertLess(result['events'].index('ANSWER:10'), result['events'].index('FULL_PREFLIGHT'))
         self.assert_unpublished(self.fixture(menu_answers=['invalid', None]))
         self.assert_unpublished(self.fixture(domain_answers=['', None]))
 
     def test_custom_sni_retries_format_and_tls_failures_before_installation(self):
-        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='3',
                               custom_sni_answers=['failed.example.org', 'bad;name.example', 'example.org'],
                               tls_fail_snis=['failed.example.org'])
         self.assertEqual(result['exit'], 0, result['output'])
@@ -645,24 +675,73 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertLess(events.index('INPUT_VALIDATION'), events.index('BOOTSTRAP_PUBLISH'))
         self.assertLess(events.index('BOOTSTRAP_PUBLISH'), events.index('APT:update'))
 
-        # Failed default returns to its menu; a custom target can then succeed.
+        # The external mode has no preset: every candidate is entered manually.
         fallback = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                sni_steps=[['Выберите SNI [1]:', '1'], ['Выберите SNI [1]:', '2'],
-                                           ['Свой SNI:', 'example.net']], tls_fail_snis=['max.ru'])
+                                sni_steps=[['Выберите режим REALITY [1]:', 'bad'],
+                                           ['Выберите режим REALITY [1]:', '3'],
+                                           ['Внешний SNI:', 'max.ru'],
+                                           ['Внешний SNI:', 'example.net']], tls_fail_snis=['max.ru'])
         self.assertEqual(fallback['exit'], 0, fallback['output'])
         self.assertEqual(fallback['persisted']['TARGET_REALITY_SNI'], 'example.net')
         self.assertEqual([event for event in fallback['events'] if event.startswith('SNI_TLS:')],
                          ['SNI_TLS:max.ru', 'SNI_TLS:example.net'])
 
-        rejected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+        rejected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='3',
                                 custom_sni_answers=['failed.example.org', None],
                                 tls_fail_snis=['failed.example.org'])
         self.assert_unpublished(rejected)
-        blank = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='2',
+        blank = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='3',
                              custom_sni_answers=['', None])
         self.assert_unpublished(blank)
         self.assertIn('EOF:5', blank['events'])
         self.assertFalse(any(event.startswith('SNI_PROBE:') for event in blank['events']))
+
+    def test_self_steal_is_default_and_does_not_probe_site_before_acme(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, sni_choice='', resume=True)
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertEqual(result['persisted']['TARGET_REALITY_MODE'], 'self-steal')
+        self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'vpn.example.com')
+        self.assertEqual(result['phase_inputs']['TARGET_REALITY_DEST'], '127.0.0.1:9443')
+        self.assertEqual(result['phase_inputs']['TARGET_REALITY_TARGET_SNI'], 'vpn.example.com')
+        self.assertNotIn('TARGET_REALITY_DEST', result['persisted'])
+        self.assertFalse(any(event.startswith(('SNI_PROBE:', 'SNI_TLS:')) for event in result['events']))
+        self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_MODE'], 'self-steal')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_DEST'], '127.0.0.1:9443')
+
+    def test_self_steal_ip_choice_explicitly_changes_the_endpoint_to_own_domain(self):
+        result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', sni_choice='1',
+                              site_domain_answers=['bad;domain.example', '8.8.4.4', 'site.example.org'])
+        self.assertEqual(result['exit'], 0, result['output'])
+        self.assertIn('Он станет адресом VPN, сайта, панели и подписки.', result['output'])
+        self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], 'domain')
+        self.assertEqual(result['persisted']['TARGET_FQDN'], 'site.example.org')
+        self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'site.example.org')
+        self.assertEqual(result['output'].count('Домен сайта, VPN, панели и подписки:'), 3)
+        self.assertFalse(any(event.startswith(('SNI_PROBE:', 'SNI_TLS:')) for event in result['events']))
+        self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                                             sni_choice='1', site_domain_answers=['', None]))
+
+    def test_decoy_keeps_ip_or_domain_endpoint_and_accepts_manual_max_without_external_probe(self):
+        for address_choice, endpoint, address_mode in (('1', '8.8.4.4', 'ip'),
+                                                       ('2', 'vpn.example.com', 'domain')):
+            with self.subTest(address=address_mode):
+                result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice=address_choice,
+                                      sni_choice='2', custom_sni_answers=['8.8.8.8', 'max.ru'], resume=True)
+                self.assertEqual(result['exit'], 0, result['output'])
+                self.assertEqual(result['persisted']['TARGET_ADDRESS_MODE'], address_mode)
+                self.assertEqual(result['persisted']['TARGET_FQDN'], endpoint)
+                self.assertEqual(result['persisted']['TARGET_REALITY_MODE'], 'decoy')
+                self.assertEqual(result['persisted']['TARGET_REALITY_SNI'], 'max.ru')
+                self.assertEqual(result['phase_inputs']['TARGET_REALITY_DEST'], '127.0.0.1:9443')
+                self.assertEqual(result['phase_inputs']['TARGET_REALITY_TARGET_SNI'], endpoint)
+                self.assertIn('Клиентский SNI останется виден в сети', result['output'])
+                self.assertNotIn('Домен сайта, VPN, панели и подписки:', result['output'])
+                self.assertFalse(any(event.startswith(('SNI_PROBE:', 'SNI_TLS:')) for event in result['events']))
+                self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
+                self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_SNI'], 'max.ru')
+        self.assert_unpublished(self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                                             sni_choice='2', custom_sni_answers=['', None]))
 
     def test_no_color_disables_ansi_even_in_color_capable_pty(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',

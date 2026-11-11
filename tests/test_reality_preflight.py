@@ -119,6 +119,51 @@ class RealityPreflight(unittest.TestCase):
         process.assert_called_once()
         self.assertIn('-verify_hostname', process.call_args.args[0])
 
+    def test_local_sites_check_own_dns_but_never_probe_not_yet_created_tls(self):
+        for mode, sni in (('self-steal', HOST), ('decoy', 'max.ru')):
+            env = dict(TARGET_REALITY_MODE=mode, TARGET_ADDRESS_MODE='domain',
+                       TARGET_TLS_MODE='letsencrypt', TARGET_IPV4='8.8.4.4',
+                       TARGET_FQDN=HOST, TARGET_REALITY_SNI=sni)
+            with self.subTest(mode=mode), patch.object(PREFLIGHT, 'dns',
+                    side_effect=lambda name, kind, resolver: ['8.8.4.4'] if kind == 1 else []) as dns, \
+                    patch.object(PREFLIGHT.subprocess, 'run',
+                                 side_effect=AssertionError('LOCAL_TLS_NOT_CREATED')):
+                self.assertEqual(PREFLIGHT.check_reality_preflight(env), 'PENDING_LOCAL_SITE')
+                self.assertEqual(dns.call_args_list, [
+                    unittest.mock.call(HOST, kind, resolver)
+                    for resolver in ('1.1.1.1', '9.9.9.9') for kind in (1, 28)])
+
+    def test_decoy_ip_has_no_external_target_dns_or_tls_dependency(self):
+        env = dict(TARGET_REALITY_MODE='decoy', TARGET_ADDRESS_MODE='ip',
+                   TARGET_TLS_MODE='letsencrypt', TARGET_IPV4='8.8.4.4',
+                   TARGET_FQDN='8.8.4.4', TARGET_REALITY_SNI='max.ru')
+        with patch.object(PREFLIGHT, 'dns', side_effect=AssertionError('IP_DNS_FORBIDDEN')), \
+                patch.object(PREFLIGHT.subprocess, 'run',
+                             side_effect=AssertionError('EXTERNAL_TLS_FORBIDDEN')):
+            self.assertEqual(PREFLIGHT.check_reality_preflight(env), 'PENDING_LOCAL_SITE')
+
+    def test_external_and_legacy_targets_retain_trusted_hostname_probe(self):
+        for saved in ({}, {'TARGET_REALITY_MODE': 'external'}):
+            env = dict(saved, TARGET_ADDRESS_MODE='ip', TARGET_FQDN='8.8.4.4',
+                       TARGET_REALITY_SNI='max.ru')
+            with self.subTest(saved=saved), patch.object(PREFLIGHT.subprocess, 'run',
+                                                         return_value=self.completed()) as process:
+                self.assertEqual(PREFLIGHT.check_reality_preflight(env), 'PASS')
+                self.assertIn('max.ru:443', process.call_args.args[0])
+
+    def test_invalid_local_dns_blocks_before_tls_or_acme(self):
+        env = dict(TARGET_REALITY_MODE='self-steal', TARGET_FQDN=HOST,
+                   TARGET_REALITY_SNI=HOST, TARGET_IPV4='8.8.4.4')
+        for kind, results in ((1, []), (1, ['8.8.8.8']), (1, ['8.8.4.4', '8.8.8.8']),
+                              (28, ['2001:4860:4860::8888'])):
+            with self.subTest(kind=kind, results=results), patch.object(PREFLIGHT, 'dns',
+                    side_effect=lambda name, query_kind, resolver:
+                        results if query_kind == kind else ['8.8.4.4']), \
+                    patch.object(PREFLIGHT.subprocess, 'run') as process:
+                with self.assertRaises(ValueError):
+                    PREFLIGHT.check_reality_preflight(env)
+                process.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

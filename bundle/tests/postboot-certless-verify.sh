@@ -150,8 +150,9 @@ need(all(row.get('shareAddr')==os.environ['TARGET_FQDN'] for row in source),'CER
 for row in source:
     settings=stream(row)
     target=settings.get('realitySettings',{})
-    need(target.get('target',target.get('dest'))==os.environ['TARGET_REALITY_SNI']+':443'
-         and target.get('serverNames')==[os.environ['TARGET_REALITY_SNI']],'CERTLESS_SOURCE_SNI')
+    need(target.get('target',target.get('dest'))==os.environ['TARGET_REALITY_DEST']
+         and target.get('serverNames')==[os.environ['TARGET_REALITY_SNI']]
+         and target.get('xver',0)==0,'CERTLESS_SOURCE_SNI')
     protocol='reality' if row['port']==443 else 'xhttp'
     need(bool(row.get('enable'))==(row['port']==443),'CERTLESS_SOURCE_ENABLEMENT')
     expected=[('germany-warp-'+protocol,secret('warp-'+protocol+'.uuid'),secret('public-sub.id')),

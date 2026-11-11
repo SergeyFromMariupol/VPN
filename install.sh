@@ -7,8 +7,8 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.4.9'
-readonly source_ref='03b97e342c83a8c2dcd8b132d0563415f446901c'
+readonly release='v1.5.0'
+readonly source_ref='36a28aaa34f5f16adde9a58fc87108bec3318bac'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -280,6 +280,7 @@ if [[ $mode == --verify ]]; then
   TARGET_PROFILE_SET=basic
   TARGET_PROFILE_IDS=''
   TARGET_HAPP_PROVIDER_ID=''
+  TARGET_REALITY_MODE=external
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
   export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_HAPP_PROVIDER_ID
@@ -302,6 +303,7 @@ if [[ $mode == --resume ]]; then
   TARGET_PROFILE_SET=basic
   TARGET_PROFILE_IDS=''
   TARGET_HAPP_PROVIDER_ID=''
+  TARGET_REALITY_MODE=external
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Сохранён режим без сертификата; этот установщик продолжает только HTTPS-установки'
   [[ -f $destination/SHA256SUMS ]] || die 'Отсутствует установленный bundle'
@@ -318,6 +320,7 @@ else
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
   export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
   export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS
+  export TARGET_REALITY_MODE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
   installer_error_context preflight "$task_stage/preflight-error.txt"
@@ -342,6 +345,8 @@ TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
 TARGET_PROFILE_IDS=${TARGET_PROFILE_IDS:-}
+TARGET_REALITY_MODE=${TARGET_REALITY_MODE:-external}
+case $TARGET_REALITY_MODE in self-steal|decoy|external) ;; *) die 'Небезопасный режим REALITY';; esac
 [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Новая установка требует Let’s Encrypt и HTTPS'
 [[ $TARGET_EGRESS_MODE == warp || $TARGET_EGRESS_MODE == direct || $TARGET_EGRESS_MODE == both ]] || die 'Небезопасный режим выхода'
 case "$TARGET_PROFILE_SET" in
@@ -359,6 +364,7 @@ case "$TARGET_PROFILE_SET" in
 esac
 export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
 export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS TARGET_EXTRA_PROFILE_COUNT
+export TARGET_REALITY_MODE
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
   rendered_stage=$(mktemp -d "$state/rendered.XXXXXXXX")
@@ -384,6 +390,10 @@ if [[ ! -f $state/tls.done &&
   phase tls bash "$runtime/base/acme.sh" --verify-committed
 else
   phase tls bash "$runtime/base/acme.sh" --apply
+fi
+if [[ $TARGET_REALITY_MODE != external ]]; then
+  installer_error_context reality-decoy "$state/reality-decoy.log"
+  phase reality-decoy bash "$runtime/base/install-reality-decoy.sh" --apply
 fi
 installer_error_context direct "$state/direct.log"
 phase direct bash "$runtime/scripts/configure-standalone.sh" --apply
@@ -448,6 +458,8 @@ fi
 # should run its one acceptance renewal immediately.
 installer_error_context renewal "$state/renewal.log"
 phase renewal certbot renew --non-interactive --dry-run --run-deploy-hooks --no-random-sleep-on-renew
+installer_error_context menu "$state/menu.log"
+phase menu bash "$runtime/base/install-menu.sh" --apply
 # Always recheck live state, including a resume after a later phase failed.
 installer_error_context verify "$state/verify.log"
 phase --always verify bash "$destination/tools/verify.sh"
@@ -456,6 +468,7 @@ if [[ $TARGET_ADDRESS_MODE == ip ]]; then
   phase ip-address bash "$runtime/base/install-ip-address.sh"
 fi
 installer_success 'VPN успешно установлен!'
+printf '\nМеню управления сервером: vpn\n'
 printf '\nСохраните данные доступа:\n\n'
 cat /etc/krysyuk-standalone/access.env
 printf '\nСписок пакетов Android для импорта:\nhttps://raw.githubusercontent.com/%s/main/bundle/scripts/android-app-bypass.txt\n' "$repository"

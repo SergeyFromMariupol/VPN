@@ -57,6 +57,39 @@ def canonical_links(label, endpoint):
 
 
 class DirectProfileLabels(unittest.TestCase):
+    def test_production_reality_generator_separates_target_from_client_sni(self):
+        jq = os.environ.get('VPN_TEST_JQ') or shutil.which('jq')
+        if not jq:
+            if os.environ.get('CI'):
+                self.fail('Ubuntu CI must execute the real jq REALITY generator')
+            self.skipTest('jq is required for actual production generators')
+        for mode, endpoint, sni, destination in (
+                ('external', 'vpn.example.org', 'max.ru', 'max.ru:443'),
+                ('self-steal', 'vpn.example.org', 'vpn.example.org', '127.0.0.1:9443'),
+                ('decoy', 'vpn.example.org', 'max.ru', '127.0.0.1:9443'),
+                ('decoy', '8.8.4.4', 'max.ru', '127.0.0.1:9443')):
+            with self.subTest(mode=mode, endpoint=endpoint):
+                values = dict(SERVER_IPV4='8.8.4.4', PUBLIC_FQDN=endpoint,
+                              REALITY_TARGET=sni, REALITY_DEST=destination,
+                              VLESS_UUID='fixture-uuid', SUBSCRIPTION_ID='fixture-subscription',
+                              REALITY_PRIVATE_KEY='fixture-private',
+                              REALITY_PUBLIC_KEY='fixture-public', REALITY_SHORT_ID='01234567')
+                environment = dict(os.environ, TARGET_LABEL='Test', TARGET_DEVICE_LIMIT='0',
+                                   TARGET_REALITY_MODE=mode)
+                result = subprocess.run(jq_command('reality', values, jq), env=environment,
+                                        encoding='utf-8', capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                inbound = json.loads(result.stdout)
+                stream = inbound['streamSettings']
+                reality = stream['realitySettings']
+                self.assertEqual(reality['target'], destination)
+                self.assertEqual(reality['serverNames'], [sni])
+                self.assertEqual(reality['xver'], 0)
+                self.assertEqual(reality['privateKey'], 'fixture-private')
+                self.assertEqual(stream['network'], 'grpc')
+                self.assertEqual(stream['grpcSettings']['serviceName'], 'reality-grpc')
+                self.assertEqual(inbound['settings']['clients'][0]['flow'], '')
+
     def check_links(self, links, label, endpoint, encoded=False):
         with tempfile.TemporaryDirectory(prefix='vpn-direct-labels-') as temporary:
             body = Path(temporary) / 'subscription.body'
@@ -78,7 +111,7 @@ class DirectProfileLabels(unittest.TestCase):
         for mode, endpoint in (('domain', 'vpn.example.org'), ('ip', '8.8.4.4')):
             for label in LABELS:
                 values = dict(SERVER_IPV4='8.8.4.4', PUBLIC_FQDN=endpoint,
-                              REALITY_TARGET='example.org', VLESS_UUID='fixture-uuid',
+                              REALITY_TARGET='example.org', REALITY_DEST='example.org:443', VLESS_UUID='fixture-uuid',
                               SUBSCRIPTION_ID='fixture-subscription',
                               REALITY_PRIVATE_KEY='fixture-private-key',
                               REALITY_PUBLIC_KEY='fixture-public-key', REALITY_SHORT_ID='01234567',

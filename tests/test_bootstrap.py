@@ -110,10 +110,12 @@ class BootstrapTransaction(unittest.TestCase):
     def run_fixture(self, case, expected, **values):
         with tempfile.TemporaryDirectory(prefix='vpn-bootstrap-test.', dir='/tmp') as temp:
             root = Path(temp)
-            for name in ('source/tools', 'source/bundle', 'opt', 'varlib', 'etc', 'task'):
+            for name in ('source/tools', 'source/bundle/scripts', 'opt', 'varlib', 'etc', 'task'):
                 (root / name).mkdir(parents=True, exist_ok=True)
-            for name in ('write-target.py', 'render.py'):
+            for name in ('write-target.py', 'render.py', 'preflight.py'):
                 shutil.copyfile(ROOT / 'tools' / name, root / 'source/tools' / name)
+            shutil.copyfile(ROOT / 'bundle/scripts/network-contract.py',
+                            root / 'source/bundle/scripts/network-contract.py')
             (root / 'source/bundle/test.sh').write_text('@TARGET_IPV4@ @TARGET_INTERFACE@\n')
             (root / 'task/inventory.txt').write_text('CLEAN_HOST=PASS\n')
             files = sorted(p for p in (root / 'source').rglob('*') if p.is_file())

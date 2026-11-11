@@ -25,7 +25,7 @@ def inputs(**overrides):
                   TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_PROFILE_IDS='',
                   TARGET_IPV4='8.8.4.4', TARGET_FQDN='8.8.4.4',
                   TARGET_INTERFACE='enp1s0', TARGET_SSH_PORT='22',
-                  TARGET_DEVICE_LIMIT='0', TARGET_REALITY_SNI='max.ru',
+                  TARGET_DEVICE_LIMIT='0', TARGET_REALITY_MODE='external', TARGET_REALITY_SNI='max.ru',
                   TARGET_LABEL="Sergey's VPN", ACME_EMAIL='', TARGET_HAPP_PROVIDER_ID='')
     values.update(overrides)
     return values
@@ -52,6 +52,7 @@ class SelectionInputs(unittest.TestCase):
         values.pop('TARGET_EGRESS_MODE')
         values.pop('TARGET_PROFILE_SET')
         values.pop('TARGET_PROFILE_IDS')
+        values.pop('TARGET_REALITY_MODE')
         values.pop('TARGET_HAPP_PROVIDER_ID')
         PREFLIGHT.validate_inputs(values)
         with tempfile.TemporaryDirectory() as directory:
@@ -62,6 +63,8 @@ class SelectionInputs(unittest.TestCase):
             self.assertEqual(shlex.split(stored['TARGET_EGRESS_MODE']), ['both'])
             self.assertEqual(shlex.split(stored['TARGET_PROFILE_SET']), ['basic'])
             self.assertEqual(shlex.split(stored['TARGET_PROFILE_IDS']), [''])
+            self.assertEqual(shlex.split(stored['TARGET_REALITY_MODE']), ['external'])
+            self.assertEqual(shlex.split(stored['TARGET_REALITY_SNI']), ['max.ru'])
             self.assertEqual(shlex.split(stored['TARGET_HAPP_PROVIDER_ID']), [''])
 
     def test_custom_selection_is_persisted_in_catalog_order(self):
@@ -93,6 +96,55 @@ class SelectionInputs(unittest.TestCase):
                         dict(TARGET_TLS_MODE='none'),
                         dict(TARGET_TLS_MODE='none', TARGET_PROFILE_SET='dpi'),
                         dict(TARGET_TLS_MODE='none', TARGET_PROFILE_SET='all')):
+            with self.subTest(changes=changes):
+                values = inputs(**changes)
+                with self.assertRaises(ValueError):
+                    PREFLIGHT.validate_inputs(values)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'target.env'
+                    with self.assertRaises(ValueError):
+                        TARGET.write_target(path, values)
+                    self.assertFalse(path.exists())
+
+    def test_reality_modes_persist_without_computed_target_overrides(self):
+        for mode, address_mode, endpoint, sni in (
+                ('self-steal', 'domain', 'vpn.example.org', 'vpn.example.org'),
+                ('decoy', 'domain', 'vpn.example.org', 'max.ru'),
+                ('decoy', 'ip', '8.8.4.4', 'max.ru'),
+                ('external', 'ip', '8.8.4.4', 'max.ru')):
+            with self.subTest(mode=mode, address=address_mode):
+                values = inputs(TARGET_REALITY_MODE=mode, TARGET_ADDRESS_MODE=address_mode,
+                                TARGET_FQDN=endpoint, TARGET_REALITY_SNI=sni,
+                                TARGET_REALITY_DEST='caller.invalid:1234',
+                                TARGET_REALITY_TARGET_SNI='caller.invalid')
+                PREFLIGHT.validate_inputs(values)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'target.env'
+                    TARGET.write_target(path, values)
+                    stored = dict(line.split('=', 1) for line in path.read_text().splitlines())
+                    self.assertEqual(shlex.split(stored['TARGET_REALITY_MODE']), [mode])
+                    self.assertEqual(shlex.split(stored['TARGET_REALITY_SNI']), [sni])
+                    self.assertNotIn('TARGET_REALITY_DEST', stored)
+                    self.assertNotIn('TARGET_REALITY_TARGET_SNI', stored)
+
+    def test_incompatible_reality_inputs_never_create_target_file(self):
+        for changes in (
+                dict(TARGET_REALITY_MODE='unknown'),
+                dict(TARGET_REALITY_MODE=''),
+                dict(TARGET_REALITY_MODE='self-steal'),
+                dict(TARGET_REALITY_MODE='self-steal', TARGET_ADDRESS_MODE='domain',
+                     TARGET_FQDN='vpn.example.org', TARGET_REALITY_SNI='max.ru'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_REALITY_SNI=''),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_REALITY_SNI='8.8.8.8'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_REALITY_SNI='cloudflare.com'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_TLS_MODE='none'),
+                dict(TARGET_REALITY_MODE='self-steal', TARGET_TLS_MODE='none',
+                     TARGET_ADDRESS_MODE='domain', TARGET_FQDN='vpn.example.org',
+                     TARGET_REALITY_SNI='vpn.example.org'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_FQDN='8.8.8.8'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_ADDRESS_MODE='domain'),
+                dict(TARGET_REALITY_MODE='decoy', TARGET_ADDRESS_MODE='domain',
+                     TARGET_FQDN='bad;domain.example')):
             with self.subTest(changes=changes):
                 values = inputs(**changes)
                 with self.assertRaises(ValueError):

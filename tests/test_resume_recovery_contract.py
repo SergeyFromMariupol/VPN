@@ -128,7 +128,7 @@ esac
         runtime = self.root / "runtime/base"
         runtime.mkdir(parents=True)
         (runtime / "install-certbot.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-        script = ("set -Eeuo pipefail\nTARGET_TLS_MODE=letsencrypt\n"
+        script = ("set -Eeuo pipefail\nTARGET_TLS_MODE=letsencrypt\nTARGET_REALITY_MODE=external\n"
                   f'state="{self.state}"\nruntime="{self.root / "runtime"}"\n'
                   'installer_error_context() { :; }\n'
                   'phase() { printf "%s\\n" "$*" >>"$FIXTURE_ROOT/events"; }\n' +
@@ -136,6 +136,7 @@ esac
         self.assertEqual(self.run_bash(script).returncode, 0)
         events = (self.root / "events").read_text().splitlines()
         self.assertIn("tls bash " + str(runtime / "acme.sh") + " --apply", events)
+        self.assertFalse(any(event.startswith('reality-decoy ') for event in events))
         self.assertIn("cert-reconcile bash " + str(runtime / "install-cert-reconcile.sh") + " --apply", events)
         (self.root / "events").unlink()
         (self.root / "acme-commit").write_text("owned\n")
@@ -145,6 +146,17 @@ esac
         events = (self.root / "events").read_text().splitlines()
         self.assertIn("tls bash " + str(runtime / "acme.sh") + " --verify-committed", events)
         self.assertIn("cert-reconcile bash " + str(runtime / "install-cert-reconcile.sh") + " --check-only", events)
+        for mode in ('self-steal', 'decoy'):
+            with self.subTest(reality_mode=mode):
+                (self.root / 'events').unlink()
+                local_script = script.replace('TARGET_REALITY_MODE=external', 'TARGET_REALITY_MODE=' + mode)
+                accepted = self.run_bash(local_script)
+                self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+                events = (self.root / 'events').read_text().splitlines()
+                self.assertIn('reality-decoy bash ' + str(runtime / 'install-reality-decoy.sh') + ' --apply', events)
+                tls_index = next(index for index, event in enumerate(events) if event.startswith('tls '))
+                site_index = next(index for index, event in enumerate(events) if event.startswith('reality-decoy '))
+                self.assertLess(tls_index, site_index)
 
     def test_portfolio_hook_is_idempotent_and_retries_failed_restart(self):
         spec = importlib.util.spec_from_file_location(

@@ -95,6 +95,25 @@ jobs:
       - name: Validate subscription metadata through Nginx
         timeout-minutes: 2
         run: python3 bundle/tests/test-subscription-proxy.py
+      - name: Verify REALITY decoy with actual pinned Xray and Nginx
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          fixture="$RUNNER_TEMP/reality-decoy-xray"
+          mkdir -m 0700 "$fixture"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --retry 2 --connect-timeout 15 --max-time 300 --header 'Accept: application/octet-stream' \
+            'https://api.github.com/repos/MHSanaei/3x-ui/releases/assets/675882005?download=1' \
+            --output "$fixture/x-ui.tar.gz"
+          printf '%s  %s\n' 0ddfa4702f595442e2962acd81addc768fdacaa4ff2672c971a0463dae744916 \
+            "$fixture/x-ui.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$fixture/x-ui.tar.gz" -C "$fixture" x-ui/bin/xray-linux-amd64
+          binary="$fixture/x-ui/bin/xray-linux-amd64"
+          printf '%s  %s\n' a27e3f95ab6ce270956d0cecd32eda4686a811afc71c64a6a734a3dede14883e \
+            "$binary" | sha256sum --check --strict -
+          chmod 0700 "$binary"
+          VPN_TEST_XRAY_BIN="$binary" python3 bundle/tests/test-reality-decoy.py
       - name: Install and check pinned Certbot with IP support
         run: |
           /usr/bin/python3 -m venv "$RUNNER_TEMP/vpn-certbot"
