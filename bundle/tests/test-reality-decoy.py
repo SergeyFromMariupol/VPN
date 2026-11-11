@@ -83,14 +83,15 @@ def scanner(number, hostname, certificate, expected, path='/', expect_page=True)
             assert stream.version() == 'TLSv1.3'
             stream.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: any.invalid\r\nConnection: close\r\n\r\n').encode('ascii'))
             result = bytearray()
-            while len(result) < 16384:
-                data = stream.recv(4096)
+            while len(result) < 1024 * 1024:
+                data = stream.recv(min(4096, 1024 * 1024 - len(result)))
                 if not data:
                     break
                 result.extend(data)
             if expect_page:
                 assert result.startswith(b'HTTP/1.1 200 ')
-                assert b'This web service is online.' in result
+                _, separator, body = bytes(result).partition(b'\r\n\r\n')
+                assert separator and body == DECOY.BODY.encode('utf-8'), 'Scanner did not receive the bundled default site'
             else:
                 assert result.startswith(b'HTTP/1.1 404 ')
                 assert b'PRIVATE_PHP_SOURCE' not in result

@@ -36,6 +36,8 @@ export TARGET_ADDRESS_MODE=domain TARGET_TLS_MODE=letsencrypt TARGET_REALITY_SNI
 verify_target_certificate() { return 0; }
 ''')
         shutil.copyfile(ROOT / 'bundle/templates/55-vpn-reality-decoy', self.root / 'bundle/templates/55-vpn-reality-decoy')
+        shutil.copyfile(ROOT / 'bundle/templates/reality-decoy-site.html',
+                        self.root / 'bundle/templates/reality-decoy-site.html')
         shutil.copyfile(ROOT / 'bundle/base/reality-decoy.py', self.root / 'bundle/base/production-decoy.py')
         (self.root / 'bundle/base/reality-decoy.py').write_text('''import importlib.util,os,sys
 from pathlib import Path

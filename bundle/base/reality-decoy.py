@@ -18,7 +18,8 @@ import ssl
 import sys
 
 
-BODY = '<!doctype html><html lang="en"><meta charset="utf-8"><title>Welcome</title><h1>Welcome</h1><p>This web service is online.</p></html>\n'
+SITE_TEMPLATE = Path(__file__).resolve().parent.parent / 'templates/reality-decoy-site.html'
+BODY = SITE_TEMPLATE.read_text(encoding='utf-8')
 CONFIG = Path('/etc/nginx/conf.d/vpn-reality-decoy.conf')
 DOCUMENT_ROOT = Path('/var/www/vpn-decoy/public')
 PHP_MARKER = Path('/etc/vpn-reality-decoy/PHP_ENABLED')
@@ -197,7 +198,7 @@ def main() -> None:
     if sys.argv[1:] == ['--nginx']:
         sys.stdout.write(render_active(os.environ))
     elif sys.argv[1:] == ['--default-page']:
-        sys.stdout.write(BODY)
+        sys.stdout.buffer.write(BODY.encode('utf-8'))
     elif sys.argv[1:] == ['--probe-target']:
         probe(os.environ)
         print('REALITY_DECOY_TARGET_OK=1')
