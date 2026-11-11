@@ -30,7 +30,7 @@ def main():
         return
     path, identity, pid, ticks, count, label, term = sys.argv[1:8]
     total = sys.argv[8] if len(sys.argv) == 9 else '12'
-    if not total.isascii() or not total.isdecimal() or not 8 <= int(total) <= 15:
+    if not total.isascii() or not total.isdecimal() or not 8 <= int(total) <= 18:
         return
     total = int(total)
     if not pid.isdecimal() or not ticks.isdecimal() or not (count == '-' or count.isdecimal()):

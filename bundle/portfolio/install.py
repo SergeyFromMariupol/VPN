@@ -25,13 +25,14 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 # The installer invokes this script with Python -I; keep reviewed sibling
 # modules importable without accepting a caller-controlled PYTHONPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan import PORT_BASE, build
 from portfolio_catalog import select_profiles
+from renderer import reality_destination, reality_settings_match
 
 
 ROOT = Path("/etc/germanyvpn-portfolio")
@@ -171,6 +172,10 @@ def target():
     need(result.get("TARGET_IPV4") and result.get("TARGET_FQDN") and
          result.get("TARGET_REALITY_SNI") and result.get("TARGET_LABEL") and
          result.get("TARGET_INTERFACE"), "PORTFOLIO_TARGET_FIELDS")
+    try:
+        reality_destination(result)
+    except ValueError:
+        raise InvariantFailure("PORTFOLIO_REALITY_MODE") from None
     return result
 
 
@@ -489,6 +494,25 @@ def occupied_ports():
     return ports
 
 
+def verify_reality_contract(info, config, links):
+    """Check saved runtime and public SNI independently of their state hashes."""
+    reality_ports = set()
+    for inbound in config['inbounds']:
+        stream = inbound.get('streamSettings', {})
+        if stream.get('security') == 'reality':
+            need(reality_settings_match(stream.get('realitySettings'), info),
+                 'PORTFOLIO_REALITY_TARGET')
+            reality_ports.add(inbound['port'])
+    for link in links:
+        if link['port'] in reality_ports:
+            pairs = parse_qsl(urlsplit(link['uri']).query, keep_blank_values=True,
+                              strict_parsing=True)
+            values = dict(pairs)
+            need(len(values) == len(pairs) and values.get('security') == 'reality' and
+                 values.get('sni') == info['TARGET_REALITY_SNI'],
+                 'PORTFOLIO_REALITY_SHARE_SNI')
+
+
 def verify(info, state, *, allow_pending=False):
     need(state["phase"] == "committed" or allow_pending,
          "PORTFOLIO_NOT_COMMITTED")
@@ -547,6 +571,7 @@ def verify(info, state, *, allow_pending=False):
                  unquote(parsed.fragment) == recipe["name"],
                  "PORTFOLIO_SHARE_URI")
     config = json.loads(private(CONF))
+    verify_reality_contract(info, config, manifest['entries'])
     selected_outbounds = {"DIRECT", "BLOCK"}
     if any(row["egress"] == "warp" for row in expected_rows):
         selected_outbounds.add("WARP_CF")

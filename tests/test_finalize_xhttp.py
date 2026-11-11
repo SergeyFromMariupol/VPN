@@ -71,6 +71,36 @@ class FinalizerTests(unittest.TestCase):
         self.assertEqual(client['streamSettings']['xhttpSettings']['extra'], {'mode': 'stream-one'})
         self.assertNotIn('tlsSettings', client['streamSettings'])
 
+    def test_local_reality_modes_keep_advertised_sni_and_egress(self):
+        before = copy.deepcopy(self.main)
+        for mode, address_mode, address, sni in (
+                ('self-steal', 'domain', 'vpn.example.test', 'vpn.example.test'),
+                ('decoy', 'domain', 'vpn.example.test', 'max.ru'),
+                ('decoy', 'ip', self.target['TARGET_IPV4'], 'max.ru')):
+            target = dict(self.target, TARGET_REALITY_MODE=mode,
+                          TARGET_ADDRESS_MODE=address_mode, TARGET_FQDN=address,
+                          TARGET_REALITY_SNI=sni)
+            with self.subTest(mode=mode, address_mode=address_mode):
+                configs = module.build(self.main, target, 'A' * 43,
+                                       '0123456789abcdef', '/fixture-private-path')
+                for config, role in zip(configs, ('DIRECT', 'WARP_CF')):
+                    reality = config['inbounds'][0]['streamSettings']['realitySettings']
+                    self.assertEqual(reality['target'], '127.0.0.1:9443')
+                    self.assertEqual(reality['serverNames'], [sni])
+                    self.assertEqual(reality['xver'], 0)
+                    self.assertEqual(reality['privateKey'], 'A' * 43)
+                    self.assertEqual(config['routing']['rules'][-2]['outboundTag'], role)
+                    uri = module.uri_for(config, 'B' * 43, 'Test')
+                    self.assertEqual(module.query(uri)[1]['sni'], sni)
+                    self.assertNotIn('127.0.0.1', uri)
+        self.assertEqual(self.main, before)
+
+    def test_legacy_external_destination_remains_independent_of_endpoint(self):
+        config = self.configs()[0]
+        reality = config['inbounds'][0]['streamSettings']['realitySettings']
+        self.assertEqual(reality['target'], 'camouflage.example.test:443')
+        self.assertEqual(reality['serverNames'], ['camouflage.example.test'])
+
     def test_direct_external_link_accepts_only_legacy_or_canonical_fragment(self):
         endpoint = 'vless://fixture-id@vpn.example.test:8443?security=tls&type=xhttp'
         full_name = 'Тест · 🖥️ IP сервера · XHTTP'

@@ -13,6 +13,7 @@ fi
 readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_FQDN="$TARGET_FQDN"
 readonly REALITY_TARGET="$TARGET_REALITY_SNI"
+readonly REALITY_DEST="$TARGET_REALITY_DEST"
 readonly PANEL_PORT='2053'
 readonly SUBSCRIPTION_PORT='2096'
 readonly XHTTP_PORT='8443'
@@ -107,13 +108,19 @@ if [[ $TARGET_ADDRESS_MODE == domain ]]; then
   done
 fi
 
-reality_probe=$(timeout 15 openssl s_client \
-  -connect "$REALITY_TARGET:443" -servername "$REALITY_TARGET" \
-  -alpn h2 -tls1_3 -verify_return_error -verify_hostname "$REALITY_TARGET" \
-  </dev/null 2>&1) || die 'REALITY target TLS preflight failed'
-grep -Fq 'Verification: OK' <<<"$reality_probe" || die 'REALITY target verification failed'
-grep -Fq 'ALPN protocol: h2' <<<"$reality_probe" || die 'REALITY target lacks negotiated H2'
-unset reality_probe
+if [[ $TARGET_REALITY_MODE == external ]]; then
+  reality_probe=$(timeout 15 openssl s_client \
+    -connect "$REALITY_DEST" -servername "$TARGET_REALITY_TARGET_SNI" \
+    -alpn h2 -tls1_3 -verify_return_error -verify_hostname "$TARGET_REALITY_TARGET_SNI" \
+    </dev/null 2>&1) || die 'REALITY target TLS preflight failed'
+  grep -Fq 'Verification: OK' <<<"$reality_probe" || die 'REALITY target verification failed'
+  grep -Fq 'ALPN protocol: h2' <<<"$reality_probe" || die 'REALITY target lacks negotiated H2'
+  unset reality_probe
+else
+  # The decoy checker separately proves the site's own trusted identity and
+  # compatibility with the advertised client SNI (which may be different).
+  bash "$(dirname -- "${BASH_SOURCE[0]}")/../base/install-reality-decoy.sh" --check-only
+fi
 
 inbound_count=$(sqlite3 /etc/x-ui/x-ui.db 'select count(*) from inbounds;')
 [[ "$inbound_count" =~ ^[0-9]+$ ]] || die 'could not inspect inbound count'
@@ -364,14 +371,14 @@ jq -n '
 ' >"$stage/xray-global.json"
 
 jq -n \
-  --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
+  --arg ip "$SERVER_IPV4" --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" --arg dest "$REALITY_DEST" \
   --arg uuid "$VLESS_UUID" --arg sub "$SUBSCRIPTION_ID" \
   --arg private_key "$REALITY_PRIVATE_KEY" --arg public_key "$REALITY_PUBLIC_KEY" \
   --arg short_id "$REALITY_SHORT_ID" '
   {
     enable:false,remark:"VPN VLESS REALITY TCP 443",listen:$ip,port:443,protocol:"vless",expiryTime:0,total:0,
     settings:{clients:[{id:$uuid,email:"germany-reality",flow:"",limitIp:(env.TARGET_DEVICE_LIMIT|tonumber),totalGB:0,expiryTime:0,enable:true,tgId:0,subId:$sub,comment:(env.TARGET_LABEL+(if env.TARGET_EGRESS_MODE=="direct" then " \u00b7 🖥️ IP сервера" else "" end)+" \u00b7 REALITY"),reset:0}],decryption:"none",encryption:"none",fallbacks:[]},
-    streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:($target+":443"),serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
+    streamSettings:{network:"grpc",grpcSettings:{serviceName:"reality-grpc",multiMode:false},security:"reality",realitySettings:{show:false,xver:0,target:$dest,serverNames:[$target],privateKey:$private_key,minClientVer:"26.3.27",maxClientVer:"",maxTimediff:0,shortIds:[$short_id],mldsa65Seed:"",settings:{publicKey:$public_key,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}}},
     sniffing:{enabled:true,destOverride:["http","tls","quic","fakedns"],metadataOnly:false,routeOnly:false,ipsExcluded:[],domainsExcluded:[]},
     shareAddrStrategy:"custom",shareAddr:$fqdn,subSortIndex:1
   }

@@ -42,6 +42,13 @@ class Environment(unittest.TestCase):
                 self.assertIn(path, preflight.RESERVED_PATHS)
         self.assertIn('xhttp-test', preflight.RESERVED_IDENTITIES)
 
+    def test_new_site_menu_and_optional_php_ownership_is_checked_before_packages(self):
+        for path in ('/etc/vpn-reality-decoy', '/var/www/vpn-decoy', '/usr/local/sbin/vpn',
+                     '/var/lib/vpn-decoy', '/etc/php/8.3/fpm', '/run/php/vpn-decoy.sock'):
+            with self.subTest(path=path):
+                self.assertIn(path, preflight.RESERVED_PATHS)
+        self.assertIn('vpnsite', preflight.RESERVED_IDENTITIES)
+
     def test_physical_host_is_inventory_success_but_command_errors_are_not(self):
         for status, output, expected in ((0, 'kvm\n', 'kvm'), (1, 'none\n', 'none')):
             with self.subTest(status=status), patch.object(preflight.subprocess, 'run',

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Reload the own-certificate target, including during the pre-panel bootstrap.
+set -Eeuo pipefail
+umask 077
+[[ $EUID == 0 ]] || exit 1
+bundle=/var/lib/vpn-installer/bundle
+source "$bundle/scripts/target-contract.sh"
+case ${TARGET_REALITY_MODE:-external} in self-steal|decoy) ;; *) exit 0;; esac
+lineage="/etc/letsencrypt/live/${TARGET_CERT_NAME:-$TARGET_FQDN}"
+[[ ${RENEWED_LINEAGE:-$lineage} == "$lineage" ]] || exit 0
+nginx -t >/dev/null
+systemctl reload nginx.service >/dev/null
+python3 -I -B "$bundle/base/reality-decoy.py" --probe-target

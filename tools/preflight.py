@@ -20,7 +20,7 @@ NETWORK = importlib.util.module_from_spec(NETWORK_SPEC)
 sys.modules[NETWORK_SPEC.name] = NETWORK
 NETWORK_SPEC.loader.exec_module(NETWORK)
 
-MANAGED_LOOPBACK_PORTS = frozenset((2053, 11111, 24443, 24444, 62789))
+MANAGED_LOOPBACK_PORTS = frozenset((2053, 9443, 11111, 24443, 24444, 62789))
 SSHD_EXECUTABLE = '/usr/sbin/sshd'
 SYSTEMD_EXECUTABLE = '/usr/lib/systemd/systemd'
 RESERVED_PATHS = (
@@ -51,8 +51,10 @@ RESERVED_PATHS = (
     '/etc/vpn-ip-addresses', '/usr/local/lib/vpn-ip-feed',
     '/etc/systemd/system/vpn-ip-address.service', '/etc/systemd/system/vpn-ip-address.timer',
     '/etc/systemd/system/vpn-ip-feed.service', '/etc/systemd/system/vpn-ip-aliases.service',
+    '/etc/vpn-reality-decoy', '/var/www/vpn-decoy', '/usr/local/sbin/vpn',
+    '/var/lib/vpn-decoy', '/etc/php/8.3/fpm', '/run/php/vpn-decoy.sock',
 )
-RESERVED_IDENTITIES = ('xui', 'xui-secrets', 'xraywarp', 'xhttp-test')
+RESERVED_IDENTITIES = ('xui', 'xui-secrets', 'xraywarp', 'xhttp-test', 'vpnsite')
 
 
 def reserved_path_conflicts(paths=RESERVED_PATHS) -> list[str]:
@@ -163,6 +165,49 @@ def check_reality_target(sni: str) -> None:
         raise ValueError('REALITY target must pass trusted TLS1.3/H2 hostname validation')
 
 
+def validate_reality_selection(env: dict) -> None:
+    """Keep legacy external targets distinct from local sites not created yet."""
+    mode = env.get('TARGET_REALITY_MODE', 'external')
+    if mode not in ('self-steal', 'decoy', 'external'):
+        raise ValueError('Invalid TARGET_REALITY_MODE')
+    validate_reality_sni(env['TARGET_REALITY_SNI'])
+    if mode == 'external':
+        return
+    if env.get('TARGET_TLS_MODE', 'letsencrypt') != 'letsencrypt':
+        raise ValueError('Local REALITY sites require Let\'s Encrypt')
+    address_mode = env.get('TARGET_ADDRESS_MODE', 'domain')
+    if address_mode not in ('ip', 'domain'):
+        raise ValueError('Invalid address mode for the local REALITY site')
+    if mode == 'self-steal' and address_mode != 'domain':
+        raise ValueError('Self-steal requires a domain endpoint')
+    endpoint = env['TARGET_FQDN']
+    if address_mode == 'ip':
+        address = ipaddress.IPv4Address(env['TARGET_IPV4'])
+        if not address.is_global or endpoint != str(address):
+            raise ValueError('Local IP site endpoint must equal the server public IPv4')
+        return
+    if not domain(endpoint):
+        raise ValueError('Invalid TARGET_FQDN for the local REALITY site')
+    try:
+        ipaddress.ip_address(endpoint)
+    except ValueError:
+        pass
+    else:
+        raise ValueError('A domain endpoint must be a DNS hostname, not an IP literal')
+    if mode == 'self-steal' and env['TARGET_REALITY_SNI'] != endpoint:
+        raise ValueError('Self-steal SNI must equal TARGET_FQDN')
+
+
+def check_reality_preflight(env: dict) -> str:
+    """Validate endpoint DNS before ACME; local TLS is checked after site creation."""
+    validate_reality_selection(env)
+    check_endpoint_dns(env)
+    if env.get('TARGET_REALITY_MODE', 'external') == 'external':
+        check_reality_target(env['TARGET_REALITY_SNI'])
+        return 'PASS'
+    return 'PENDING_LOCAL_SITE'
+
+
 def validate_profile_selection(env: dict) -> None:
     egress = env.get('TARGET_EGRESS_MODE', 'both')
     profile_set = env.get('TARGET_PROFILE_SET', 'basic')
@@ -206,12 +251,12 @@ def validate_inputs(env: dict) -> None:
             pass
         else:
             raise ValueError('Use IP mode for an IPv4 endpoint')
-    validate_reality_sni(env['TARGET_REALITY_SNI'])
+    validate_reality_selection(env)
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', env['TARGET_INTERFACE']):
         raise ValueError('Public interface is missing or ambiguous')
     if not re.fullmatch(r'[1-9][0-9]{0,4}', env['TARGET_SSH_PORT']) or not 1 <= int(env['TARGET_SSH_PORT']) <= 65535:
         raise ValueError('Invalid SSH port')
-    if int(env['TARGET_SSH_PORT']) in (80, 443, 2053, 2096, 8443, 8444, 24443, 24444):
+    if int(env['TARGET_SSH_PORT']) in (80, 443, 2053, 2096, 8443, 8444, 9443, 24443, 24444):
         raise ValueError('SSH port conflicts with VPN services')
     if not re.fullmatch(r'0|[1-9][0-9]{0,3}|10000', env['TARGET_DEVICE_LIMIT']):
         raise ValueError('Invalid device limit')
@@ -342,10 +387,9 @@ def main() -> None:
     validate_interface_addresses(addresses, os.environ)
     if run('timedatectl', 'show', '-p', 'NTPSynchronized', '--value') != 'yes':
         raise ValueError('Wait for NTP synchronization before installing')
-    check_endpoint_dns(os.environ)
-    check_reality_target(os.environ['TARGET_REALITY_SNI'])
+    reality_tls = check_reality_preflight(os.environ)
     dns_status = 'NOT_REQUIRED_IP_MODE' if os.environ.get('TARGET_ADDRESS_MODE') == 'ip' else 'PASS'
-    print(f'CLEAN_HOST=PASS DNS={dns_status} REALITY_TARGET_TLS=PASS')
+    print(f'CLEAN_HOST=PASS DNS={dns_status} REALITY_TARGET_TLS={reality_tls}')
     print('VIRTUALIZATION=' + virtualization())
     for args in (('uname', '-a'), ('free', '-m'), ('df', '-h', '/'),
                  ('ip', '-4', 'route'), ('ip', '-4', 'rule'), ('ip', '-6', 'route'),
@@ -365,10 +409,13 @@ if __name__ == '__main__':
         elif sys.argv[1:] == ['--check-reality-sni']:
             check_reality_target(os.environ['TARGET_REALITY_SNI'])
             print('REALITY_TARGET_TLS=PASS')
+        elif sys.argv[1:] == ['--check-reality-selection']:
+            validate_reality_selection(os.environ)
+            print('REALITY_SELECTION=VALID')
         elif not sys.argv[1:]:
             main()
         else:
-            raise ValueError('usage: preflight.py [--inputs-only|--check-reality-sni]')
+            raise ValueError('usage: preflight.py [--inputs-only|--check-reality-sni|--check-reality-selection]')
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as error:
         print(f'PREFLIGHT_FAILED: {error}', file=sys.stderr)
         sys.exit(1)

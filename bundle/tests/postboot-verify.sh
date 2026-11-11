@@ -11,6 +11,7 @@ readonly SERVER_IPV4="$TARGET_IPV4"
 readonly PUBLIC_FQDN="$TARGET_FQDN"
 export PUBLIC_FQDN
 readonly REALITY_TARGET="$TARGET_REALITY_SNI"
+readonly REALITY_DEST="$TARGET_REALITY_DEST"
 readonly PANEL_PORT='2053'
 readonly SUBSCRIPTION_PORT='2096'
 readonly promotion_marker='/etc/germanyvpn-xhttp-test/promotion.json'
@@ -281,7 +282,7 @@ curl --proto '=http' --fail --silent --show-error --max-time 30 \
   --header 'X-Requested-With: XMLHttpRequest' --output "$stage/external-links.json" \
   "$api_url/clients/get/germany-warp-reality"
 
-jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
+jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" --arg dest "$REALITY_DEST" \
   --rawfile public_sub "$stage/public-sub.id" --rawfile direct_sub "$stage/direct-sub.id" \
   --rawfile direct_vless "$stage/direct-vless.uuid" \
   --rawfile direct_hysteria "$stage/direct-hysteria.auth" \
@@ -297,8 +298,9 @@ jq --exit-status --arg fqdn "$PUBLIC_FQDN" --arg target "$REALITY_TARGET" \
   and all(.obj[]; .enable==(if .port==8443 and env.PROMOTED_XHTTP=="1" then false else true end)
     and .shareAddr==$fqdn and (.settings.clients|length)==2)
   and ($rs[0].subSortIndex==1 and $hs[0].subSortIndex==2 and $xs[0].subSortIndex==3)
-  and ($rs[0].streamSettings.realitySettings.target==($target+":443")
-    and $rs[0].streamSettings.realitySettings.serverNames==[$target])
+  and ($rs[0].streamSettings.realitySettings.target==$dest
+    and $rs[0].streamSettings.realitySettings.serverNames==[$target]
+    and ($rs[0].streamSettings.realitySettings.xver // 0)==0)
   and ($rs[0].streamSettings.network=="grpc"
     and $rs[0].streamSettings.grpcSettings.serviceName=="reality-grpc"
     and ([ $rs[0].settings.clients[].flow ]|all(.=="" or .==null)))

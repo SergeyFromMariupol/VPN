@@ -23,6 +23,7 @@ STAGES = {
     'base': 'Подготовка Ubuntu',
     'certbot': 'Подготовка HTTPS',
     'tls': 'Сертификат TLS',
+    'reality-decoy': 'Сайт-заглушка REALITY',
     'direct': 'Прямые профили',
     'panel': 'Панель управления',
     'nginx-restart': 'Настройка Nginx',
@@ -35,6 +36,7 @@ STAGES = {
     'portfolio-runtime': 'Дополнительные протоколы',
     'portfolio-publish': 'Публикация подписки',
     'renewal': 'Проверка продления TLS',
+    'menu': 'Меню управления VPN',
     'verify': 'Итоговая проверка',
 }
 PHASES = tuple(STAGES)[5:]
@@ -65,6 +67,10 @@ def _issue(code, title, cause, solution, resume=False, retry_after_utc=None):
 # Fixed codes name checks whose quiet shell failure would otherwise be ambiguous.
 # Values and command arguments from those checks are deliberately not displayed.
 FIXED = {
+    'REALITY_DECOY': (
+        'Сайт-заглушка REALITY не прошёл проверку.',
+        'Локальный HTTPS-сайт, его сертификат или управляемая конфигурация отличаются от ожидаемых.',
+        'Проверьте адрес подключения, сертификат Let’s Encrypt и журнал этапа reality-decoy. Сохраните снимки; не обходите проверку TLS.'),
     'OS_UNSUPPORTED': (
         'Операционная система не подходит.',
         'Нужна Ubuntu 24.04 LTS с архитектурой amd64.',

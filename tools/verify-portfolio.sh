@@ -5,6 +5,12 @@ umask 077
 [[ $EUID == 0 ]] || exit 1
 readonly bundle=/var/lib/vpn-installer/bundle
 source "$bundle/scripts/target-contract.sh"
+if [[ $TARGET_REALITY_MODE != external ]]; then
+  bash "$bundle/base/install-reality-decoy.sh" --check-only
+fi
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  bash "$bundle/base/install-menu.sh" --check-only
+fi
 [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]] || exit 1
 
 units=(x-ui nginx germanyvpn-xhttp-test.service)

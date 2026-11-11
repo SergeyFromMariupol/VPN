@@ -1,6 +1,7 @@
 """Offline shape checks for every extra portfolio choice."""
 
 import json
+import copy
 import importlib.util
 from pathlib import Path
 import sys
@@ -8,6 +9,7 @@ import types
 import unittest
 from unittest.mock import patch
 import uuid
+from urllib.parse import parse_qs, urlsplit
 
 
 PORTFOLIO = Path(__file__).resolve().parents[1] / "bundle" / "portfolio"
@@ -45,6 +47,62 @@ def profile(entry, common):
 
 
 class PortfolioPlanTest(unittest.TestCase):
+    def test_every_reality_recipe_uses_selected_target_and_public_sni(self):
+        for mode, address_mode, address, sni, destination in (
+                (None, 'domain', TARGET['TARGET_FQDN'], TARGET['TARGET_REALITY_SNI'],
+                 TARGET['TARGET_REALITY_SNI'] + ':443'),
+                ('external', 'domain', TARGET['TARGET_FQDN'], 'max.ru', 'max.ru:443'),
+                ('self-steal', 'domain', TARGET['TARGET_FQDN'], TARGET['TARGET_FQDN'],
+                 '127.0.0.1:9443'),
+                ('decoy', 'domain', TARGET['TARGET_FQDN'], 'max.ru', '127.0.0.1:9443'),
+                ('decoy', 'ip', TARGET['TARGET_IPV4'], 'max.ru', '127.0.0.1:9443')):
+            target = dict(TARGET, TARGET_FQDN=address, TARGET_ADDRESS_MODE=address_mode,
+                          TARGET_REALITY_SNI=sni)
+            if mode:
+                target['TARGET_REALITY_MODE'] = mode
+            rows = select_profiles('all', 'both', 'Test')
+            with self.subTest(mode=mode, address_mode=address_mode):
+                config, manifest, _ = build(target, MAIN, rows, shared, profile)
+                reality = [ib for ib in config['inbounds']
+                           if ib['streamSettings']['security'] == 'reality']
+                self.assertTrue(reality)
+                for inbound in reality:
+                    settings = inbound['streamSettings']['realitySettings']
+                    self.assertEqual(settings['target'], destination)
+                    self.assertEqual(settings['serverNames'], [sni])
+                    self.assertEqual(settings['xver'], 0)
+                    self.assertEqual(settings['privateKey'], 'a' * 43)
+                    links = [row for row in manifest['entries']
+                             if row['port'] == inbound['port']]
+                    self.assertEqual(len(links), 2)
+                    for link in links:
+                        params = parse_qs(urlsplit(link['uri']).query)
+                        self.assertEqual(params['sni'], [sni])
+                        self.assertNotIn('127.0.0.1', link['uri'])
+
+    def test_portfolio_verifier_rejects_reality_runtime_and_uri_drift(self):
+        spec = importlib.util.spec_from_file_location('portfolio_reality_verify',
+                                                       PORTFOLIO / 'install.py')
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {'grp': types.ModuleType('grp'),
+                                      'pwd': types.ModuleType('pwd')}):
+            spec.loader.exec_module(module)
+        info = dict(TARGET, TARGET_REALITY_MODE='decoy', TARGET_REALITY_SNI='max.ru')
+        rows = select_profiles('all', 'both', 'Test')
+        config, manifest, _ = build(info, MAIN, rows, shared, profile)
+        module.verify_reality_contract(info, config, manifest['entries'])
+        reality = next(ib for ib in config['inbounds']
+                       if ib['streamSettings']['security'] == 'reality')
+        reality['streamSettings']['realitySettings']['target'] = 'max.ru:443'
+        with self.assertRaisesRegex(RuntimeError, 'PORTFOLIO_REALITY_TARGET'):
+            module.verify_reality_contract(info, config, manifest['entries'])
+        reality['streamSettings']['realitySettings']['target'] = '127.0.0.1:9443'
+        changed = copy.deepcopy(manifest['entries'])
+        link = next(row for row in changed if row['port'] == reality['port'])
+        link['uri'] = link['uri'].replace('sni=max.ru', 'sni=wrong.example.test')
+        with self.assertRaisesRegex(RuntimeError, 'PORTFOLIO_REALITY_SHARE_SNI'):
+            module.verify_reality_contract(info, config, changed)
+
     def test_all_six_extra_selections(self):
         for profile_set, egress, expected in (
                 ("dpi", "warp", 46), ("dpi", "direct", 46),

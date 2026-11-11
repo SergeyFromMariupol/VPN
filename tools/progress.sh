@@ -8,6 +8,8 @@ _installer_progress_label() {
   case ${1-} in
     base) printf 'Подготовка Ubuntu';; certbot) printf 'Подготовка HTTPS';;
     tls) printf 'Сертификат TLS';; direct) printf 'Прямые профили';;
+    reality-decoy) printf 'Сайт-заглушка REALITY';;
+    menu) printf 'Меню управления VPN';;
     panel) if [[ ${TARGET_TLS_MODE:-letsencrypt} == none ]]; then printf 'HTTP-панель'; else printf 'HTTPS-панель'; fi;;
     nginx-restart) printf 'Настройка Nginx';;
     cert-reconcile) printf 'Обновление сертификатов';; warp) printf 'Cloudflare WARP';;
@@ -44,12 +46,22 @@ _installer_progress_phases() {
   else
     phases=(base certbot tls direct panel nginx-restart cert-reconcile warp dual xhttp)
   fi
+  if [[ ${TARGET_REALITY_MODE:-external} != external ]]; then
+    local -a with_decoy=()
+    local phase_name
+    for phase_name in "${phases[@]}"; do
+      with_decoy+=("$phase_name")
+      if [[ $phase_name == tls ]]; then with_decoy+=(reality-decoy); fi
+    done
+    phases=("${with_decoy[@]}")
+  fi
   if [[ ${TARGET_PROFILE_SET:-basic} != basic || ${TARGET_EGRESS_MODE:-both} != both ]]; then
     phases+=(baseline-verify)
     if installer_has_extra_profiles; then phases+=(portfolio-runtime); fi
     phases+=(portfolio-publish)
   fi
   if [[ ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then phases+=(renewal); fi
+  phases+=(menu)
   phases+=(verify)
   if [[ ${TARGET_ADDRESS_MODE:-domain} == ip && ${TARGET_TLS_MODE:-letsencrypt} == letsencrypt ]]; then
     phases+=(ip-address)

@@ -9,6 +9,7 @@ import base64
 import copy
 import hashlib
 import http.client
+import importlib.util
 import ipaddress
 import json
 import os
@@ -50,6 +51,15 @@ LEGACY_BACKUP_ROOT = Path('/var/backups/krysyuk-standalone')
 USER = 'xhttp-test'
 ENV = {k: v for k, v in os.environ.items() if k.lower() not in
        ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')}
+
+# Explicit reviewed sibling loading also supports isolated (-I) execution and
+# the offline tests, which import this operator by its absolute file path.
+_reality_spec = importlib.util.spec_from_file_location(
+    'vpn_reality_contract', Path(__file__).with_name('reality_contract.py'))
+_reality_contract = importlib.util.module_from_spec(_reality_spec)
+_reality_spec.loader.exec_module(_reality_contract)
+reality_destination = _reality_contract.reality_destination
+reality_settings_match = _reality_contract.reality_settings_match
 
 
 def need(ok, code):
@@ -355,7 +365,7 @@ def build(main, target, private_key, sid, path):
               'sockopt': {'tcpMaxSeg': 1200},
               'xhttpSettings': {'host': host, 'path': path, 'mode': 'auto'},
               'realitySettings': {'show': False, 'xver': 0,
-                                  'target': target['TARGET_REALITY_SNI'] + ':443',
+                                  'target': reality_destination(target),
                                   'serverNames': [target['TARGET_REALITY_SNI']],
                                   'privateKey': private_key, 'shortIds': [sid],
                                   'minClientVer': '26.3.27'}}
@@ -854,8 +864,7 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
     r = reality_stream['realitySettings']
     need(reality_stream['network'] == 'grpc' and
          reality_stream['grpcSettings']['serviceName'] == 'reality-grpc' and
-         r.get('target', r.get('dest')) == target['TARGET_REALITY_SNI'] + ':443' and
-         r['serverNames'] == [target['TARGET_REALITY_SNI']] and r['minClientVer'] == '26.3.27' and
+         reality_settings_match(r, target) and r['minClientVer'] == '26.3.27' and
          r['shortIds'] == [secret['REALITY_SHORT_ID']], 'MAIN_REALITY_CONTRACT')
     need(public_key({'inbounds': [reality[0]]}) == secret['REALITY_PUBLIC_KEY'], 'MAIN_REALITY_PUBLIC_KEY')
     need(sha(XRAY.read_bytes()) == XRAY_SHA, 'XRAY_PIN')
@@ -878,8 +887,7 @@ def verify(target, secret, do_payload=True, expected=None, allow_pending=False):
              and len(config['inbounds']) == 1 and len(config['inbounds'][0]['settings']['clients']) == 1,
              'SINGLETON_XHTTP_SHAPE')
         need(stream['xhttpSettings']['host'] == host
-             and stream['realitySettings']['target'] == target['TARGET_REALITY_SNI'] + ':443'
-             and stream['realitySettings']['serverNames'] == [target['TARGET_REALITY_SNI']]
+             and reality_settings_match(stream['realitySettings'], target)
              and stream['realitySettings']['minClientVer'] == '26.3.27'
              and config['inbounds'][0]['listen'] == target['TARGET_IPV4']
              and config['inbounds'][0]['port'] == port, 'XHTTP_TARGET')

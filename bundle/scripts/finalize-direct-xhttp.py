@@ -119,7 +119,7 @@ def build_direct(main, target, private_key, sid, path):
         'xhttpSettings': {'host': host, 'path': path, 'mode': 'auto'},
         'realitySettings': {
             'show': False, 'xver': 0,
-            'target': target['TARGET_REALITY_SNI'] + ':443',
+            'target': x.reality_destination(target),
             'serverNames': [target['TARGET_REALITY_SNI']],
             'privateKey': private_key, 'shortIds': [sid],
             'minClientVer': '26.3.27',
@@ -265,8 +265,7 @@ def verify(target, secret, selected=False, allow_pending=False, expected=None):
                ib.get('streamSettings', {}).get('security') == 'reality']
     x.need(len(reality) == 1 and reality[0]['streamSettings']['network'] == 'grpc' and
            reality[0]['streamSettings']['grpcSettings']['serviceName'] == 'reality-grpc' and
-           reality[0]['streamSettings']['realitySettings']['serverNames'] ==
-           [target['TARGET_REALITY_SNI']] and
+           x.reality_settings_match(reality[0]['streamSettings']['realitySettings'], target) and
            reality[0]['streamSettings']['realitySettings']['shortIds'] ==
            [secret['REALITY_SHORT_ID']], 'MAIN_REALITY')
     x.need(x.public_key({'inbounds': reality}) == secret['REALITY_PUBLIC_KEY'],
@@ -284,8 +283,8 @@ def verify(target, secret, selected=False, allow_pending=False, expected=None):
            config['inbounds'][0]['streamSettings']['sockopt'] == {'tcpMaxSeg': 1200} and
            config['inbounds'][0]['streamSettings']['xhttpSettings']['mode'] == 'auto' and
            config['inbounds'][0]['streamSettings']['xhttpSettings']['host'] == x.endpoint(target) and
-           config['inbounds'][0]['streamSettings']['realitySettings']['serverNames'] ==
-           [target['TARGET_REALITY_SNI']], 'DIRECT_XHTTP_CONFIG')
+           x.reality_settings_match(config['inbounds'][0]['streamSettings']['realitySettings'], target),
+           'DIRECT_XHTTP_CONFIG')
     x.need(config['routing']['rules'][-2:] == [
         {'type': 'field', 'inboundTag': ['XHTTP_DIRECT'], 'network': 'tcp,udp',
          'outboundTag': 'DIRECT'},

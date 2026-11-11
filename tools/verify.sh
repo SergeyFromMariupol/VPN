@@ -8,6 +8,12 @@ verify_fail() {
 [[ $EUID == 0 ]] || exit 1
 readonly bundle='/var/lib/vpn-installer/bundle'
 source "$bundle/scripts/target-contract.sh"
+if [[ $TARGET_REALITY_MODE != external ]]; then
+  bash "$bundle/base/install-reality-decoy.sh" --check-only
+fi
+if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
+  bash "$bundle/base/install-menu.sh" --check-only
+fi
 bash "$bundle/tests/verify-happ-routing.sh"
 if [[ $TARGET_ADDRESS_MODE == ip && -f /var/lib/vpn-installer/ip-address.done ]]; then
   python3 -E -s -B /opt/vpn-installer/bundle/base/ip_reconcile.py --check
