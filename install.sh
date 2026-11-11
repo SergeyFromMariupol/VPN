@@ -7,13 +7,13 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.5.0'
-readonly source_ref='36a28aaa34f5f16adde9a58fc87108bec3318bac'
+readonly release='v1.5.1'
+readonly source_ref='b4dddbbd2a2e45912a672b96ca29644df53e456d'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
 mode=${1:-install}
-case "$mode" in install|--resume|--show-access|--verify|--diagnose|--help) ;; *)
+case "$mode" in install|--resume|--show-access|--verify|--diagnose|--update|--recover-update|--help) ;; *)
   printf '%s\n' 'Неизвестный параметр запуска.' '' 'Справка — скопируйте и выполните команду целиком:' '' \
     'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --help' >&2
   exit 2;;
@@ -33,6 +33,10 @@ if [[ $mode == --help ]]; then
     'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh)' '' \
     'Продолжить прерванную установку:' '' \
     'bash /opt/vpn-installer/install.sh --resume' '' \
+    'Обновить меню и скрипты установленного VPN без переустановки:' '' \
+    'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --update' '' \
+    'Восстановить прерванное обновление скриптов:' '' \
+    'bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --recover-update' '' \
     'Показать данные панели и ссылку подписки:' '' \
     'bash /opt/vpn-installer/install.sh --show-access' '' \
     'Проверить установленный VPN:' '' \
@@ -270,6 +274,39 @@ installer_error_code=SOURCE_INTEGRITY
 (cd -- "$source_dir"; sha256sum --check --strict SHA256SUMS >"$task_stage/source-check.log" 2>&1)
 installer_error_reporter="$source_dir/tools/errors.py"
 installer_error_code=''
+if [[ $mode == --update || $mode == --recover-update ]]; then
+  [[ -f $source_dir/tools/update.sh && ! -L $source_dir/tools/update.sh ]] ||
+    die 'В этой версии отсутствует проверенное обновление установленного VPN'
+  if [[ $source_dir == "$task_stage/source" ]]; then
+    # Only our freshly extracted private download is normalized. GitHub archives
+    # may retain group-write bits; installed or user-supplied trees are not edited.
+    [[ -d $source_dir && ! -L $source_dir &&
+       $(stat -c '%u:%g:%a' "$task_stage") == 0:0:700 ]] || die 'Небезопасный каталог обновления'
+    chown -hR root:root "$source_dir"
+    find "$source_dir" -type d -exec chmod go-w {} +
+    find "$source_dir" -type f -exec chmod go-w {} +
+    chmod 0700 "$source_dir"
+  fi
+  # The updater takes its own lock and validates the current installation again.
+  # Keep this shell for its /run cleanup trap, releasing only its installer lock.
+  installer_resume_hint_shown=1
+  flock -u 9
+  exec 9>&-
+  update_status=0
+  if [[ $mode == --recover-update ]]; then
+    bash "$source_dir/tools/update.sh" --recover || update_status=$?
+  else
+    bash "$source_dir/tools/update.sh" --apply "$source_dir" || update_status=$?
+  fi
+  if ((update_status == 0)); then
+    if [[ $mode == --recover-update ]]; then
+      installer_success 'Восстановление обновления завершено.'
+    else
+      installer_success 'Скрипты VPN обновлены. Откройте меню командой vpn.'
+    fi
+  fi
+  exit "$update_status"
+fi
 source "$source_dir/tools/bootstrap.sh"
 source "$source_dir/tools/progress.sh"
 installer_progress_init "$task_stage" "$source_dir/tools/progress.py" || :

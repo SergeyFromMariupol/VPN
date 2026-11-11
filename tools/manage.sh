@@ -11,6 +11,7 @@ readonly state=/var/lib/vpn-installer
 readonly runtime="$state/bundle"
 readonly installer_lock=/run/vpn-installer.lock
 readonly website=/var/www/vpn-decoy/public
+readonly update_recovery_command='bash <(curl -fsSL https://raw.githubusercontent.com/SergeyFromMariupol/VPN/main/install.sh) --recover-update'
 
 fail() { printf 'ОШИБКА: %s\n' "$*" >&2; return 1; }
 help_menu() {
@@ -19,13 +20,14 @@ help_menu() {
     'vpn verify  — проверить VPN' \
     'vpn access  — показать данные панели и ссылку подписки' \
     'vpn sni     — сменить режим REALITY и SNI' \
-    'vpn recover — восстановить незавершённую смену SNI' \
+    'vpn name    — сменить имя профилей' \
+    'vpn recover — восстановить незавершённое изменение' \
     'vpn site    — файлы сайта и восстановление начальной страницы' \
     'vpn php     — установить и включить PHP для сайта'
 }
 case ${1:-menu} in
   help|--help|-h) help_menu; exit 0;;
-  menu|status|verify|access|sni|site|php|recover) (($# <= 1)) || { help_menu >&2; exit 2; };;
+  menu|status|verify|access|sni|site|php|recover|name) (($# <= 1)) || { help_menu >&2; exit 2; };;
   *) help_menu >&2; exit 2;;
 esac
 [[ $EUID == 0 ]] || { fail 'Запустите меню от root: sudo vpn'; exit 1; }
@@ -62,8 +64,8 @@ manage_read() {
 show_status() {
   guard_action || return 1
   pending_notice
-  printf 'Адрес VPN: %s\nРежим REALITY: %s\nКлиентский SNI: %s\n' \
-    "$TARGET_FQDN" "$TARGET_REALITY_MODE" "$TARGET_REALITY_SNI"
+  printf 'Имя профилей: %s\nАдрес VPN: %s\nРежим REALITY: %s\nКлиентский SNI: %s\n' \
+    "$TARGET_LABEL" "$TARGET_FQDN" "$TARGET_REALITY_MODE" "$TARGET_REALITY_SNI"
   local unit status
   for unit in x-ui nginx; do
     status=$(systemctl is-active "$unit.service" 2>/dev/null) || :
@@ -72,23 +74,55 @@ show_status() {
 }
 
 pending_notice() {
+  if [[ -e $state/update.pending || -L $state/update.pending ]]; then
+    printf 'Есть незавершённое обновление. Выполните команду целиком:\n\n%s\n\n' "$update_recovery_command"
+  fi
   if [[ -e $state/reality-management.pending || -L $state/reality-management.pending ]]; then
     printf '%s\n' 'Есть незавершённая смена SNI: vpn recover'
   fi
+  if [[ -e $state/profile-name-management.pending || -L $state/profile-name-management.pending ]]; then
+    printf '%s\n' 'Есть незавершённая смена имени профилей: vpn recover'
+  fi
 }
 
-recover_sni() {
-  guard_action || return 1
-  if [[ ! -e $state/reality-management.pending && ! -L $state/reality-management.pending ]]; then
-    printf '%s\n' 'Незавершённой смены SNI нет.'
-    return 0
+guard_update_pending() {
+  if [[ -e $state/update.pending || -L $state/update.pending ]]; then
+    printf 'ОШИБКА: сначала восстановите незавершённое обновление. Выполните команду целиком:\n\n%s\n\n' "$update_recovery_command" >&2
+    return 1
   fi
-  python3 -I -B "$runtime/scripts/manage-reality.py" --recover
+}
+
+guard_pending_changes() {
+  guard_update_pending || return 1
+  [[ ! -e $state/reality-management.pending && ! -L $state/reality-management.pending &&
+     ! -e $state/profile-name-management.pending && ! -L $state/profile-name-management.pending ]] || {
+    fail 'Сначала восстановите незавершённое изменение: vpn recover'; return 1;
+  }
+}
+
+recover_changes() {
+  local reality_pending=0 name_pending=0
+  guard_update_pending || return 1
+  guard_action || return 1
+  if [[ -e $state/reality-management.pending || -L $state/reality-management.pending ]]; then reality_pending=1; fi
+  if [[ -e $state/profile-name-management.pending || -L $state/profile-name-management.pending ]]; then name_pending=1; fi
+  if ((reality_pending && name_pending)); then
+    fail 'Обнаружены две незавершённые операции. Перед восстановлением требуется ручная проверка закрытых снимков.'
+    return 1
+  elif ((reality_pending)); then
+    python3 -I -B "$runtime/scripts/manage-reality.py" --recover
+  elif ((name_pending)); then
+    python3 -I -B "$runtime/scripts/manage-profile-name.py" --recover
+  else
+    printf '%s\n' 'Незавершённых изменений нет.'
+  fi
 }
 
 change_sni() {
   local mode_choice mode sni='' payload
+  guard_update_pending || return 1
   guard_action || return 1
+  guard_pending_changes || return 1
   printf '\nТекущий режим: %s; клиентский SNI: %s\n' "$TARGET_REALITY_MODE" "$TARGET_REALITY_SNI"
   printf '%s\n' \
     '1. Собственный сайт · self-steal' \
@@ -121,20 +155,50 @@ change_sni() {
   fi
   payload=$(printf '%s\n%s\n' "$mode" "$sni" | python3 -I -B -c \
     'import json,sys; mode=sys.stdin.readline().rstrip("\n"); sni=sys.stdin.readline().rstrip("\n"); print(json.dumps({"mode":mode,"sni":sni}))') || return 1
+  guard_pending_changes || return 1
   printf '%s\n' "$payload" | python3 -I -B "$runtime/scripts/manage-reality.py" --check-only || return 1
+  guard_pending_changes || return 1
   printf '%s\n' "$payload" | python3 -I -B "$runtime/scripts/manage-reality.py" --apply || return 1
   printf '%s\n' 'Режим REALITY обновлён. Обновите подписку в VPN-приложении.'
 }
 
+change_name() {
+  local new_label payload check_status
+  guard_update_pending || return 1
+  guard_action || return 1
+  guard_pending_changes || return 1
+  printf '\nТекущее имя профилей: %s\n' "$TARGET_LABEL"
+  printf '%s\n' 'При применении X-UI ненадолго перезапустится; VPN-клиент может переподключиться.'
+  while true; do
+    manage_read new_label 'Новое имя профилей (пусто — отмена): ' || return 1
+    [[ -n $new_label ]] || return 0
+    guard_pending_changes || return 1
+    payload=$(printf '%s' "$new_label" | python3 -I -B -c \
+      'import json,sys; print(json.dumps({"label":sys.stdin.read()}))') || return 1
+    if printf '%s\n' "$payload" | python3 -I -B "$runtime/scripts/manage-profile-name.py" --check-only; then
+      break
+    else
+      check_status=$?
+    fi
+    guard_pending_changes || return 1
+    # Only invalid input can be corrected by entering another name. Network,
+    # integrity and baseline failures leave the operation without another prompt.
+    ((check_status == 2)) || return "$check_status"
+    printf '%s\n' 'Проверьте сообщение выше. Введите другое имя или оставьте поле пустым для отмены.' >&2
+  done
+  guard_pending_changes || return 1
+  printf '%s\n' "$payload" | python3 -I -B "$runtime/scripts/manage-profile-name.py" --apply || return 1
+  printf '%s\n' 'Имя профилей обновлено. Обновите подписку в VPN-приложении.'
+}
+
 backend_action() (
+  guard_update_pending || return 1
   guard_action || return 1
   # Retain this descriptor in the parent shell while the backend runs. Check
   # pending recovery only AFTER taking the same lock used by SNI changes.
   exec 8>>"$installer_lock"
   flock -n 8 || { fail 'Сейчас выполняется установка или изменение VPN. Дождитесь завершения.'; return 1; }
-  [[ ! -e $state/reality-management.pending && ! -L $state/reality-management.pending ]] || {
-    fail 'Сначала восстановите незавершённую смену SNI: vpn recover'; return 1;
-  }
+  guard_pending_changes || return 1
   # Another completed SNI change may have happened between the initial guard
   # and lock acquisition. Use the target that is current under this lock.
   GERMANYVPN_TARGET_CONTRACT_LOADED=0
@@ -152,6 +216,7 @@ enable_php() {
 
 manage_site() {
   local site_choice
+  guard_update_pending || return 1
   guard_action || return 1
   printf '\nКаталог сайта: %s\n' "$website"
   printf '%s\n' \
@@ -178,12 +243,13 @@ manage_site() {
 run_action() {
   case $1 in
     status) show_status;;
-    verify) guard_action && bash "$destination/install.sh" --verify;;
-    access) guard_action && bash "$destination/install.sh" --show-access;;
+    verify) guard_update_pending && guard_action && bash "$destination/install.sh" --verify;;
+    access) guard_action && { pending_notice; bash "$destination/install.sh" --show-access; };;
     sni) change_sni;;
+    name) change_name;;
     site) manage_site;;
     php) enable_php;;
-    recover) recover_sni;;
+    recover) recover_changes;;
   esac
 }
 
@@ -195,7 +261,7 @@ while true; do
     '1. Состояние' '2. Проверить VPN' \
     '3. Показать данные панели и подписки' '4. Сменить REALITY/SNI' \
     '5. Сайт: файлы и начальная страница' '6. Установить и включить PHP' \
-    '7. Восстановить незавершённую смену SNI' '0. Выход'
+    '7. Восстановить незавершённое изменение' '8. Сменить имя профилей' '0. Выход'
   menu_choice=''
   manage_read menu_choice 'Выберите действие: ' || exit 0
   case $menu_choice in
@@ -207,6 +273,7 @@ while true; do
     5) run_action site || :;;
     6) run_action php || :;;
     7) run_action recover || :;;
-    *) printf 'Выберите действие от 0 до 7.\n' >&2;;
+    8) run_action name || :;;
+    *) printf 'Выберите действие от 0 до 8.\n' >&2;;
   esac
 done

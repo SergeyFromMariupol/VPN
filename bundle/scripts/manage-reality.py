@@ -49,6 +49,8 @@ SOURCE = Path('/opt/vpn-installer')
 BUNDLE = Path('/var/lib/vpn-installer/bundle')
 BACKUPS = Path('/var/backups/vpn-reality-management')
 PENDING = Path('/var/lib/vpn-installer/reality-management.pending')
+OTHER_PENDING = (Path('/var/lib/vpn-installer/profile-name-management.pending'),
+                 Path('/var/lib/vpn-installer/update.pending'))
 DECOY_PATHS = tuple(map(Path, (
     '/etc/nginx/conf.d/vpn-reality-decoy.conf',
     '/etc/letsencrypt/renewal-hooks/deploy/55-vpn-reality-decoy',
@@ -776,6 +778,8 @@ def main(argv=None):
         need(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600 and
              info.st_nlink == 1, 'LOCK_OWNERSHIP')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        need(not any(path.exists() or path.is_symlink() for path in OTHER_PENDING),
+             'OTHER_OPERATION_PENDING')
         if args.recover:
             recover()
             return
