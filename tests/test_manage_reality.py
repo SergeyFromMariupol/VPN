@@ -110,6 +110,53 @@ class ManagementPlanTests(unittest.TestCase):
             self.assertEqual(journal.record['status'], 'rolled_back')
             self.assertEqual(journal.record['phase'], 'ROLLBACK_COMPLETE')
 
+    def test_unwritable_rollback_journal_still_restores_and_keeps_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / 'pending'
+            pending.write_bytes(b'private snapshot reference')
+            edits = [['hosts', 1, 'sni', 'max.ru', 'own.example.test']]
+            journal = MODULE.Journal(Path(directory), {'files': [], 'units': ['fixture.service'],
+                'database': edits, 'database_applied': True, 'before_target': TARGET,
+                'before_feed': [URI], 'paused_timers': ['fixture.timer'], 'runtime_touched': True})
+            journal.save = Mock(side_effect=OSError(28, 'private disk-full detail'))
+            journal.rollback = Mock()
+            with patch.object(MODULE, 'stop') as stop, patch.object(MODULE, 'start') as start, \
+                 patch.object(MODULE, 'database') as database, \
+                 patch.object(MODULE, 'command', return_value=b''), \
+                 patch.object(MODULE, 'PENDING', pending), \
+                 patch.object(MODULE.x, 'native', return_value=[URI]) as native:
+                with self.assertRaisesRegex(RuntimeError, '^MANAGE_REALITY_ROLLBACK_METADATA_PENDING$'):
+                    MODULE.rollback(journal, {})
+            stop.assert_called_once_with(['fixture.service'])
+            database.assert_called_once_with(edits, restore=True)
+            journal.rollback.assert_called_once()
+            self.assertEqual(start.call_args_list[0].args[0], ['fixture.service'])
+            self.assertEqual(start.call_args_list[1].args[0], ['fixture.timer'])
+            native.assert_called_once()
+            self.assertTrue(pending.exists())
+
+    def test_transient_rollback_phase_write_failure_does_not_prevent_durable_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / 'pending'
+            pending.write_bytes(b'private snapshot reference')
+            journal = MODULE.Journal(Path(directory), {'files': [], 'units': ['fixture.service'],
+                'database_applied': False, 'before_target': TARGET, 'before_feed': [URI],
+                'paused_timers': [], 'runtime_touched': True})
+            calls = []
+            def save():
+                calls.append(journal.record['phase'])
+                if len(calls) == 1:
+                    raise OSError(28, 'private disk-full detail')
+            journal.save = Mock(side_effect=save)
+            with patch.object(MODULE, 'stop'), patch.object(MODULE, 'start'), \
+                 patch.object(MODULE, 'command', return_value=b''), \
+                 patch.object(MODULE, 'PENDING', pending), \
+                 patch.object(MODULE.x, 'native', return_value=[URI]):
+                MODULE.rollback(journal, {})
+            self.assertEqual(calls[-1], 'ROLLBACK_COMPLETE')
+            self.assertEqual(journal.record['status'], 'rolled_back')
+            self.assertFalse(pending.exists())
+
     def test_request_modes_are_explicit_and_self_steal_uses_own_domain(self):
         own = MODULE.request_target(TARGET, {'mode': 'self-steal'})
         self.assertEqual(own['TARGET_REALITY_SNI'], TARGET['TARGET_FQDN'])

@@ -85,10 +85,26 @@ case $1 in --reset-page|--enable-php) ;; *) exit 93;; esac
 printf 'BACKEND:%s\\n' "$1" >>"$FIXTURE_EVENTS"
 ''')
 write(binary / 'systemctl', shell + 'printf "SERVICE:%s\\n" "$*" >>"$FIXTURE_EVENTS"\nprintf "active\\n"\n', 0o700)
+if settings.get('pending_during_lock'):
+    write(binary / 'flock', '#!/usr/bin/python3\n'+r'''
+import os, pathlib, subprocess, sys
+a=sys.argv[1:]
+fds=(8,) if a==['-n','8'] else ()
+result=subprocess.run([os.environ['FIXTURE_REAL_FLOCK'],*a],pass_fds=fds)
+if result.returncode==0 and a==['-n','8']:
+    # The parent shell owns the same descriptor. Verify that recovery becomes
+    # pending while that lock is actually held, not in an unlocked precheck.
+    check=subprocess.run([os.environ['FIXTURE_REAL_FLOCK'],'-n',os.environ['FIXTURE_LOCK'],'true'])
+    if check.returncode==0:sys.exit(96)
+    pathlib.Path(os.environ['FIXTURE_PENDING']).write_text('new pending recovery')
+sys.exit(result.returncode)
+''',0o700)
 manifest(source, 'SHA256SUMS')
 manifest(runtime, 'SOURCE_SHA256SUMS')
 environment = dict(os.environ, PATH=str(binary)+':/usr/sbin:/usr/bin:/sbin:/bin',
-                   FIXTURE_EVENTS=str(events), FIXTURE_LOCK=str(lock))
+                   FIXTURE_EVENTS=str(events), FIXTURE_LOCK=str(lock),
+                   FIXTURE_REAL_FLOCK=shutil.which('flock'),
+                   FIXTURE_PENDING=str(state / 'reality-management.pending'))
 if settings.get('pending'):
     write(state / 'reality-management.pending', 'private snapshot fixture')
 if settings.get('tamper'):
@@ -208,6 +224,22 @@ class ManageMenu(unittest.TestCase):
         inactive = self.fixture(arguments=['php'], mode='external')
         self.assertNotEqual(inactive['exit'], 0)
         self.assertEqual(inactive['events'], [])
+
+    def test_pending_sni_recovery_blocks_php_and_site_reset_without_mutating_backend(self):
+        for arguments, answer in ((['site'], '1\n'), (['php'], '')):
+            with self.subTest(action=arguments):
+                result = self.fixture(arguments=arguments, input=answer, pending=True)
+                self.assertNotEqual(result['exit'], 0, result['output'])
+                self.assertIn('vpn recover', result['output'])
+                self.assertEqual(result['events'], [])
+
+    def test_pending_created_during_lock_acquisition_is_checked_before_backend_action(self):
+        for arguments, answer in ((['site'], '1\n'), (['php'], '')):
+            with self.subTest(action=arguments):
+                result = self.fixture(arguments=arguments, input=answer, pending_during_lock=True)
+                self.assertNotEqual(result['exit'], 0, result['output'])
+                self.assertIn('vpn recover', result['output'])
+                self.assertEqual(result['events'], [])
 
     def test_tampered_files_unsafe_permissions_and_busy_installer_block_actions(self):
         for settings in ({'tamper':'source'},{'tamper':'runtime'}, {'writable':True}, {'busy':True}):

@@ -474,9 +474,15 @@ def wait_published(target, secret, expected, *, deadline_seconds=30):
         time.sleep(min(.2, max(0, deadline - time.monotonic())))
 
 
-def phase(journal, value):
+def phase(journal, value, *, best_effort=False):
     journal.record['phase'] = value
-    journal.save()
+    try:
+        journal.save()
+        return True
+    except OSError:
+        if best_effort:
+            return False
+        raise
 
 
 def safe_failure(error):
@@ -580,15 +586,15 @@ def rollback(journal, secret, initial=None):
     need(not record.get('backend_unverified', False), 'BACKEND_RECOVERY_REQUIRED')
     units = record['units']
     touched = record.get('runtime_touched', True)
-    phase(journal, 'ROLLBACK_STOP_DATA')
+    phase(journal, 'ROLLBACK_STOP_DATA', best_effort=True)
     if touched:
         stop(units)
     if record['database_applied']:
-        phase(journal, 'ROLLBACK_DATABASE')
+        phase(journal, 'ROLLBACK_DATABASE', best_effort=True)
         database(record['database'], restore=True)
-    phase(journal, 'ROLLBACK_FILES')
+    phase(journal, 'ROLLBACK_FILES', best_effort=True)
     journal.rollback()
-    phase(journal, 'ROLLBACK_BACKEND_DIRS')
+    phase(journal, 'ROLLBACK_BACKEND_DIRS', best_effort=True)
     for raw, identity in reversed(record.get('backend_created_dirs', [])):
         path = Path(raw)
         if path.exists() or path.is_symlink():
@@ -598,18 +604,20 @@ def rollback(journal, secret, initial=None):
             # Retain the entire new website, including any files added during
             # the failed operation, in the private snapshot. Never recurse-delete.
             path.rename(destination)
-    phase(journal, 'ROLLBACK_NGINX')
+    phase(journal, 'ROLLBACK_NGINX', best_effort=True)
     command(['nginx', '-t'])
     command(['systemctl', 'reload', 'nginx.service'])
     if touched:
-        phase(journal, 'ROLLBACK_START_DATA')
+        phase(journal, 'ROLLBACK_START_DATA', best_effort=True)
         start(units)
     start(record.get('paused_timers', []))
     initial = initial if initial is not None else record['before_feed']
-    phase(journal, 'ROLLBACK_PUBLIC_FEED')
+    phase(journal, 'ROLLBACK_PUBLIC_FEED', best_effort=True)
     wait_published(record['before_target'], secret, initial)
     record['status'] = 'rolled_back'
-    phase(journal, 'ROLLBACK_COMPLETE')
+    # Restoration and live verification must still run with a full/unwritable
+    # journal filesystem. Keep PENDING until the final recovery record is durable.
+    need(phase(journal, 'ROLLBACK_COMPLETE', best_effort=True), 'ROLLBACK_METADATA_PENDING')
     PENDING.unlink(missing_ok=True)
 
 

@@ -126,13 +126,24 @@ change_sni() {
   printf '%s\n' 'Режим REALITY обновлён. Обновите подписку в VPN-приложении.'
 }
 
-backend_action() {
+backend_action() (
   guard_action || return 1
+  # Retain this descriptor in the parent shell while the backend runs. Check
+  # pending recovery only AFTER taking the same lock used by SNI changes.
+  exec 8>>"$installer_lock"
+  flock -n 8 || { fail 'Сейчас выполняется установка или изменение VPN. Дождитесь завершения.'; return 1; }
+  [[ ! -e $state/reality-management.pending && ! -L $state/reality-management.pending ]] || {
+    fail 'Сначала восстановите незавершённую смену SNI: vpn recover'; return 1;
+  }
+  # Another completed SNI change may have happened between the initial guard
+  # and lock acquisition. Use the target that is current under this lock.
+  GERMANYVPN_TARGET_CONTRACT_LOADED=0
+  source "$runtime/scripts/target-contract.sh"
   [[ $TARGET_REALITY_MODE != external ]] || {
     fail 'Сначала включите собственный сайт в разделе смены REALITY/SNI.'; return 1;
   }
-  flock -n "$installer_lock" bash "$runtime/base/install-reality-decoy.sh" "$1"
-}
+  bash "$runtime/base/install-reality-decoy.sh" "$1"
+)
 
 enable_php() {
   printf '%s\n' 'Установка PHP-FPM и включение PHP для собственного сайта…'
