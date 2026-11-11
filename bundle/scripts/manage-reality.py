@@ -11,6 +11,7 @@ import base64
 from contextlib import closing
 import copy
 import importlib.util
+import http.client
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import re
 import shlex
 import signal
 import sqlite3
+import ssl
 import stat
 import subprocess
 import sys
@@ -448,6 +450,66 @@ def verify_runtime(expected):
     need(False, 'LIVE_RUNTIME_READBACK')
 
 
+def wait_published(target, secret, expected, *, deadline_seconds=30):
+    """Wait for the actual HTTPS subscription after Type=simple service start.
+
+    A matching prewritten Xray JSON cannot prove X-UI's HTTP backend is ready.
+    Never retry wrong certificates, malformed feeds or a served identity drift.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while True:
+        try:
+            remaining = max(.1, deadline - time.monotonic())
+            feeds = x.native(target, secret, expected_count=len(expected), timeout=min(3, remaining))
+            need(uri_hashes(feeds) == uri_hashes(expected), 'PUBLIC_FEED_READBACK')
+            return feeds
+        except ssl.SSLError:
+            raise
+        except x.SubscriptionHTTPError as error:
+            if error.status not in (502, 503, 504):
+                raise
+        except (OSError, http.client.RemoteDisconnected):
+            pass
+        need(time.monotonic() < deadline, 'PUBLIC_FEED_TIMEOUT')
+        time.sleep(min(.2, max(0, deadline - time.monotonic())))
+
+
+def phase(journal, value):
+    journal.record['phase'] = value
+    journal.save()
+
+
+def safe_failure(error):
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return 'TLS_CERTIFICATE_VERIFY'
+    if isinstance(error, x.SubscriptionHTTPError):
+        return 'SUBSCRIPTION_HTTP_' + str(error.status)
+    if isinstance(error, subprocess.CalledProcessError):
+        return 'CHILD_EXIT_' + str(error.returncode)
+    if isinstance(error, TimeoutError):
+        return 'NETWORK_TIMEOUT'
+    if isinstance(error, OSError):
+        return 'OS_ERROR_' + str(error.errno or 0)
+    value = str(error)
+    if re.fullmatch(r'MANAGE_REALITY_[A-Z0-9_]{1,95}', value):
+        return value
+    if value in ('SUB_HTTP', 'NATIVE_PROFILE_COUNT', 'NATIVE_SIX_COUNT', 'UA_DIFFERENCE',
+                 'URI_CLIENT_EXIT', 'URI_CLIENT_TIMEOUT', 'CLIENT_TRANSPORT', 'CLIENT_SECURITY',
+                 'PAYLOAD_EGRESS_CLASS', 'PAYLOAD_EGRESS_ADDRESS', 'PAYLOAD_EGRESS_IP',
+                 'UDP_DNS_ANSWER', 'SOCKS_AUTH', 'SOCKS_EOF', 'SOCKS_UDP_ASSOCIATE'):
+        return value
+    return type(error).__name__.upper()
+
+
+def remember_failure(journal, name, error):
+    journal.record[name] = {'phase': journal.record.get('phase', 'UNKNOWN'), 'code': safe_failure(error)}
+    try:
+        journal.save()
+    except OSError:
+        # Metadata failure must not prevent attempting the owned rollback.
+        pass
+
+
 def snapshot(plan, units):
     BACKUPS.mkdir(mode=0o700, exist_ok=True)
     info = BACKUPS.lstat()
@@ -518,11 +580,15 @@ def rollback(journal, secret, initial=None):
     need(not record.get('backend_unverified', False), 'BACKEND_RECOVERY_REQUIRED')
     units = record['units']
     touched = record.get('runtime_touched', True)
+    phase(journal, 'ROLLBACK_STOP_DATA')
     if touched:
         stop(units)
     if record['database_applied']:
+        phase(journal, 'ROLLBACK_DATABASE')
         database(record['database'], restore=True)
+    phase(journal, 'ROLLBACK_FILES')
     journal.rollback()
+    phase(journal, 'ROLLBACK_BACKEND_DIRS')
     for raw, identity in reversed(record.get('backend_created_dirs', [])):
         path = Path(raw)
         if path.exists() or path.is_symlink():
@@ -532,16 +598,18 @@ def rollback(journal, secret, initial=None):
             # Retain the entire new website, including any files added during
             # the failed operation, in the private snapshot. Never recurse-delete.
             path.rename(destination)
+    phase(journal, 'ROLLBACK_NGINX')
     command(['nginx', '-t'])
     command(['systemctl', 'reload', 'nginx.service'])
     if touched:
+        phase(journal, 'ROLLBACK_START_DATA')
         start(units)
     start(record.get('paused_timers', []))
     initial = initial if initial is not None else record['before_feed']
-    recovered = x.native(record['before_target'], secret, expected_count=len(initial))
-    need(uri_hashes(recovered) == uri_hashes(initial), 'ROLLBACK_FEED')
+    phase(journal, 'ROLLBACK_PUBLIC_FEED')
+    wait_published(record['before_target'], secret, initial)
     record['status'] = 'rolled_back'
-    journal.save()
+    phase(journal, 'ROLLBACK_COMPLETE')
     PENDING.unlink(missing_ok=True)
 
 
@@ -586,6 +654,7 @@ def apply(plan, initial, secret):
     try:
         # Certificate hooks may restart the same services. Pause only their
         # timers, retain their enable state, and refuse an already running job.
+        phase(journal, 'PAUSE_CERTIFICATE_TIMERS')
         for timer in ('certbot.timer', 'vpn-cert-reconcile.timer'):
             if running(timer):
                 journal.record['paused_timers'].append(timer)
@@ -595,19 +664,20 @@ def apply(plan, initial, secret):
             need(quiescent('certbot.service') and quiescent('vpn-cert-reconcile.service'),
                  'CERTIFICATE_JOB_BUSY')
         journal.record['runtime_touched'] = True
-        journal.save()
+        phase(journal, 'STOP_DATA')
         stop(units)
         journal.record['database_applied'] = 'intent'
-        journal.save()
+        phase(journal, 'DATABASE_APPLY')
         database(plan.database)
         journal.record['database_applied'] = True
         journal.save()
+        phase(journal, 'TARGET_PUBLISH')
         journal.change(TARGET, plan.files[TARGET])
         if plan.after.get('TARGET_REALITY_MODE') != 'external':
             before = {path: file_state(path) for path in DECOY_PATHS}
             journal.record['backend_before'] = {str(path): state for path, state in before.items()}
             journal.record['backend_dirs_before'] = {str(path): directory_state(path) for path in DECOY_DIRS}
-            journal.save()
+            phase(journal, 'LOCAL_TARGET_PREPARE')
             try:
                 command(['bash', str(BUNDLE / 'base/install-reality-decoy.sh'), '--manage-apply'], timeout=240,
                         step='LOCAL_TARGET_PREPARE')
@@ -616,27 +686,37 @@ def apply(plan, initial, secret):
                 # stopped. Defer signals only during this short registration.
                 with x.defer_interruptions():
                     adopt_backend(journal, before)
+        phase(journal, 'CONFIGURATION_PUBLISH')
         for path, raw in plan.files.items():
             if path != TARGET:
                 journal.change(path, raw)
         journal.change(MAIN, plan.main)
+        phase(journal, 'START_DATA')
         start(units)
+        phase(journal, 'RUNTIME_JSON_READBACK')
         verify_runtime(plan.main)
-        feeds = x.native(plan.after, secret, expected_count=len(plan.expected))
-        need(uri_hashes(feeds) == uri_hashes(plan.expected), 'PUBLIC_FEED_READBACK')
+        phase(journal, 'PUBLIC_FEED_READY')
+        feeds = wait_published(plan.after, secret, plan.expected)
+        phase(journal, 'CONFIGURATION_READBACK')
         for path, raw in plan.configs.items():
             need(x.canonical(x.strict_json(path.read_bytes())) == raw, 'CONFIG_READBACK')
         extras = x.strict_json(LINKS.read_bytes())['entries'] if LINKS.exists() else []
+        phase(journal, 'AUTH_PAYLOAD')
         tested, pending = payload_checks(feeds, plan.after, secret, extras)
         start(journal.record['paused_timers'])
+        phase(journal, 'FINAL_VERIFY')
         command(['bash', str(SOURCE / 'tools/verify.sh')], timeout=900, step='FINAL_VERIFY')
         journal.record['status'] = 'committed'
-        journal.save()
+        phase(journal, 'COMMITTED')
         PENDING.unlink()
-    except BaseException:
+    except BaseException as original:
+        remember_failure(journal, 'primary_failure', original)
         try:
             rollback(journal, secret, initial)
-        except BaseException:
+        except BaseException as rollback_error:
+            remember_failure(journal, 'rollback_failure', rollback_error)
+            print('REALITY_PRIMARY_FAILURE=' + journal.record['primary_failure']['code'], file=sys.stderr)
+            print('REALITY_ROLLBACK_FAILURE=' + journal.record['rollback_failure']['code'], file=sys.stderr)
             raise RuntimeError('MANAGE_REALITY_ROLLBACK_REQUIRED') from None
         raise
     print(f'REALITY_AUTH_E2E_CHECKED={tested} UNSUPPORTED_PENDING={pending}')

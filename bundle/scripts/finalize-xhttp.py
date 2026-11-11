@@ -316,7 +316,13 @@ def decode_feed(raw, expected_count=6):
     return lines
 
 
-def native(target, secret, expected_count=None, user_agents=('v2RayTun', 'Happ', 'Karing')):
+class SubscriptionHTTPError(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__('SUB_HTTP')
+
+
+def native(target, secret, expected_count=None, user_agents=('v2RayTun', 'Happ', 'Karing'), timeout=20):
     host = endpoint(target)
     if expected_count is None:
         expected_count = profile_count(target)
@@ -324,15 +330,17 @@ def native(target, secret, expected_count=None, user_agents=('v2RayTun', 'Happ',
     feeds = []
     for ua in user_agents:
         if tls_mode(target) == 'none':
-            connection = http.client.HTTPConnection(host, 2096, timeout=20)
+            connection = http.client.HTTPConnection(host, 2096, timeout=timeout)
         else:
-            connection = http.client.HTTPSConnection(host, 2096, timeout=20,
+            connection = http.client.HTTPSConnection(host, 2096, timeout=timeout,
                                                      context=ssl.create_default_context())
         try:
             connection.request('GET', path, headers={'User-Agent': ua, 'Cache-Control': 'no-cache'})
             response = connection.getresponse()
+            if response.status != 200:
+                raise SubscriptionHTTPError(response.status)
             raw = response.read(2 * 1024 * 1024 + 1)
-            need(response.status == 200 and len(raw) <= 2 * 1024 * 1024, 'SUB_HTTP')
+            need(len(raw) <= 2 * 1024 * 1024, 'SUB_HTTP')
             feeds.append(decode_feed(raw, expected_count))
         finally:
             connection.close()

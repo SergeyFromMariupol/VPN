@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,51 @@ INSERT INTO clients VALUES(1,'retained-uuid','retained-auth','retained-subscript
 
 
 class ManagementPlanTests(unittest.TestCase):
+    def test_public_feed_wait_retries_startup_refusal_and_temporary_gateway_error(self):
+        with patch.object(MODULE.x, 'native', side_effect=[ConnectionRefusedError(),
+                          MODULE.x.SubscriptionHTTPError(502), [URI]]) as native, \
+             patch.object(MODULE.time, 'sleep'):
+            self.assertEqual(MODULE.wait_published(TARGET, {}, [URI]), [URI])
+        self.assertEqual(native.call_count, 3)
+        self.assertTrue(all(0 < call.kwargs['timeout'] <= 3 for call in native.call_args_list))
+
+    def test_public_feed_wait_never_hides_tls_identity_auth_or_uri_drift(self):
+        for error in (ssl.SSLCertVerificationError(1, 'private TLS detail'),
+                      MODULE.x.SubscriptionHTTPError(403)):
+            with self.subTest(kind=type(error).__name__), \
+                 patch.object(MODULE.x, 'native', side_effect=error) as native, \
+                 patch.object(MODULE.time, 'sleep') as sleep:
+                with self.assertRaises(type(error)):
+                    MODULE.wait_published(TARGET, {}, [URI])
+                self.assertEqual(native.call_count, 1)
+                sleep.assert_not_called()
+        with patch.object(MODULE.x, 'native', return_value=[URI.replace(UUID, 'changed-uuid')]) as native:
+            with self.assertRaisesRegex(RuntimeError, 'PUBLIC_FEED_READBACK'):
+                MODULE.wait_published(TARGET, {}, [URI])
+            self.assertEqual(native.call_count, 1)
+
+    def test_public_feed_wait_has_a_fixed_deadline(self):
+        with patch.object(MODULE.x, 'native', side_effect=ConnectionRefusedError()), \
+             patch.object(MODULE.time, 'monotonic', return_value=0):
+            with self.assertRaisesRegex(RuntimeError, 'PUBLIC_FEED_TIMEOUT'):
+                MODULE.wait_published(TARGET, {}, [URI], deadline_seconds=0)
+
+    def test_rollback_waits_for_public_backend_and_remains_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = MODULE.Journal(Path(directory), {'files': [], 'units': ['fixture.service'],
+                'database_applied': False, 'before_target': TARGET, 'before_feed': [URI],
+                'paused_timers': [], 'runtime_touched': True, 'status': 'prepared'})
+            journal.save = Mock()
+            with patch.object(MODULE, 'stop'), patch.object(MODULE, 'start'), \
+                 patch.object(MODULE, 'command', return_value=b''), \
+                 patch.object(MODULE, 'PENDING', Path(directory) / 'pending'), \
+                 patch.object(MODULE.time, 'sleep'), \
+                 patch.object(MODULE.x, 'native', side_effect=[ConnectionRefusedError(), [URI], [URI]]):
+                MODULE.rollback(journal, {})
+                MODULE.rollback(journal, {})
+            self.assertEqual(journal.record['status'], 'rolled_back')
+            self.assertEqual(journal.record['phase'], 'ROLLBACK_COMPLETE')
+
     def test_request_modes_are_explicit_and_self_steal_uses_own_domain(self):
         own = MODULE.request_target(TARGET, {'mode': 'self-steal'})
         self.assertEqual(own['TARGET_REALITY_SNI'], TARGET['TARGET_FQDN'])
@@ -373,6 +419,8 @@ class ManagementPlanTests(unittest.TestCase):
             self.assertEqual(db.call_args.kwargs, {'restore': True})
             journal.rollback.assert_called_once()
             self.assertEqual(journal.record['status'], 'rolled_back')
+            self.assertEqual(journal.record['primary_failure'],
+                             {'phase': 'PUBLIC_FEED_READY', 'code': 'RUNTIMEERROR'})
             self.assertEqual(started.call_count, 3)
             self.assertEqual(stopped.call_count, 2)
 
