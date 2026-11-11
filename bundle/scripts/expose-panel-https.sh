@@ -68,14 +68,20 @@ render_nginx_config() {
   PANEL_BASE_PATH="$PANEL_BASE_PATH" NGINX_TEMPLATE="$nginx_template" python3 - <<'PY'
 import os
 from pathlib import Path
+import re
 import sys
 
 text = Path(os.environ['NGINX_TEMPLATE']).read_text()
-for key, value in {
+replacements = {
     '__SERVER_IPV4__': os.environ['TARGET_IPV4'], '__PUBLIC_FQDN__': os.environ['TARGET_FQDN'],
     '__PANEL_BASE_PATH__': os.environ['PANEL_BASE_PATH'],
-}.items():
-    text = text.replace(key, value)
+}
+def replace_placeholder(match):
+    try:
+        return replacements[match.group()]
+    except KeyError:
+        raise ValueError('Unknown panel Nginx template placeholder') from None
+text = re.sub(r'__[A-Za-z][A-Za-z0-9_]*__', replace_placeholder, text)
 sys.stdout.write(text)
 PY
   SUBSCRIPTION_PATH="$SUBSCRIPTION_PATH" python3 -I -B "$bundle_root/scripts/happ_routing.py" --nginx
@@ -339,7 +345,6 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 render_nginx_config >"$stage/3x-ui-public.conf"
-grep -Fq '__' "$stage/3x-ui-public.conf" && die 'unresolved nginx template placeholder'
 install -o root -g root -m 0600 "$stage/3x-ui-public.conf" "$nginx_config"
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   install -o root -g root -m 0755 "$renew_hook_source" "$renew_hook"

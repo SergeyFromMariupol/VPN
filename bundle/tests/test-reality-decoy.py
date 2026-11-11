@@ -20,7 +20,8 @@ import time
 import uuid
 
 
-ROOT = Path(os.environ.get('VPN_TEST_SOURCE_ROOT', Path(__file__).resolve().parents[2]))
+ROOT = (Path(os.environ['VPN_TEST_SOURCE_ROOT']) if 'VPN_TEST_SOURCE_ROOT' in os.environ
+        else Path(__file__).resolve().parents[2])
 SPEC = importlib.util.spec_from_file_location('decoy_renderer', ROOT / 'bundle/base/reality-decoy.py')
 DECOY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DECOY)
@@ -114,6 +115,9 @@ def payload(socks_port, origin_port):
             if not data:
                 break
             response.extend(data)
+            if b'authenticated-reality-grpc-payload\n' in response:
+                break
+        assert response.startswith(b'HTTP/1.0 200 ') or response.startswith(b'HTTP/1.1 200 ')
         assert b'authenticated-reality-grpc-payload\n' in response
 
 
@@ -181,7 +185,13 @@ def main():
                         'grpcSettings': {'serviceName': 'fixture-grpc'}, 'realitySettings': {
                             'target': f'127.0.0.1:{target_port}', 'serverNames': [client_sni],
                             'privateKey': private, 'shortIds': [short_id], 'xver': 0}}}],
-                    'outbounds': [{'protocol': 'freedom'}]}
+                    # The pinned Freedom outbound blocks private targets by
+                    # default. Allow only this disposable loopback HTTP origin;
+                    # keep every other destination blocked in the fixture.
+                    'outbounds': [{'protocol': 'freedom', 'settings': {'finalRules': [
+                        {'action': 'allow', 'network': 'tcp', 'ip': ['127.0.0.1/32'],
+                         'port': origin.server_port},
+                        {'action': 'block'}]}}]}
                 client = {'log': {'loglevel': 'error'}, 'inbounds': [{
                     'listen': '127.0.0.1', 'port': socks_port, 'protocol': 'socks',
                     'settings': {'auth': 'noauth'}}], 'outbounds': [{
@@ -203,6 +213,7 @@ def main():
                         '/secret.php', expect_page=False)
                 client_process = start([str(binary), 'run', '-config', str(client_path)], socks_port)
                 payload(socks_port, origin.server_port)
+                print('REALITY_AUTH_SNI=' + client_sni + ' GRPC_PAYLOAD=PASS SCANNER_OWN_CERT=PASS', flush=True)
                 client_process.terminate()
                 client_process.wait(timeout=10)
                 server_process.terminate()

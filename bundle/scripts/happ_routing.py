@@ -111,9 +111,14 @@ def subscription_proxy(target):
         '__V2RAYTUN_ROUTING__': v2raytun_header(target['TARGET_LABEL']),
     }
     config = template.read_text(encoding='ascii')
-    for key, value in replacements.items():
-        config = config.replace(key, value)
-    return config
+    def replace_placeholder(match):
+        try:
+            return replacements[match.group()]
+        except KeyError:
+            raise ValueError('Unknown subscription Nginx template placeholder') from None
+    # Match the source template once. Injected JavaScript and CSS legitimately
+    # contain double-underscore globals/BEM names and are not template slots.
+    return re.sub(r'__[A-Za-z][A-Za-z0-9_]*__', replace_placeholder, config)
 
 
 def check_headers(raw, profile_name, client='', provider_id=''):
