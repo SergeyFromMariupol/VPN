@@ -20,7 +20,7 @@ import time
 import uuid
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get('VPN_TEST_SOURCE_ROOT', Path(__file__).resolve().parents[2]))
 SPEC = importlib.util.spec_from_file_location('decoy_renderer', ROOT / 'bundle/base/reality-decoy.py')
 DECOY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DECOY)
@@ -168,7 +168,7 @@ def main():
             start(['nginx', '-p', str(root), '-c', str(nginx), '-g', 'daemon off;'], target_port)
             pair = run(str(binary), 'x25519').decode()
             private = re.search(r'PrivateKey:\s*(\S+)', pair)[1]
-            public = re.search(r'(?:Password|PublicKey):\s*(\S+)', pair)[1]
+            public = re.search(r'^(?:Public(?:\s+key|Key)|Password(?: \(PublicKey\))?):\s*([A-Za-z0-9_-]{43})\s*$', pair, re.M)[1]
             identity = str(uuid.uuid4())
             short_id = os.urandom(8).hex()
             # Test both ordinary self-steal and the intentionally different SNI.
