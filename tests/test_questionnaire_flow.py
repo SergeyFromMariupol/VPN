@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+from runpy import run_path
 import shutil
 import subprocess
 import tempfile
@@ -162,7 +163,8 @@ apt-get upgrade -y --no-remove
     executable(source / 'bundle/scripts/finalize-xhttp.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
     executable(source / 'bundle/scripts/finalize-direct-xhttp.py',
-               'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:xhttp\\n")\n')
+               'import os,pathlib,sys\nphase="baseline-verify" if "--verify" in sys.argv else "xhttp"\n'
+               'with pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:"+phase+"\\n")\n')
     executable(source / 'bundle/portfolio/install.py',
                'import os,pathlib\nwith pathlib.Path(os.environ["FIXTURE_ROOT"],"events").open("a") as f:f.write("PHASE:portfolio-runtime\\n")\n')
     executable(source / 'tools/portfolio_publish.py',
@@ -199,7 +201,7 @@ def questionnaire_steps():
              settings.get('egress_answers', [settings.get('egress_choice', '3')])]
     profile_answers = settings.get('profile_answers', [settings.get('profile_choice', '1')])
     steps.extend(('Выберите набор [1]:', value) for value in profile_answers)
-    if profile_answers[-1] == '4':
+    if profile_answers[-1] == '5':
         if 'checklist_keys' in settings:
             steps.append(('[ ]', settings['checklist_keys'].encode('ascii')))
         else:
@@ -557,7 +559,7 @@ class QuestionnaireFlow(unittest.TestCase):
                                                     ('3', 'both', 98)):
             with self.subTest(mode=mode):
                 result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                      egress_choice=egress_choice, profile_choice='2',
+                                      egress_choice=egress_choice, profile_choice='3',
                                       label='Сергей VPN', resume=True)
                 self.assertEqual(result['exit'], 0, result['output'])
                 self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], mode)
@@ -571,7 +573,7 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertNotIn('Выберите режим сертификата', result['output'])
 
         all_profiles = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                    profile_choice='3')
+                                    profile_choice='4')
         self.assertEqual(all_profiles['persisted']['TARGET_PROFILE_SET'], 'all')
         self.assertEqual(all_profiles['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '146')
         self.assertEqual(all_profiles['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
@@ -582,13 +584,54 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(basic_direct['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '3')
         self.assertEqual(basic_direct['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
 
+    def test_top10_preset_persists_exact_selection_and_resumes_for_every_egress(self):
+        select_top10 = run_path(str(ROOT / 'tools/portfolio_catalog.py'))['select_top10']
+        for choice, mode, count, extra_count in (('1', 'warp', 10, 9),
+                                                  ('2', 'direct', 10, 9),
+                                                  ('3', 'both', 20, 18)):
+            with self.subTest(mode=mode):
+                rows = select_top10(mode, 'Мой VPN')
+                ids = ','.join(row['id'] for row in rows)
+                result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
+                                      egress_choice=choice, profile_choice='2', resume=True)
+                self.assertEqual(result['exit'], 0, result['output'])
+                self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
+                self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], mode)
+                self.assertEqual(result['persisted']['TARGET_PROFILE_IDS'], ids)
+                self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], str(count))
+                self.assertEqual(result['phase_inputs']['TARGET_EXTRA_PROFILE_COUNT'], str(extra_count))
+                self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
+                self.assertIn(f'Рекомендуемые для ТСПУ — {count}', result['output'])
+                self.assertIn(f'Выбрано профилей: {count}.', result['output'])
+                self.assertNotIn('Номера профилей:', result['output'])
+                phases = [event for event in result['events'] if event.startswith('PHASE:')]
+                for phase in ('baseline-verify', 'portfolio-runtime', 'portfolio-publish'):
+                    self.assertEqual(phases.count('PHASE:' + phase), 1)
+                self.assertLess(phases.index('PHASE:baseline-verify'), phases.index('PHASE:portfolio-runtime'))
+                self.assertLess(phases.index('PHASE:portfolio-runtime'), phases.index('PHASE:portfolio-publish'))
+                self.assertEqual('PHASE:warp' in phases, mode != 'direct')
+                self.assertEqual('PHASE:dual' in phases, mode != 'direct')
+                resumed = result['resume']
+                self.assertEqual(resumed['exit'], 0, resumed['output'])
+                self.assertTrue(resumed['target_unchanged'])
+                self.assertEqual(resumed['phase_inputs']['TARGET_PROFILE_SET'], 'custom')
+                self.assertEqual(resumed['phase_inputs']['TARGET_PROFILE_IDS'], ids)
+                self.assertEqual(resumed['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], str(count))
+                self.assertEqual(resumed['phase_inputs']['TARGET_EXTRA_PROFILE_COUNT'], str(extra_count))
+                self.assertEqual(resumed['events'], ['PHASE:verify'])
+                self.assertNotIn('Выберите набор', resumed['output'])
+                self.assertNotIn('Выберите выход', resumed['output'])
+
     def test_custom_selection_persists_exact_ids_and_effective_egress(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              profile_choice='4', custom_answers=['', '999', '3, 1-2'],
+                              profile_choice='5', custom_answers=['', '999', '3, 1-2'],
                               resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual(result['output'].count('Номера профилей:'), 3)
         self.assertIn('Выбрано профилей: 3.', result['output'])
+        self.assertIn('Можно выбрать отдельные профили протоколов и транспортов', result['output'])
+        self.assertIn('↑/↓ — перейти, пробел — отметить, Enter — подтвердить', result['output'])
+        self.assertIn('Диапазон можно указать как 1-3.', result['output'])
         self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
         self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], 'warp')
         ids = ('vless-reality-grpc-warp,hysteria2-tls-hysteria-warp,'
@@ -606,7 +649,7 @@ class QuestionnaireFlow(unittest.TestCase):
         up, down = '\x1bOA', '\x1bOB'
         keys = '\r' + down + ' ' + down + ' ' + up + ' ' + up + ' ' + '\r'
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              profile_choice='4', term='xterm-256color', checklist_keys=keys)
+                              profile_choice='5', term='xterm-256color', checklist_keys=keys)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertIn('ANSWER:2', result['events'])
         self.assertNotIn('Номера профилей:', result['output'])
@@ -618,13 +661,13 @@ class QuestionnaireFlow(unittest.TestCase):
 
     def test_custom_checklist_escape_cancels_before_persistence(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              profile_choice='4', term='xterm-256color', checklist_keys=' \x1b')
+                              profile_choice='5', term='xterm-256color', checklist_keys=' \x1b')
         self.assertIn('ANSWER:2', result['events'])
         self.assert_unpublished(result)
 
     def test_invalid_selection_publishes_nothing(self):
         selected = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                                egress_answers=['bad', '1'], profile_answers=['bad', '3'])
+                                egress_answers=['bad', '1'], profile_answers=['bad', '4'])
         self.assertEqual(selected['exit'], 0, selected['output'])
         self.assertEqual(selected['persisted']['TARGET_EGRESS_MODE'], 'warp')
         self.assertEqual(selected['persisted']['TARGET_PROFILE_SET'], 'all')
@@ -632,7 +675,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(selected['output'].count('Выберите набор [1]:'), 2)
         self.assert_unpublished(self.fixture(egress_answers=['bad', None]))
         self.assert_unpublished(self.fixture(profile_answers=['bad', None]))
-        self.assert_unpublished(self.fixture(profile_choice='4', custom_answers=['1,1', None]))
+        self.assert_unpublished(self.fixture(profile_choice='5', custom_answers=['1,1', None]))
 
     def test_legacy_saved_selection_defaults_ignore_caller_environment(self):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
