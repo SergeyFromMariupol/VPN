@@ -25,13 +25,13 @@ TIER_PRIORITY = {"A": 0, "B1": 1, "B2": 2, "C": 3, "D": 4, "E": 5}
 # ranking or a guarantee against future filtering. Persist its explicit IDs
 # through the existing custom selection contract.
 TOP10_STEMS = (
-    "vless-reality-xhttp-packet-up",
+    "hysteria2-tls-hysteria-salamander",
     "vless-reality-xhttp-auto",
     "vless-reality-xhttp-stream-up",
-    "vless-reality-xhttp-packet-up-mlkem",
+    "vless-reality-xhttp-packet-up",
     "trojan-reality-xhttp-auto",
     "trojan-reality-xhttp-packet-up",
-    "hysteria2-tls-hysteria-salamander",
+    "vless-reality-xhttp-packet-up-mlkem",
     "vless-tls-xhttp-auto",
     "vless-tls-xhttp-packet-up",
     "vless-tls-xhttp-stream-one",
@@ -123,13 +123,30 @@ def profile_name(entry: dict, target_label: str) -> str:
     return f"{target_label} · {EGRESS_LABELS[egress]} · {suffix}"
 
 
+def is_public_native(row: dict, egress_mode: str) -> bool:
+    """Whether this recipe is exported natively rather than as a public URI.
+
+    The single direct exit owns its native clients. A WARP/both installation
+    exports WARP gRPC/Hysteria natively and direct clients as external links.
+    Promoted XHTTP is always external, including its baseline recipe.
+    """
+    if egress_mode not in EGRESS_MODES:
+        raise ValueError(f"Unknown egress mode: {egress_mode}")
+    native_role = "direct" if egress_mode == "direct" else "warp"
+    return bool(row["baseline_reuse"] and row["egress"] == native_role and
+                ((row["protocol"] == "vless" and row["transport"] == "grpc") or
+                 row["protocol"] == "hysteria2"))
+
+
 def select_profiles(profile_set: str, egress_mode: str, target_label: str,
                     profile_ids: str = "") -> list[dict]:
     """Return ordered recipes with unique names for the requested menu options.
 
     ``basic`` is the six original links. ``dpi`` includes tiers A–D and the
     original six (98 total). ``all`` includes all 146 accepted links. Egress
-    filtering preserves that order. The source observation was on Miranda;
+    filtering preserves that order. A custom URI-only selection preserves its
+    explicit CSV order; native-containing selections retain the original order.
+    The source observation was on Miranda;
     these selections do not claim future DPI resistance on other networks.
     """
     if profile_set not in PROFILE_SETS:
@@ -162,17 +179,20 @@ def select_profiles(profile_set: str, egress_mode: str, target_label: str,
         result.append(row)
     if profile_set == "custom" and requested != {row["id"] for row in result}:
         raise ValueError("A selected profile is unavailable for this egress")
+    if profile_set == "custom" and not any(is_public_native(row, egress_mode) for row in result):
+        by_id = {row["id"]: row for row in result}
+        result = [by_id[profile_id] for profile_id in ids]
     if len({row["name"] for row in result}) != len(result):
         raise ValueError("Portfolio profile names are not unique")
     return result
 
 
 def select_top10(egress: str, label: str = "VPN") -> list[dict]:
-    """Resolve the reviewed preset into canonical custom rows for this exit."""
+    """Resolve the preset's explicit priority, grouped by WARP/direct exit."""
     if egress not in EGRESS_MODES:
         raise ValueError(f"Unknown egress mode: {egress}")
     roles = ("warp", "direct") if egress == "both" else (egress,)
-    ids = ",".join(f"{stem}-{role}" for stem in TOP10_STEMS for role in roles)
+    ids = ",".join(f"{stem}-{role}" for role in roles for stem in TOP10_STEMS)
     return select_profiles("custom", egress, label, ids)
 
 

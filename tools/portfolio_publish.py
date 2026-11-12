@@ -113,6 +113,11 @@ else:
     insert(db,'client_inbounds',row)
   else:
    raise ValueError('OP')
+  for item in p.get('update_sorts',[]):
+   before,after=item['before'],item['after']
+   expected,wanted=(after,before) if op=='restore' else (before,after)
+   assert db.execute('UPDATE client_external_links SET sort_index=? WHERE id=? AND sort_index=?',
+                     (wanted,item['id'],expected)).rowcount==1
   assert stable(db)==p['intended']
   check(db)
   db.commit()
@@ -483,8 +488,25 @@ def plan(data, target, extras, initial):
     baseline = [uri for name, uri in zip(names, initial, strict=True) if name in selected_baseline]
     selected_names = [uri_name(uri) for uri in baseline] + [entry['remark'] for entry in extras]
     selected_uris = baseline + [entry['uri'] for entry in extras]
+    reorder_external = False
     if custom:
-        need(selected_names == [row['name'] for row in rows], 'CUSTOM_PUBLIC_ORDER')
+        recipes = [row for row in rows if not row['baseline_reuse']]
+        need([entry['id'] for entry in extras] == [row['id'] for row in recipes] and
+             [entry['remark'] for entry in extras] == [row['name'] for row in recipes],
+             'CUSTOM_PUBLIC_ORDER')
+        intended_names = [row['name'] for row in rows]
+        reorder_external = intended_names != selected_names
+        if reorder_external:
+            # 3X-UI emits native links before all external links. The selector
+            # retains the established order whenever native links are selected;
+            # only an entirely external selection can be reordered here.
+            external_names = {entry['remark'] for entry in data['external']}
+            need(selected_baseline <= external_names, 'CUSTOM_NATIVE_ORDER')
+            baseline_by_name = dict(zip(names, initial, strict=True))
+            extras_by_id = {entry['id']: entry['uri'] for entry in extras}
+            selected_uris = [baseline_by_name[row['name']] if row['baseline_reuse'] else
+                             extras_by_id[row['id']] for row in rows]
+        selected_names = intended_names
     need(len(selected_uris) == len(set(selected_uris)) and
          len(selected_names) == len(set(selected_names)), 'SELECTED_DUPLICATE')
     delete_joins = [
@@ -495,23 +517,38 @@ def plan(data, target, extras, initial):
                        if row['remark'] not in selected_baseline]
     max_id = max(row['id'] for row in data['external'])
     now = int(time.time() * 1000)
+    positions = {name: index for index, name in enumerate(selected_names)}
+    update_sorts = [{'id': row['id'], 'before': row['sort_index'], 'after': positions[row['remark']]}
+                    for row in data['external'] if reorder_external and
+                    row['id'] not in set(delete_external) and row['sort_index'] != positions[row['remark']]]
+    changed_sorts = {row['id']: row['after'] for row in update_sorts}
     insert_external = [
         {'id': max_id + index + 1, 'client_id': owner, 'kind': 'link',
          'value': entry['uri'], 'remark': entry['remark'], 'enable': 1,
-         'expiry_time': 0, 'name_prefix': '', 'sort_index': 3 + index,
+         'expiry_time': 0, 'name_prefix': '',
+         'sort_index': positions[entry['remark']] if reorder_external else 3 + index,
          'created_at': now + index, 'last_fetch_at': 0, 'last_fetch_error': ''}
         for index, entry in enumerate(extras)]
     after = {
         'joins': [row for row in data['joins']
                   if {'client_id': row['client_id'], 'inbound_id': row['inbound_id']} not in delete_joins],
-        'external': sorted([row for row in data['external'] if row['id'] not in set(delete_external)] +
+        'external': sorted([{**row, 'sort_index': changed_sorts.get(row['id'], row['sort_index'])}
+                            for row in data['external'] if row['id'] not in set(delete_external)] +
                            [{key: row[key] for key in STABLE_EXTERNAL} for row in insert_external],
                            key=lambda row: (row['sort_index'], row['id']))}
-    return {'before': {'joins': data['joins'], 'external': data['external']},
-            'after': after, 'delete_joins': delete_joins,
-            'delete_external': delete_external, 'insert_external': insert_external,
-            'uri_hashes': [digest(canonical(uri_signature(uri))) for uri in selected_uris],
-            'names': selected_names}
+    if reorder_external:
+        need([entry['remark'] for entry in after['external']] == selected_names,
+             'CUSTOM_EXTERNAL_ORDER')
+    result = {'before': {'joins': data['joins'], 'external': data['external']},
+              'after': after, 'delete_joins': delete_joins,
+              'delete_external': delete_external, 'insert_external': insert_external,
+              'uri_hashes': [digest(canonical(uri_signature(uri))) for uri in selected_uris],
+              'names': selected_names}
+    # Omit the optional field for existing plans and journals whose sort order
+    # does not change; recovery accepts both the old and the extended shape.
+    if update_sorts:
+        result['update_sorts'] = update_sorts
+    return result
 
 
 def snapshot():
@@ -606,7 +643,8 @@ def restore_prepared(state, target):
     restore_external = [row for row in external if row['id'] in set(state['delete_external'])]
     payload = {'expected': state['after'], 'intended': state['before'],
                'inserted_external_ids': [row['id'] for row in state['insert_external']],
-               'restore_joins': restore_joins, 'restore_external': restore_external}
+               'restore_joins': restore_joins, 'restore_external': restore_external,
+               'update_sorts': state.get('update_sorts', [])}
     need(db_worker('restore', payload) == b'OK', 'ROLLBACK_WORKER')
     restart_xui(target)
     wait_native_runtime(target, mode=baseline_mode)
@@ -647,7 +685,8 @@ def apply(target, url):
         payload = {'expected': state['before'], 'intended': state['after'],
                    'delete_joins': state['delete_joins'],
                    'delete_external': state['delete_external'],
-                   'insert_external': state['insert_external']}
+                   'insert_external': state['insert_external'],
+                   'update_sorts': state.get('update_sorts', [])}
         need(db_worker('apply', payload) == b'OK', 'APPLY_WORKER')
         restart_xui(target)
         verify_public(state, target, url)

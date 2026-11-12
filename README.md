@@ -89,21 +89,24 @@ REALITY · Hysteria2 · XHTTP
 
 | № | Вариант |
 | --- | --- |
-| 1 | VLESS · REALITY · XHTTP PACKET-UP |
+| 1 | Hysteria2 · TLS · Salamander |
 | 2 | VLESS · REALITY · XHTTP AUTO |
 | 3 | VLESS · REALITY · XHTTP STREAM-UP |
-| 4 | VLESS · REALITY · XHTTP PACKET-UP · ML-KEM |
+| 4 | VLESS · REALITY · XHTTP PACKET-UP |
 | 5 | Trojan · REALITY · XHTTP AUTO |
 | 6 | Trojan · REALITY · XHTTP PACKET-UP |
-| 7 | Hysteria2 · TLS · Salamander |
+| 7 | VLESS · REALITY · XHTTP PACKET-UP · ML-KEM |
 | 8 | VLESS · TLS · XHTTP AUTO |
 | 9 | VLESS · TLS · XHTTP PACKET-UP |
 | 10 | VLESS · TLS · XHTTP STREAM-ONE |
 
 В подписке будет **10** профилей для WARP или IP сервера и **20** для обоих
 выходов. Это полный состав компактного набора, а не десять дополнительных
-профилей к основным трём. Выбор сохраняется по точным позициям каталога;
-`--resume` восстанавливает его без повторного подбора.
+профилей к основным трём. При выборе обоих выходов сначала идут десять WARP,
+затем десять прямых профилей. В каждой группе Hysteria2 Salamander стоит первой,
+VLESS REALITY XHTTP AUTO — вторым; дальше следует указанный рекомендованный порядок.
+Выбор и его порядок сохраняются по точным IDs; `--resume` восстанавливает их
+без повторного подбора. Старые сохранённые наборы сохраняют свой порядок.
 
 Набор сочетает разные режимы XHTTP/REALITY, обычный TLS для собственного
 сертификата и UDP с Salamander. Все эти варианты ранее прошли мобильные

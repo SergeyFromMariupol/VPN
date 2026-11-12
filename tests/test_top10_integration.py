@@ -1,8 +1,10 @@
 """Run the compact preset through the unchanged custom installation pipeline."""
 import importlib.util
+from contextlib import closing
 import json
 from pathlib import Path
 import shlex
+import sqlite3
 import sys
 import tempfile
 import types
@@ -37,7 +39,118 @@ def selection(mode):
     return rows, values
 
 
+def full_rows(path, table):
+    with closing(sqlite3.connect(path)) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY 1,2')]
+
+
 class Top10Integration(unittest.TestCase):
+    def test_real_database_order_and_recovery_preserve_baseline_metadata(self):
+        for mode in ('warp', 'direct', 'both'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                rows, values = selection(mode)
+                target, data, initial = PUBLICATION.fixture(egress=mode)
+                target.update(values)
+                _, manifest, _ = PLAN.build(values, PLAN.MAIN, rows, PLAN.shared, PLAN.profile)
+                intent = PUBLISH.plan(data, target, manifest['entries'], initial)
+                path = Path(directory) / 'x-ui.db'
+                PUBLICATION.create_db(path, data)
+                with closing(sqlite3.connect(path)) as db:
+                    db.execute("UPDATE client_external_links SET last_fetch_at=12345, "
+                               "last_fetch_error='retained metadata'")
+                    db.commit()
+                original_external = full_rows(path, 'client_external_links')
+                original_joins = full_rows(path, 'client_inbounds')
+                original_clients = full_rows(path, 'clients')
+                applied = PUBLICATION.worker(path, 'apply', {
+                    **intent, 'expected': intent['before'], 'intended': intent['after']})
+                self.assertEqual(applied.returncode, 0, applied.stderr.decode())
+                current = full_rows(path, 'client_external_links')
+                ordered = sorted(current, key=lambda row: (row['sort_index'], row['id']))
+                self.assertEqual([row['remark'] for row in ordered], intent['names'])
+                self.assertEqual([row['sort_index'] for row in ordered], list(range(len(rows))))
+                for offset in range(0, len(rows), 10):
+                    self.assertIn('HYSTERIA2', ordered[offset]['remark'].upper())
+                    self.assertIn('REALITY', ordered[offset + 1]['remark'].upper())
+                    self.assertTrue(rows[offset + 3]['baseline_reuse'])
+                originals = {row['id']: row for row in original_external}
+                updates = {row['id']: row for row in intent['update_sorts']}
+                for row in current:
+                    if row['id'] in originals:
+                        self.assertEqual(row, {**originals[row['id']],
+                                              'sort_index': updates[row['id']]['after']})
+                self.assertEqual(full_rows(path, 'clients'), original_clients)
+
+                def database_worker(op, payload=None):
+                    result = PUBLICATION.worker(path, op, payload)
+                    if result.returncode:
+                        raise RuntimeError('TEST_DATABASE_WORKER')
+                    return result.stdout
+
+                state = {**intent, 'status': 'prepared'}
+                with (patch.object(PUBLISH, 'db_read', side_effect=lambda: json.loads(
+                          database_worker('read'))),
+                      patch.object(PUBLISH, 'db_worker', side_effect=database_worker) as worker,
+                      patch.object(PUBLISH, 'backup_rows', return_value=(
+                          original_joins, original_external)),
+                      patch.object(PUBLISH, 'restart_xui'),
+                      patch.object(PUBLISH, 'wait_native_runtime'),
+                      patch.object(PUBLISH, 'state_write') as save):
+                    PUBLISH.restore_prepared(state, target)
+                    self.assertEqual(worker.call_args.args[1]['update_sorts'], intent['update_sorts'])
+                    self.assertEqual(full_rows(path, 'client_external_links'), original_external)
+                    self.assertEqual(full_rows(path, 'client_inbounds'), original_joins)
+                    self.assertEqual(full_rows(path, 'clients'), original_clients)
+                    self.assertEqual(save.call_args.args[0]['status'], 'rolled_back')
+                    worker.reset_mock()
+                    PUBLISH.restore_prepared(state, target)
+                    worker.assert_not_called()
+
+    def test_sort_compare_and_swap_failure_rolls_back_all_mutations(self):
+        rows, values = selection('both')
+        target, data, initial = PUBLICATION.fixture()
+        target.update(values)
+        _, manifest, _ = PLAN.build(values, PLAN.MAIN, rows, PLAN.shared, PLAN.profile)
+        intent = PUBLISH.plan(data, target, manifest['entries'], initial)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'x-ui.db'
+            PUBLICATION.create_db(path, data)
+            original = {table: full_rows(path, table) for table in
+                        ('clients', 'client_inbounds', 'client_external_links')}
+            wrong_sorts = [{**row, 'before': row['before'] + 100}
+                           for row in intent['update_sorts']]
+            result = PUBLICATION.worker(path, 'apply', {
+                **intent, 'update_sorts': wrong_sorts,
+                'expected': intent['before'], 'intended': intent['after']})
+            self.assertNotEqual(result.returncode, 0)
+            for table, before in original.items():
+                self.assertEqual(full_rows(path, table), before)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('UPDATE client_external_links SET sort_index=88 WHERE id=1')
+                db.commit()
+            drifted = full_rows(path, 'client_external_links')
+            result = PUBLICATION.worker(path, 'apply', {
+                **intent, 'expected': intent['before'], 'intended': intent['after']})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(full_rows(path, 'client_external_links'), drifted)
+            self.assertEqual(full_rows(path, 'client_inbounds'), original['client_inbounds'])
+
+    def test_old_saved_selection_keeps_its_publication_plan_without_sort_updates(self):
+        legacy = load('legacy_top10_fixture', 'tests/test_top10_catalog.py')
+        for mode in ('warp', 'direct', 'both'):
+            with self.subTest(mode=mode):
+                _, values = selection(mode)
+                values['TARGET_PROFILE_IDS'] = ','.join(legacy.legacy_ids(mode))
+                rows = CATALOG.select_profiles('custom', mode, values['TARGET_LABEL'],
+                                               values['TARGET_PROFILE_IDS'])
+                target, data, initial = PUBLICATION.fixture(egress=mode)
+                target.update(values)
+                _, manifest, _ = PLAN.build(values, PLAN.MAIN, rows, PLAN.shared, PLAN.profile)
+                intent = PUBLISH.plan(data, target, manifest['entries'], initial)
+                self.assertNotIn('update_sorts', intent)
+                self.assertEqual(intent['names'], [row['name'] for row in rows])
+
     def test_selection_roundtrips_as_exact_custom_ids_without_a_new_enum(self):
         for mode, count in (('warp', 10), ('direct', 10), ('both', 20)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
@@ -54,9 +167,12 @@ class Top10Integration(unittest.TestCase):
                 self.assertEqual(reloaded, rows)
                 self.assertEqual(len(reloaded), count)
                 self.assertEqual(CATALOG.PROFILE_SETS, ('basic', 'dpi', 'all', 'custom'))
-                with self.assertRaises(ValueError):
-                    INPUTS.PREFLIGHT.validate_inputs(dict(values, TARGET_PROFILE_IDS=','.join(
-                        row['id'] for row in reversed(rows))))
+                reversed_values = dict(values, TARGET_PROFILE_IDS=','.join(
+                    row['id'] for row in reversed(rows)))
+                INPUTS.PREFLIGHT.validate_inputs(reversed_values)
+                self.assertEqual(CATALOG.select_profiles(
+                    'custom', mode, values['TARGET_LABEL'],
+                    reversed_values['TARGET_PROFILE_IDS']), list(reversed(rows)))
 
     def test_runtime_reuses_only_baseline_xhttp_and_renders_exact_extra_roles(self):
         for mode, count, extra_count in (('warp', 10, 9), ('direct', 10, 9), ('both', 20, 18)):
@@ -146,6 +262,7 @@ class Top10Integration(unittest.TestCase):
 
                 restored = PUBLICATION.worker(path, 'restore', {
                     'expected': intent['after'], 'intended': intent['before'],
+                    'update_sorts': intent.get('update_sorts', []),
                     'inserted_external_ids': [row['id'] for row in intent['insert_external']],
                     'restore_joins': [row for row in data['joins']
                                       if {'client_id': row['client_id'], 'inbound_id': row['inbound_id']}
