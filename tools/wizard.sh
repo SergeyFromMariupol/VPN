@@ -133,6 +133,8 @@ wizard_reality_sni() {
 wizard_custom_profiles() {
   local selector="${1%/*}/portfolio_catalog.py" numbers chosen='' profile_count status=0
   wizard_section 'Профили' 'Ручной выбор'
+  wizard_note 'Можно выбрать отдельные профили протоколов и транспортов в любом сочетании.'
+  wizard_note '↑/↓ — перейти, пробел — отметить, Enter — подтвердить; без списка — номера и диапазоны.'
   if [[ ${TERM:-dumb} != dumb ]]; then
     chosen=$(LC_ALL=C.UTF-8 python3 -B "$selector" --checklist --egress "$TARGET_EGRESS_MODE" \
       3>&1 </dev/tty >/dev/tty) || status=$?
@@ -154,6 +156,14 @@ wizard_custom_profiles() {
     done
   fi
   IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
+  wizard_note "Выбрано профилей: $profile_count."
+}
+
+wizard_top10_profiles() {
+  local selector="${1%/*}/portfolio_catalog.py" chosen profile_count
+  chosen=$(python3 -B "$selector" --preset top10 --egress "$TARGET_EGRESS_MODE") || return 1
+  IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
+  TARGET_PROFILE_SET=custom
   wizard_note "Выбрано профилей: $profile_count."
 }
 
@@ -191,22 +201,26 @@ collect_vpn_parameters() {
   printf 'Показано число профилей для выбранного выхода.\n'
   if [[ $TARGET_EGRESS_MODE == both ]]; then
     printf '  %b1. Основные 6%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b2. Для DPI/ТСПУ — 98%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b3. Все проверенные рабочие — 146%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b2. Рекомендуемые для ТСПУ — 20%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b3. Для DPI/ТСПУ — 98%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b4. Все проверенные рабочие — 146%b\n' "$wizard_yellow" "$wizard_reset"
   else
     printf '  %b1. Основные 3%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b2. Для DPI/ТСПУ — 49%b\n' "$wizard_yellow" "$wizard_reset"
-    printf '  %b3. Все проверенные рабочие — 73%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b2. Рекомендуемые для ТСПУ — 10%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b3. Для DPI/ТСПУ — 49%b\n' "$wizard_yellow" "$wizard_reset"
+    printf '  %b4. Все проверенные рабочие — 73%b\n' "$wizard_yellow" "$wizard_reset"
   fi
-  printf '  %b4. Выбрать профили вручную%b\n\n' "$wizard_yellow" "$wizard_reset"
+  printf '  %b5. Выбрать профили вручную%b\n\n' "$wizard_yellow" "$wizard_reset"
+  wizard_note 'Вручную можно выбрать отдельные протоколы и транспорты.'
   while true; do
     wizard_read profile_choice 'Выберите набор [1]: ' 1 || return 1
     case "$profile_choice" in
       1) TARGET_PROFILE_SET=basic; break;;
-      2) TARGET_PROFILE_SET=dpi; break;;
-      3) TARGET_PROFILE_SET=all; break;;
-      4) wizard_custom_profiles "$verifier" || return 1; TARGET_PROFILE_SET=custom; break;;
-      *) wizard_error 'Выберите 1, 2, 3 или 4.';;
+      2) wizard_top10_profiles "$verifier" || return 1; break;;
+      3) TARGET_PROFILE_SET=dpi; break;;
+      4) TARGET_PROFILE_SET=all; break;;
+      5) wizard_custom_profiles "$verifier" || return 1; TARGET_PROFILE_SET=custom; break;;
+      *) wizard_error 'Выберите 1, 2, 3, 4 или 5.';;
     esac
   done
 

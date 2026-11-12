@@ -21,6 +21,21 @@ PROFILE_SETS = ("basic", "dpi", "all", "custom")
 EGRESS_MODES = ("warp", "direct", "both")
 EGRESS_LABELS = {"warp": "☁️ Cloudflare", "direct": "🖥️ IP сервера"}
 TIER_PRIORITY = {"A": 0, "B1": 1, "B2": 2, "C": 3, "D": 4, "E": 5}
+# A balanced subset of the historical mobile-tested recipes, not a measured
+# ranking or a guarantee against future filtering. Persist its explicit IDs
+# through the existing custom selection contract.
+TOP10_STEMS = (
+    "vless-reality-xhttp-packet-up",
+    "vless-reality-xhttp-auto",
+    "vless-reality-xhttp-stream-up",
+    "vless-reality-xhttp-packet-up-mlkem",
+    "trojan-reality-xhttp-auto",
+    "trojan-reality-xhttp-packet-up",
+    "hysteria2-tls-hysteria-salamander",
+    "vless-tls-xhttp-auto",
+    "vless-tls-xhttp-packet-up",
+    "vless-tls-xhttp-stream-one",
+)
 BASELINE_SUFFIXES = {
     "vless-reality-grpc-warp": "REALITY",
     "hysteria2-tls-hysteria-warp": "HYSTERIA2",
@@ -152,6 +167,15 @@ def select_profiles(profile_set: str, egress_mode: str, target_label: str,
     return result
 
 
+def select_top10(egress: str, label: str = "VPN") -> list[dict]:
+    """Resolve the reviewed preset into canonical custom rows for this exit."""
+    if egress not in EGRESS_MODES:
+        raise ValueError(f"Unknown egress mode: {egress}")
+    roles = ("warp", "direct") if egress == "both" else (egress,)
+    ids = ",".join(f"{stem}-{role}" for stem in TOP10_STEMS for role in roles)
+    return select_profiles("custom", egress, label, ids)
+
+
 def select_numbers(egress_mode: str, selection: str) -> list[dict]:
     """Resolve numbers and inclusive ranges against the displayed menu."""
     rows = select_profiles("all", egress_mode, "VPN")
@@ -273,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--set", dest="profile_set", choices=PROFILE_SETS)
+    action.add_argument("--preset", choices=("top10",))
     action.add_argument("--menu", action="store_true")
     action.add_argument("--choose")
     action.add_argument("--checklist", action="store_true")
@@ -289,6 +314,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {number:3}. {row['name'].removeprefix('VPN · ')}")
         elif args.choose is not None:
             write_selection(select_numbers(args.egress, args.choose), sys.stdout)
+        elif args.preset == "top10":
+            label = args.label if args.label is not None else "VPN"
+            write_selection(select_top10(args.egress, label), sys.stdout)
         elif args.checklist:
             return checklist(args.egress)
         else:
