@@ -1,7 +1,9 @@
 """Reviewed compact recipes resolve to stable IDs in the custom contract."""
 import importlib.util
+import json
 import os
 from pathlib import Path
+from runpy import run_path
 import subprocess
 import sys
 import unittest
@@ -12,6 +14,31 @@ SPEC = importlib.util.spec_from_file_location("top10_catalog_test", ROOT / "tool
 C = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(C)
 EXPECTED_STEMS = (
+    "hysteria2-tls-hysteria-salamander",
+    "vless-reality-xhttp-auto",
+    "vless-reality-xhttp-stream-up",
+    "vless-reality-xhttp-packet-up",
+    "trojan-reality-xhttp-auto",
+    "trojan-reality-xhttp-packet-up",
+    "vless-reality-xhttp-packet-up-mlkem",
+    "vless-tls-xhttp-auto",
+    "vless-tls-xhttp-packet-up",
+    "vless-tls-xhttp-stream-one",
+)
+SIGNATURE_KEYS = ("protocol", "transport", "security", "xhttp_mode", "flow", "encryption", "cipher", "obfs")
+EXPECTED_SIGNATURES = (
+    ("hysteria2", "hysteria", "tls", None, "", "none", "salamander", "salamander"),
+    ("vless", "xhttp", "reality", "auto", "", "none", "none", "none"),
+    ("vless", "xhttp", "reality", "stream-up", "", "none", "none", "none"),
+    ("vless", "xhttp", "reality", "packet-up", "", "none", "none", "none"),
+    ("trojan", "xhttp", "reality", "auto", "", "none", "none", "none"),
+    ("trojan", "xhttp", "reality", "packet-up", "", "none", "none", "none"),
+    ("vless", "xhttp", "reality", "packet-up", "", "mlkem", "mlkem", "none"),
+    ("vless", "xhttp", "tls", "auto", "", "none", "none", "none"),
+    ("vless", "xhttp", "tls", "packet-up", "", "none", "none", "none"),
+    ("vless", "xhttp", "tls", "stream-one", "", "none", "none", "none"),
+)
+LEGACY_STEMS = (
     "vless-reality-xhttp-packet-up",
     "vless-reality-xhttp-auto",
     "vless-reality-xhttp-stream-up",
@@ -23,28 +50,18 @@ EXPECTED_STEMS = (
     "vless-tls-xhttp-packet-up",
     "vless-tls-xhttp-stream-one",
 )
-SIGNATURE_KEYS = ("protocol", "transport", "security", "xhttp_mode", "flow", "encryption", "cipher", "obfs")
-EXPECTED_SIGNATURES = (
-    ("vless", "xhttp", "reality", "packet-up", "", "none", "none", "none"),
-    ("vless", "xhttp", "reality", "auto", "", "none", "none", "none"),
-    ("vless", "xhttp", "reality", "stream-up", "", "none", "none", "none"),
-    ("vless", "xhttp", "reality", "packet-up", "", "mlkem", "mlkem", "none"),
-    ("trojan", "xhttp", "reality", "auto", "", "none", "none", "none"),
-    ("trojan", "xhttp", "reality", "packet-up", "", "none", "none", "none"),
-    ("hysteria2", "hysteria", "tls", None, "", "none", "salamander", "salamander"),
-    ("vless", "xhttp", "tls", "auto", "", "none", "none", "none"),
-    ("vless", "xhttp", "tls", "packet-up", "", "none", "none", "none"),
-    ("vless", "xhttp", "tls", "stream-one", "", "none", "none", "none"),
-)
 
 
 def expected_ids(egress):
+    roles = ("warp", "direct") if egress == "both" else (egress,)
+    return [stem + "-" + role for role in roles for stem in EXPECTED_STEMS]
+
+
+def legacy_ids(egress):
     if egress != "both":
-        return [stem + "-" + egress for stem in EXPECTED_STEMS]
-    # The existing catalog keeps the native baseline first, then paired extras
-    # in tier/catalog order; it does not regroup complete lists by exit.
-    return [EXPECTED_STEMS[0] + "-" + role for role in ("warp", "direct")] + [
-        stem + "-" + role for stem in EXPECTED_STEMS[1:] for role in ("warp", "direct")]
+        return [stem + "-" + egress for stem in LEGACY_STEMS]
+    return [LEGACY_STEMS[0] + "-" + role for role in ("warp", "direct")] + [
+        stem + "-" + role for stem in LEGACY_STEMS[1:] for role in ("warp", "direct")]
 
 
 class Top10CatalogTests(unittest.TestCase):
@@ -86,14 +103,84 @@ class Top10CatalogTests(unittest.TestCase):
         renamed[0]["stream_settings_template"]["network"] = "mutated fixture"
         self.assertEqual(C.select_top10("both"), original)
 
-    def test_custom_roundtrip_and_shared_catalog_order(self):
+    def test_custom_roundtrip_preserves_explicit_order_and_separate_exit_blocks(self):
         for egress in C.EGRESS_MODES:
             rows = C.select_top10(egress, "Fixture")
-            ids = ",".join(row["id"] for row in reversed(rows))
+            ids = ",".join(row["id"] for row in rows)
             self.assertEqual(C.select_profiles("custom", egress, "Fixture", ids), rows)
-            selected = {row["id"] for row in rows}
-            self.assertEqual([row for row in C.select_profiles("all", egress, "Fixture") if row["id"] in selected], rows)
+            reversed_ids = ",".join(row["id"] for row in reversed(rows))
+            self.assertEqual(C.select_profiles("custom", egress, "Fixture", reversed_ids), list(reversed(rows)))
             self.assertEqual(C.select_top10(egress, "Fixture"), rows)
+        both = C.select_top10("both")
+        self.assertEqual([row["egress"] for row in both], ["warp"] * 10 + ["direct"] * 10)
+        for offset in (0, 10):
+            self.assertEqual(both[offset]["protocol"], "hysteria2")
+            self.assertEqual(both[offset + 1]["security"], "reality")
+            self.assertEqual(both[offset + 1]["xhttp_mode"], "auto")
+
+    def test_saved_v152_csv_retains_byte_identical_old_rows_in_all_exit_modes(self):
+        self.assertEqual(set(EXPECTED_STEMS), set(LEGACY_STEMS))
+        for egress in C.EGRESS_MODES:
+            with self.subTest(egress=egress):
+                ids = legacy_ids(egress)
+                wanted = set(ids)
+                old_rows = [row for row in C.select_profiles("all", egress, "Saved label") if row["id"] in wanted]
+                self.assertEqual([row["id"] for row in old_rows], ids)
+                restored = C.select_profiles("custom", egress, "Saved label", ",".join(ids))
+                self.assertEqual(json.dumps(restored, ensure_ascii=False, separators=(",", ":")).encode(),
+                                 json.dumps(old_rows, ensure_ascii=False, separators=(",", ":")).encode())
+                self.assertNotEqual(ids, expected_ids(egress))
+
+    def test_public_native_predicate_matches_every_baseline_and_egress_mode(self):
+        for egress in C.EGRESS_MODES:
+            native_role = "direct" if egress == "direct" else "warp"
+            expected = {"vless-reality-grpc-" + native_role, "hysteria2-tls-hysteria-" + native_role}
+            rows = C.select_profiles("all", "both", "Fixture")
+            self.assertEqual({row["id"] for row in rows if C.is_public_native(row, egress)}, expected)
+            self.assertFalse(any(C.is_public_native(row, egress) for row in C.select_top10(egress)))
+        with self.assertRaises(ValueError):
+            C.is_public_native(C.select_top10("direct")[0], "invalid")
+
+    def test_arbitrary_all_external_csv_keeps_its_own_order(self):
+        cases = {
+            "warp": ["vless-tls-xhttp-stream-one-warp", "vless-reality-xhttp-packet-up-warp", "hysteria2-tls-hysteria-salamander-warp"],
+            "direct": ["hysteria2-tls-hysteria-salamander-direct", "vless-tls-xhttp-stream-one-direct", "vless-reality-xhttp-packet-up-direct"],
+            "both": ["hysteria2-tls-hysteria-direct", "vless-tls-xhttp-stream-one-warp", "vless-reality-grpc-direct", "vless-reality-xhttp-packet-up-direct"],
+        }
+        validate = run_path(str(ROOT / "tools/preflight.py"))["validate_profile_selection"]
+        for egress, ids in cases.items():
+            with self.subTest(egress=egress):
+                csv = ",".join(ids)
+                rows = C.select_profiles("custom", egress, "Fixture", csv)
+                self.assertEqual([row["id"] for row in rows], ids)
+                self.assertFalse(any(C.is_public_native(row, egress) for row in rows))
+                validate(dict(TARGET_PROFILE_SET="custom", TARGET_EGRESS_MODE=egress, TARGET_PROFILE_IDS=csv))
+
+    def test_native_containing_custom_retains_canonical_order_and_existing_preflight_guard(self):
+        cases = {
+            "warp": ["vless-tls-xhttp-stream-one-warp", "vless-reality-grpc-warp"],
+            "direct": ["vless-tls-xhttp-stream-one-direct", "hysteria2-tls-hysteria-direct"],
+            "both": ["vless-tls-xhttp-stream-one-direct", "vless-reality-grpc-direct", "hysteria2-tls-hysteria-warp"],
+        }
+        validate = run_path(str(ROOT / "tools/preflight.py"))["validate_profile_selection"]
+        for egress, ids in cases.items():
+            with self.subTest(egress=egress):
+                csv = ",".join(ids)
+                rows = C.select_profiles("custom", egress, "Fixture", csv)
+                expected = [row for row in C.select_profiles("all", egress, "Fixture") if row["id"] in ids]
+                self.assertEqual(rows, expected)
+                self.assertTrue(any(C.is_public_native(row, egress) for row in rows))
+                self.assertNotEqual([row["id"] for row in rows], ids)
+                env = dict(TARGET_PROFILE_SET="custom", TARGET_EGRESS_MODE=egress, TARGET_PROFILE_IDS=csv)
+                with self.assertRaisesRegex(ValueError, "catalog order"):
+                    validate(env)
+                validate(dict(env, TARGET_PROFILE_IDS=",".join(row["id"] for row in rows)))
+
+    def test_manual_number_selection_remains_in_global_catalog_order(self):
+        for egress in C.EGRESS_MODES:
+            menu = C.select_profiles("all", egress, "VPN")
+            chosen = C.select_numbers(egress, f"{len(menu)}, 2, 1")
+            self.assertEqual([row["id"] for row in chosen], [menu[index]["id"] for index in (0, 1, len(menu) - 1)])
 
     def test_preset_cli_without_label_emits_existing_three_token_selection(self):
         environment = {key: value for key, value in os.environ.items() if key != "TARGET_LABEL"}

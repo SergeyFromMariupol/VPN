@@ -17,6 +17,7 @@ TOP10_STEMS = _selector.TOP10_STEMS
 load_catalog = _selector.load_catalog
 main = _selector.main
 profile_name = _selector.profile_name
+is_public_native = _selector.is_public_native
 select_profiles = _selector.select_profiles
 select_top10 = _selector.select_top10
 select_numbers = _selector.select_numbers
