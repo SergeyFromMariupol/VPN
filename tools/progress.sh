@@ -55,7 +55,8 @@ _installer_progress_phases() {
     done
     phases=("${with_decoy[@]}")
   fi
-  if [[ ${TARGET_PROFILE_SET:-basic} != basic || ${TARGET_EGRESS_MODE:-both} != both ]]; then
+  if [[ ${TARGET_PROFILE_SET:-basic} != basic || ${TARGET_EGRESS_MODE:-both} != both ||
+        ${TARGET_PROFILE_ORDER:-legacy} == priority ]]; then
     phases+=(baseline-verify)
     if installer_has_extra_profiles; then phases+=(portfolio-runtime); fi
     phases+=(portfolio-publish)

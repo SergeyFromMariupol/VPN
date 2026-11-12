@@ -212,6 +212,9 @@ def validate_profile_selection(env: dict) -> None:
     egress = env.get('TARGET_EGRESS_MODE', 'both')
     profile_set = env.get('TARGET_PROFILE_SET', 'basic')
     profile_ids = env.get('TARGET_PROFILE_IDS', '')
+    profile_order = env.get('TARGET_PROFILE_ORDER', 'legacy')
+    if profile_order not in ('legacy', 'priority'):
+        raise ValueError('Invalid profile order')
     if egress not in ('warp', 'direct', 'both'):
         raise ValueError('Invalid egress mode')
     if profile_set not in ('basic', 'dpi', 'all', 'custom'):
@@ -221,7 +224,8 @@ def validate_profile_selection(env: dict) -> None:
             raise ValueError('Profile IDs require a custom selection')
         return
     selector = Path(__file__).resolve().with_name('portfolio_catalog.py')
-    rows = run_path(str(selector))['select_profiles']('custom', egress, 'selection', profile_ids)
+    rows = run_path(str(selector))['select_profiles'](
+        'custom', egress, 'selection', profile_ids, profile_order)
     if profile_ids != ','.join(row['id'] for row in rows):
         raise ValueError('Profile IDs must follow catalog order')
     expected_egress = {'warp', 'direct'} if egress == 'both' else {egress}

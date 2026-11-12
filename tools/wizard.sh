@@ -136,7 +136,7 @@ wizard_custom_profiles() {
   wizard_note 'Можно выбрать отдельные профили протоколов и транспортов в любом сочетании.'
   wizard_note '↑/↓ — перейти, пробел — отметить, Enter — подтвердить; без списка — номера и диапазоны.'
   if [[ ${TERM:-dumb} != dumb ]]; then
-    chosen=$(LC_ALL=C.UTF-8 python3 -B "$selector" --checklist --egress "$TARGET_EGRESS_MODE" \
+    chosen=$(LC_ALL=C.UTF-8 python3 -B "$selector" --checklist --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER" \
       3>&1 </dev/tty >/dev/tty) || status=$?
     case $status in
       0) ;;
@@ -145,11 +145,11 @@ wizard_custom_profiles() {
     esac
   fi
   if [[ -z $chosen ]]; then
-    python3 -B "$selector" --menu --egress "$TARGET_EGRESS_MODE" || return 1
+    python3 -B "$selector" --menu --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER" || return 1
     wizard_note 'Введите номера через пробел или запятую. Диапазон можно указать как 1-3.'
     while true; do
       wizard_read numbers 'Номера профилей: ' || return 1
-      if chosen=$(python3 -B "$selector" --choose="$numbers" --egress "$TARGET_EGRESS_MODE" 2>/dev/null); then
+      if chosen=$(python3 -B "$selector" --choose="$numbers" --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER" 2>/dev/null); then
         break
       fi
       wizard_error 'Выберите хотя бы один профиль. Проверьте номера, диапазоны и повторы.'
@@ -161,7 +161,7 @@ wizard_custom_profiles() {
 
 wizard_top10_profiles() {
   local selector="${1%/*}/portfolio_catalog.py" chosen profile_count
-  chosen=$(python3 -B "$selector" --preset top10 --egress "$TARGET_EGRESS_MODE") || return 1
+  chosen=$(python3 -B "$selector" --preset top10 --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER") || return 1
   IFS=" " read -r TARGET_EGRESS_MODE TARGET_PROFILE_IDS profile_count <<<"$chosen"
   TARGET_PROFILE_SET=custom
   wizard_note "Выбрано профилей: $profile_count."
@@ -172,6 +172,7 @@ collect_vpn_parameters() {
   wizard_init
   TARGET_TLS_MODE=letsencrypt
   TARGET_PROFILE_IDS=''
+  TARGET_PROFILE_ORDER=priority
   wizard_header "$1"
   if [[ -n ${SSH_CONNECTION:-} ]]; then
     read -r _ _ TARGET_IPV4 TARGET_SSH_PORT <<<"$SSH_CONNECTION"

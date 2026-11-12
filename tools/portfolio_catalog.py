@@ -13,11 +13,13 @@ _spec.loader.exec_module(_selector)
 
 EGRESS_MODES = _selector.EGRESS_MODES
 PROFILE_SETS = _selector.PROFILE_SETS
+PROFILE_ORDERS = _selector.PROFILE_ORDERS
 TOP10_STEMS = _selector.TOP10_STEMS
 load_catalog = _selector.load_catalog
 main = _selector.main
 profile_name = _selector.profile_name
 is_public_native = _selector.is_public_native
+priority_profiles = _selector.priority_profiles
 select_profiles = _selector.select_profiles
 select_top10 = _selector.select_top10
 select_numbers = _selector.select_numbers

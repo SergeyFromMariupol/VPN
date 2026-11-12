@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Publish the selected 3X-UI subscription after the baseline is accepted.
 
-Only the owner's subscription rows and baseline client/inbound joins are
-changed. Credentials and share links travel through private files and worker
+Only managed subscription rows, baseline client/inbound joins and native
+subscription visibility flags are changed. Credentials and links travel through private files and worker
 stdin; command output contains counts and fixed error codes only.
 """
 
@@ -77,11 +77,19 @@ def insert(db,table,row):
             ','.join('?' for _ in columns)+')',[row[key] for key in columns])
 def check(db):
  assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+def visibility(db):
+ db.row_factory=sqlite3.Row
+ columns={r['name'] for r in db.execute('PRAGMA table_info(inbounds)')}
+ assert {'id','port','protocol','enable','exclude_from_sub'} <= columns
+ return [dict(r) for r in db.execute(
+  'SELECT id,port,protocol,enable,exclude_from_sub FROM inbounds ORDER BY id')]
 op=sys.argv[1]
-if op in ('read','backup'):
+if op in ('read','backup','visibility'):
  with closing(sqlite3.connect('file:'+DB+'?mode=ro',uri=True,timeout=20)) as db:
   check(db)
-  if op=='backup':
+  if op=='visibility':
+   sys.stdout.buffer.write(json.dumps(visibility(db),separators=(',',':')).encode('utf-8'))
+  elif op=='backup':
    with closing(sqlite3.connect(':memory:')) as copy:
     db.backup(copy)
     check(copy)
@@ -96,6 +104,8 @@ else:
   db.execute('BEGIN IMMEDIATE')
   check(db)
   assert stable(db)==p['expected']
+  if 'expected_visibility' in p:
+   assert visibility(db)==p['expected_visibility']
   if op=='apply':
    for item in p['delete_joins']:
     assert db.execute('DELETE FROM client_inbounds WHERE client_id=? AND inbound_id=?',
@@ -118,7 +128,14 @@ else:
    expected,wanted=(after,before) if op=='restore' else (before,after)
    assert db.execute('UPDATE client_external_links SET sort_index=? WHERE id=? AND sort_index=?',
                      (wanted,item['id'],expected)).rowcount==1
+  for item in p.get('update_visibility',[]):
+   before,after=item['before'],item['after']
+   expected,wanted=(after,before) if op=='restore' else (before,after)
+   assert db.execute('UPDATE inbounds SET exclude_from_sub=? WHERE id=? AND exclude_from_sub=?',
+                     (wanted,item['id'],expected)).rowcount==1
   assert stable(db)==p['intended']
+  if 'intended_visibility' in p:
+   assert visibility(db)==p['intended_visibility']
   check(db)
   db.commit()
   check(db)
@@ -200,9 +217,11 @@ def target_and_access():
     target.setdefault('TARGET_EGRESS_MODE', 'both')
     target.setdefault('TARGET_PROFILE_SET', 'basic')
     target.setdefault('TARGET_PROFILE_IDS', '')
+    target.setdefault('TARGET_PROFILE_ORDER', 'legacy')
     need(target['TARGET_TLS_MODE'] in ('letsencrypt', 'none') and
          target['TARGET_EGRESS_MODE'] in ('warp', 'direct', 'both') and
          target['TARGET_PROFILE_SET'] in ('basic', 'dpi', 'all', 'custom') and
+         target['TARGET_PROFILE_ORDER'] in ('legacy', 'priority') and
          bool(target['TARGET_PROFILE_IDS']) == (target['TARGET_PROFILE_SET'] == 'custom') and
          (target['TARGET_TLS_MODE'] == 'letsencrypt' or
           target['TARGET_PROFILE_SET'] == 'basic'), 'TARGET_SELECTION')
@@ -237,6 +256,31 @@ def db_read():
     data = json.loads(db_worker('read'))
     need(set(data) == {'joins', 'external', 'clients'}, 'DATABASE_READ')
     return data
+
+
+def db_visibility():
+    data = json.loads(db_worker('visibility'))
+    need(isinstance(data, list) and all(
+        isinstance(row, dict) and set(row) == {'id', 'port', 'protocol', 'enable', 'exclude_from_sub'}
+        and type(row['id']) is int and type(row['port']) is int
+        and row['enable'] in (0, 1) and row['exclude_from_sub'] in (0, 1)
+        for row in data), 'DATABASE_VISIBILITY')
+    return data
+
+
+def visibility_payload(state, restore=False):
+    if 'visibility_before' not in state:
+        need('visibility_after' not in state and 'update_visibility' not in state,
+             'VISIBILITY_JOURNAL')
+        return {}
+    return {'expected_visibility': state['visibility_after'] if restore else state['visibility_before'],
+            'intended_visibility': state['visibility_before'] if restore else state['visibility_after'],
+            'update_visibility': state['update_visibility']}
+
+
+def verify_visibility(state, stage):
+    if 'visibility_before' in state:
+        need(db_visibility() == state['visibility_' + stage], 'PUBLISHED_VISIBILITY')
 
 
 def restart_xui(target):
@@ -417,7 +461,17 @@ def baseline_db(data, target):
 
 def custom_rows(target):
     return select_profiles('custom', target['TARGET_EGRESS_MODE'], target['TARGET_LABEL'],
-                           target['TARGET_PROFILE_IDS'])
+                           target['TARGET_PROFILE_IDS'],
+                           profile_order=target.get('TARGET_PROFILE_ORDER', 'legacy'))
+
+
+def priority_rows(target):
+    rows = select_profiles(target['TARGET_PROFILE_SET'], target['TARGET_EGRESS_MODE'],
+                           target['TARGET_LABEL'], target.get('TARGET_PROFILE_IDS', ''),
+                           profile_order='priority')
+    if target['TARGET_TLS_MODE'] == 'none':
+        rows = [row for row in rows if row['protocol'] != 'hysteria2']
+    return rows
 
 
 def selected_recipe(target):
@@ -428,7 +482,8 @@ def selected_recipe(target):
         return []
     if profile_set == 'custom':
         return [row for row in custom_rows(target) if not row['baseline_reuse']]
-    rows = select_profiles(profile_set, mode, target['TARGET_LABEL'])
+    rows = select_profiles(profile_set, mode, target['TARGET_LABEL'],
+                           profile_order=target.get('TARGET_PROFILE_ORDER', 'legacy'))
     expected = {'basic': 3, 'dpi': 49, 'all': 73}[profile_set]
     if mode == 'both':
         expected *= 2
@@ -472,12 +527,88 @@ def read_extras(target, selected):
     return manifest['entries'], digest(raw)
 
 
+def priority_plan(data, target, extras, initial, owner, by_id):
+    """Publish every selected link externally while keeping its runtime identity.
+
+    Native inbounds remain operational; only their subscription export is hidden.
+    Captured native links and retained external links are never regenerated.
+    """
+    rows = priority_rows(target)
+    recipes = [row for row in rows if not row['baseline_reuse']]
+    need([entry['id'] for entry in extras] == [row['id'] for row in recipes] and
+         [entry['remark'] for entry in extras] == [row['name'] for row in recipes],
+         'PRIORITY_PUBLIC_ORDER')
+    before_visibility = data.get('visibility')
+    need(isinstance(before_visibility, list), 'BASE_VISIBILITY_MISSING')
+    expected = {(443, 'vless', 1), (8443, 'vless', 0)}
+    if target['TARGET_TLS_MODE'] == 'letsencrypt':
+        expected.add((443, 'hysteria', 1))
+    need(len(before_visibility) == len(expected) and
+         len({row['id'] for row in before_visibility}) == len(expected) and
+         {(row['port'], row['protocol'], row['enable']) for row in before_visibility} == expected and
+         all(type(row['id']) is int and row['id'] > 0 and row['exclude_from_sub'] == 0
+             for row in before_visibility), 'BASE_VISIBILITY_SHAPE')
+    update_visibility = [{'id': row['id'], 'before': 0, 'after': 1}
+                         for row in before_visibility if row['port'] == 443]
+    hidden = {row['id'] for row in update_visibility}
+    after_visibility = [{**row, 'exclude_from_sub': 1 if row['id'] in hidden else 0}
+                        for row in before_visibility]
+    selected_names = [row['name'] for row in rows]
+    selected_baseline = {row['name'] for row in rows if row['baseline_reuse']}
+    baseline_by_name = dict(zip(baseline_names(target), initial, strict=True))
+    extra_by_id = {entry['id']: entry for entry in extras}
+    selected_uris = [baseline_by_name[row['name']] if row['baseline_reuse'] else
+                     extra_by_id[row['id']]['uri'] for row in rows]
+    need(len(selected_uris) == len(set(selected_uris)) and
+         len(selected_names) == len(set(selected_names)), 'SELECTED_DUPLICATE')
+    clients = baseline_client_names(target)
+    delete_joins = [{'client_id': row['client_id'], 'inbound_id': row['inbound_id']}
+                    for row in data['joins']
+                    if clients[by_id[row['client_id']]] not in selected_baseline]
+    delete_external = [row['id'] for row in data['external']
+                       if row['remark'] not in selected_baseline]
+    retained = {row['remark']: row for row in data['external']
+                if row['id'] not in delete_external}
+    positions = {name: index for index, name in enumerate(selected_names)}
+    update_sorts = [{'id': row['id'], 'before': row['sort_index'],
+                     'after': positions[row['remark']]}
+                    for row in retained.values() if row['sort_index'] != positions[row['remark']]]
+    new_links = [(row['name'], uri) for row, uri in zip(rows, selected_uris, strict=True)
+                 if row['name'] not in retained]
+    max_id = max(row['id'] for row in data['external'])
+    now = int(time.time() * 1000)
+    insert_external = [
+        {'id': max_id + index + 1, 'client_id': owner, 'kind': 'link',
+         'value': uri, 'remark': name, 'enable': 1, 'expiry_time': 0,
+         'name_prefix': '', 'sort_index': positions[name], 'created_at': now + index,
+         'last_fetch_at': 0, 'last_fetch_error': ''}
+        for index, (name, uri) in enumerate(new_links)]
+    after = {
+        'joins': [row for row in data['joins']
+                  if {'client_id': row['client_id'], 'inbound_id': row['inbound_id']} not in delete_joins],
+        'external': sorted(
+            [{**row, 'sort_index': positions[row['remark']]} for row in retained.values()] +
+            [{key: row[key] for key in STABLE_EXTERNAL} for row in insert_external],
+            key=lambda row: (row['sort_index'], row['id']))}
+    need([row['remark'] for row in after['external']] == selected_names,
+         'PRIORITY_EXTERNAL_ORDER')
+    return {'before': {'joins': data['joins'], 'external': data['external']},
+            'after': after, 'delete_joins': delete_joins, 'delete_external': delete_external,
+            'insert_external': insert_external, 'update_sorts': update_sorts,
+            'visibility_before': before_visibility, 'visibility_after': after_visibility,
+            'update_visibility': update_visibility,
+            'uri_hashes': [digest(canonical(uri_signature(uri))) for uri in selected_uris],
+            'names': selected_names}
+
+
 def plan(data, target, extras, initial):
     owner, by_id = baseline_db(data, target)
     baseline_clients = baseline_client_names(target)
     names = list(baseline_clients.values())
     need(len(initial) == len(names) and [uri_name(uri) for uri in initial] == names,
          'BASE_PUBLIC_ORDER')
+    if target.get('TARGET_PROFILE_ORDER', 'legacy') == 'priority':
+        return priority_plan(data, target, extras, initial, owner, by_id)
     mode = target['TARGET_EGRESS_MODE']
     custom = target['TARGET_PROFILE_SET'] == 'custom'
     if custom:
@@ -579,6 +710,10 @@ def backup_rows(state):
         need(copy.execute('PRAGMA quick_check').fetchone()[0] == 'ok', 'SNAPSHOT_INTEGRITY')
         joins = [dict(row) for row in copy.execute('SELECT * FROM client_inbounds ORDER BY client_id,inbound_id')]
         external = [dict(row) for row in copy.execute('SELECT * FROM client_external_links ORDER BY id')]
+        if 'visibility_before' in state:
+            visibility = [dict(row) for row in copy.execute(
+                'SELECT id,port,protocol,enable,exclude_from_sub FROM inbounds ORDER BY id')]
+            need(visibility == state['visibility_before'], 'SNAPSHOT_VISIBILITY')
     stable_ext = [{key: row[key] for key in STABLE_EXTERNAL} for row in external]
     stable_ext.sort(key=lambda row: (row['sort_index'], row['id']))
     need({'joins': joins, 'external': stable_ext} == state['before'], 'SNAPSHOT_BASELINE')
@@ -605,15 +740,20 @@ def state_matches_target(state, target):
     return (state.get('target') == target['TARGET_IPV4'] and
             state.get('egress') == target['TARGET_EGRESS_MODE'] and
             state.get('profile_set') == target['TARGET_PROFILE_SET'] and
+            state.get('profile_order', 'legacy') == target.get('TARGET_PROFILE_ORDER', 'legacy') and
             state.get('profile_ids', '') == target.get('TARGET_PROFILE_IDS', ''))
 
 
 def verify_public(state, target, url):
-    if target['TARGET_PROFILE_SET'] == 'custom':
+    if target.get('TARGET_PROFILE_ORDER', 'legacy') == 'priority':
+        need(state['names'] == [row['name'] for row in priority_rows(target)], 'PUBLISHED_SELECTION')
+        need('visibility_before' in state, 'PUBLISHED_VISIBILITY_JOURNAL')
+    elif target['TARGET_PROFILE_SET'] == 'custom':
         need(state['names'] == [row['name'] for row in custom_rows(target)], 'PUBLISHED_SELECTION')
     current = db_read()
     need({'joins': current['joins'], 'external': current['external']} == state['after'],
          'PUBLISHED_DATABASE')
+    verify_visibility(state, 'after')
     wait_native_runtime(target)
     if state['manifest_sha256'] is not None:
         private_dir(EXTRAS.parent)
@@ -631,11 +771,13 @@ def restore_prepared(state, target):
     current = db_read()
     present = {'joins': current['joins'], 'external': current['external']}
     if present == state['before']:
+        verify_visibility(state, 'before')
         restart_xui(target)
         wait_native_runtime(target, mode=baseline_mode)
         state_write({**state, 'status': 'rolled_back'})
         return
     need(present == state['after'], 'RECOVERY_FOREIGN_DRIFT')
+    verify_visibility(state, 'after')
     joins, external = backup_rows(state)
     restore_joins = [row for row in joins
                      if {'client_id': row['client_id'], 'inbound_id': row['inbound_id']}
@@ -644,13 +786,15 @@ def restore_prepared(state, target):
     payload = {'expected': state['after'], 'intended': state['before'],
                'inserted_external_ids': [row['id'] for row in state['insert_external']],
                'restore_joins': restore_joins, 'restore_external': restore_external,
-               'update_sorts': state.get('update_sorts', [])}
+               'update_sorts': state.get('update_sorts', []),
+               **visibility_payload(state, restore=True)}
     need(db_worker('restore', payload) == b'OK', 'ROLLBACK_WORKER')
     restart_xui(target)
     wait_native_runtime(target, mode=baseline_mode)
     current = db_read()
     need({'joins': current['joins'], 'external': current['external']} == state['before'],
          'ROLLBACK_READBACK')
+    verify_visibility(state, 'before')
     state_write({**state, 'status': 'rolled_back'})
 
 
@@ -665,6 +809,8 @@ def apply(target, url):
         if old['status'] == 'prepared':
             restore_prepared(old, target)
     data = db_read()
+    if target.get('TARGET_PROFILE_ORDER', 'legacy') == 'priority':
+        data['visibility'] = db_visibility()
     baseline_db(data, target)
     initial = feeds(url)
     recipes = selected_recipe(target)
@@ -679,6 +825,8 @@ def apply(target, url):
              'backup': str(backup), 'backup_sha256': backup_sha, **intent}
     if target['TARGET_PROFILE_SET'] == 'custom':
         state['profile_ids'] = target['TARGET_PROFILE_IDS']
+    if target.get('TARGET_PROFILE_ORDER', 'legacy') == 'priority':
+        state['profile_order'] = 'priority'
     backup_rows(state)
     state_write(state)
     try:
@@ -686,7 +834,8 @@ def apply(target, url):
                    'delete_joins': state['delete_joins'],
                    'delete_external': state['delete_external'],
                    'insert_external': state['insert_external'],
-                   'update_sorts': state.get('update_sorts', [])}
+                   'update_sorts': state.get('update_sorts', []),
+                   **visibility_payload(state)}
         need(db_worker('apply', payload) == b'OK', 'APPLY_WORKER')
         restart_xui(target)
         verify_public(state, target, url)

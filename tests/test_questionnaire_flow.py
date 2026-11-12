@@ -34,7 +34,7 @@ target = root / 'target.env'
 events = root / 'events'
 real_python = sys.executable
 keys = ('TARGET_ADDRESS_MODE', 'TARGET_TLS_MODE', 'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET',
-        'TARGET_PROFILE_IDS',
+        'TARGET_PROFILE_IDS', 'TARGET_PROFILE_ORDER',
         'TARGET_IPV4', 'TARGET_FQDN', 'TARGET_INTERFACE',
         'TARGET_SSH_PORT', 'TARGET_DEVICE_LIMIT', 'TARGET_REALITY_MODE', 'TARGET_REALITY_SNI', 'TARGET_LABEL', 'ACME_EMAIL',
         'TARGET_HAPP_PROVIDER_ID')
@@ -312,7 +312,7 @@ try:
             for key, value in settings['saved_resume_inputs'].items():
                 assert key in ('ACME_EMAIL', 'TARGET_LABEL', 'TARGET_REALITY_SNI', 'TARGET_DEVICE_LIMIT',
                                'TARGET_EGRESS_MODE', 'TARGET_PROFILE_SET', 'TARGET_TLS_MODE',
-                               'TARGET_REALITY_MODE')
+                               'TARGET_REALITY_MODE', 'TARGET_PROFILE_ORDER')
                 text, replaced = re.subn('^' + key + '=.*$',
                                          lambda match: key + '=' + shlex.quote(value), text, flags=re.M)
                 assert replaced == 1
@@ -320,7 +320,7 @@ try:
         if settings.get('legacy_without_tls_mode'):
             target.write_text(re.sub(r'^TARGET_TLS_MODE=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_selection'):
-            target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET|PROFILE_IDS)=.*\n', '', target.read_text(), flags=re.M))
+            target.write_text(re.sub(r'^TARGET_(?:EGRESS_MODE|PROFILE_SET|PROFILE_IDS|PROFILE_ORDER)=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_provider'):
             target.write_text(re.sub(r'^TARGET_HAPP_PROVIDER_ID=.*\n', '', target.read_text(), flags=re.M))
         if settings.get('legacy_without_reality_mode'):
@@ -332,7 +332,7 @@ try:
         env.update(TARGET_LABEL='caller-must-not-win', ACME_EMAIL='caller@example.invalid',
                    TARGET_TLS_MODE='none' if settings.get('legacy_without_tls_mode') else 'letsencrypt',
                    TARGET_EGRESS_MODE='direct', TARGET_PROFILE_SET='all',
-                   TARGET_PROFILE_IDS='vless-reality-grpc-direct', TARGET_HAPP_PROVIDER_ID='Caller99',
+                   TARGET_PROFILE_IDS='vless-reality-grpc-direct', TARGET_PROFILE_ORDER='priority', TARGET_HAPP_PROVIDER_ID='Caller99',
                    TARGET_REALITY_MODE='decoy', TARGET_REALITY_DEST='caller.invalid:1',
                    TARGET_REALITY_TARGET_SNI='caller.invalid')
         child = subprocess.run(['/bin/bash', str(installed / 'install.sh'), '--resume'],
@@ -441,6 +441,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assert_wizard_labels_and_no_ip(result)
         expected = dict(TARGET_ADDRESS_MODE='ip', TARGET_TLS_MODE='letsencrypt',
                         TARGET_EGRESS_MODE='both', TARGET_PROFILE_SET='basic', TARGET_PROFILE_IDS='',
+                        TARGET_PROFILE_ORDER='priority',
                         TARGET_IPV4='8.8.4.4',
                         TARGET_FQDN='8.8.4.4', TARGET_INTERFACE='enp1s0',
                         TARGET_SSH_PORT='2222', TARGET_DEVICE_LIMIT='0',
@@ -507,6 +508,7 @@ class QuestionnaireFlow(unittest.TestCase):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['persisted']['TARGET_PROFILE_ORDER'], 'priority')
         self.assertEqual(result['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
         self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
@@ -514,10 +516,12 @@ class QuestionnaireFlow(unittest.TestCase):
         phases = [event for event in result['events'] if event.startswith('PHASE:')]
         self.assertEqual(phases, ['PHASE:' + name for name in
                          ('base', 'certbot', 'tls', 'direct', 'panel', 'nginx-restart',
-                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'menu', 'verify', 'ip-address')])
+                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'baseline-verify',
+                          'portfolio-publish', 'renewal', 'menu', 'verify', 'ip-address')])
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_ORDER'], 'priority')
         self.assertEqual(result['resume']['events'], ['PHASE:verify'])
         self.assertNotIn('Выберите режим сертификата', result['resume']['output'])
 
@@ -623,8 +627,13 @@ class QuestionnaireFlow(unittest.TestCase):
                 self.assertNotIn('Выберите выход', resumed['output'])
 
     def test_custom_selection_persists_exact_ids_and_effective_egress(self):
+        select_profiles = run_path(str(ROOT / 'tools/portfolio_catalog.py'))['select_profiles']
+        menu = select_profiles('all', 'both', 'VPN', profile_order='priority')
+        baseline = {'hysteria2-tls-hysteria-warp', 'vless-reality-grpc-warp',
+                    'vless-reality-xhttp-packet-up-warp'}
+        numbers = ','.join(str(index) for index, row in enumerate(menu, 1) if row['id'] in baseline)
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1',
-                              profile_choice='5', custom_answers=['', '999', '3, 1-2'],
+                              profile_choice='5', custom_answers=['', '999', numbers],
                               resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual(result['output'].count('Номера профилей:'), 3)
@@ -634,7 +643,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertIn('Диапазон можно указать как 1-3.', result['output'])
         self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
         self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], 'warp')
-        ids = ('vless-reality-grpc-warp,hysteria2-tls-hysteria-warp,'
+        ids = ('hysteria2-tls-hysteria-warp,vless-reality-grpc-warp,'
                'vless-reality-xhttp-packet-up-warp')
         self.assertEqual(result['persisted']['TARGET_PROFILE_IDS'], ids)
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '3')
@@ -656,7 +665,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['persisted']['TARGET_PROFILE_SET'], 'custom')
         self.assertEqual(result['persisted']['TARGET_EGRESS_MODE'], 'warp')
         self.assertEqual(result['persisted']['TARGET_PROFILE_IDS'],
-                         'vless-reality-grpc-warp,vless-reality-xhttp-packet-up-warp')
+                         'hysteria2-tls-hysteria-salamander-warp,vless-reality-xhttp-stream-up-warp')
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '2')
 
     def test_custom_checklist_escape_cancels_before_persistence(self):
@@ -686,6 +695,7 @@ class QuestionnaireFlow(unittest.TestCase):
         self.assertEqual(result['resume']['phase_inputs']['TARGET_EGRESS_MODE'], 'both')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_SET'], 'basic')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_IDS'], '')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_ORDER'], 'legacy')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_HAPP_PROVIDER_ID'], '')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_MODE'], 'external')
         self.assertEqual(result['resume']['phase_inputs']['TARGET_REALITY_SNI'], 'max.ru')

@@ -333,7 +333,8 @@ def verify(target, secret, selected=False, allow_pending=False, expected=None):
         catalog = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(catalog)
         recipes = catalog.select_profiles('custom', 'direct', target['TARGET_LABEL'],
-                                          target['TARGET_PROFILE_IDS'])
+                                          target['TARGET_PROFILE_IDS'],
+                                          target.get('TARGET_PROFILE_ORDER', 'legacy'))
         names_selected = {row['name'] for row in recipes if row['baseline_reuse']}
         links = [uri for uri in links if unquote(x.query(uri)[0].fragment) in names_selected]
         x.need(len(links) == len(names_selected), 'DIRECT_SELECTED_BASELINE')

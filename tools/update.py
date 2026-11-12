@@ -239,15 +239,18 @@ def completed(layout, target):
          'HTTPS_REQUIRED')
     egress, profiles = target.get('TARGET_EGRESS_MODE', 'both'), target.get('TARGET_PROFILE_SET', 'basic')
     need(egress in ('warp', 'direct', 'both') and profiles in ('basic', 'dpi', 'all', 'custom'), 'TARGET_MODE')
+    order = target.get('TARGET_PROFILE_ORDER', 'legacy')
+    need(order in ('legacy', 'priority'), 'TARGET_PROFILE_ORDER')
     if mode != 'external': names.append('reality-decoy')
     if egress != 'direct': names += ['warp', 'dual']
     if target.get('TARGET_ADDRESS_MODE', 'domain') == 'ip': names.append('ip-address')
-    if profiles != 'basic' or egress != 'both':
+    if profiles != 'basic' or egress != 'both' or order == 'priority':
         names += ['baseline-verify', 'portfolio-publish']
         publication = layout.state / 'portfolio-publication.json'
         file_state(publication, private=True)
         info = json.loads(publication.read_bytes())
         need(info.get('status') == 'committed' and info.get('target') == target['TARGET_IPV4'], 'PUBLICATION')
+        need(info.get('profile_order', 'legacy') == order, 'PUBLICATION_ORDER')
     portfolio = layout.root / 'etc/germanyvpn-portfolio/state.json'
     if portfolio.exists():
         file_state(portfolio, private=True)

@@ -7,8 +7,8 @@ export LC_ALL=C LANG=C LANGUAGE=C
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 readonly repository='SergeyFromMariupol/VPN'
-readonly release='v1.5.3'
-readonly source_ref='99af3aa269d82d2edf8f2dbe6817be314d92107c'
+readonly release='v1.5.4'
+readonly source_ref='cf3aba4dad1ab798c9f538ba6bedfc3408c46ca0'
 readonly state='/var/lib/vpn-installer'
 readonly destination='/opt/vpn-installer'
 readonly target_file='/etc/germanyvpn-target.env'
@@ -316,11 +316,12 @@ if [[ $mode == --verify ]]; then
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
   TARGET_PROFILE_IDS=''
+  TARGET_PROFILE_ORDER=legacy
   TARGET_HAPP_PROVIDER_ID=''
   TARGET_REALITY_MODE=external
   source "$target_file"
   [[ $TARGET_TLS_MODE == letsencrypt || $TARGET_TLS_MODE == none ]] || die 'Небезопасный режим сертификата'
-  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_HAPP_PROVIDER_ID
+  export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_PROFILE_ORDER TARGET_HAPP_PROVIDER_ID
   if [[ -e $state/verify-command.log || -L $state/verify-command.log ]]; then
     [[ -f $state/verify-command.log && ! -L $state/verify-command.log &&
        $(stat -c '%u:%g:%a:%h' "$state/verify-command.log") == 0:0:600:1 ]] || die 'Небезопасный журнал проверки VPN'
@@ -339,6 +340,7 @@ if [[ $mode == --resume ]]; then
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
   TARGET_PROFILE_IDS=''
+  TARGET_PROFILE_ORDER=legacy
   TARGET_HAPP_PROVIDER_ID=''
   TARGET_REALITY_MODE=external
   source "$target_file"
@@ -356,7 +358,7 @@ else
   source "$source_dir/tools/wizard.sh"
   collect_vpn_parameters "$release" "$source_dir/tools/preflight.py"
   export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_FQDN ACME_EMAIL TARGET_LABEL TARGET_REALITY_SNI TARGET_DEVICE_LIMIT TARGET_IPV4 TARGET_SSH_PORT TARGET_INTERFACE
-  export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS
+  export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS TARGET_PROFILE_ORDER
   export TARGET_REALITY_MODE
   # After the last answer, validate inputs and the host before publishing any
   # persistent state. No extra confirmation or interactive gate follows.
@@ -382,6 +384,8 @@ TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
 TARGET_PROFILE_IDS=${TARGET_PROFILE_IDS:-}
+TARGET_PROFILE_ORDER=${TARGET_PROFILE_ORDER:-legacy}
+case $TARGET_PROFILE_ORDER in legacy|priority) ;; *) die 'Небезопасный порядок профилей';; esac
 TARGET_REALITY_MODE=${TARGET_REALITY_MODE:-external}
 case $TARGET_REALITY_MODE in self-steal|decoy|external) ;; *) die 'Небезопасный режим REALITY';; esac
 [[ $TARGET_TLS_MODE == letsencrypt ]] || die 'Новая установка требует Let’s Encrypt и HTTPS'
@@ -393,14 +397,14 @@ case "$TARGET_PROFILE_SET" in
   custom)
     profile_counts=$(TARGET_PROFILE_IDS="$TARGET_PROFILE_IDS" python3 -I -B \
       "$destination/bundle/portfolio/portfolio_catalog.py" --set custom \
-      --egress "$TARGET_EGRESS_MODE" --label "$TARGET_LABEL" --counts) ||
+      --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER" --label "$TARGET_LABEL" --counts) ||
       die 'Небезопасный ручной набор профилей'
     read -r _ TARGET_EXTRA_PROFILE_COUNT <<<"$profile_counts"
     ;;
   *) die 'Небезопасный набор профилей';;
 esac
 export TARGET_ADDRESS_MODE TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_IPV4 TARGET_FQDN TARGET_INTERFACE TARGET_SSH_PORT TARGET_DEVICE_LIMIT TARGET_REALITY_SNI TARGET_LABEL ACME_EMAIL
-export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS TARGET_EXTRA_PROFILE_COUNT
+export TARGET_HAPP_PROVIDER_ID TARGET_PROFILE_IDS TARGET_PROFILE_ORDER TARGET_EXTRA_PROFILE_COUNT
 export TARGET_REALITY_MODE
 runtime="$state/bundle"
 if [[ ! -d $runtime ]]; then
@@ -475,7 +479,8 @@ else
     phase xhttp env CONFIRM_FRESH_XHTTP=FINALIZE-FRESH-XHTTP python3 "$runtime/scripts/finalize-xhttp.py" --apply
   fi
 fi
-if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
+if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ||
+      ${TARGET_PROFILE_ORDER:-legacy} == priority ]]; then
   # The established six/four profile gate runs before the selected portfolio
   # changes subscription rows. It cannot be used after filtering or expansion.
   installer_error_context baseline-verify "$state/baseline-verify.log"

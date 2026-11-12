@@ -27,7 +27,7 @@ from ip_addresses import discover, public_ipv4
 from ip_certificate import LE_ROOT, issue, validate
 from ip_feed import ROUTING_HEADERS, rewrite_feed
 from ip_network import TABLE, fetch_feed, nginx_aliases, nft_rules, rebind_url, uri_lines
-from ip_runtime import CellEdit, edit_rows, plan_runtime
+from ip_runtime import CellEdit, edit_rows, plan_runtime, vmess
 
 
 STATE = Path("/var/lib/vpn-installer")
@@ -202,14 +202,18 @@ def replace_address(raw, old, new):
 
 
 def custom_profile_rows(target):
-    if target["TARGET_PROFILE_SET"] != "custom":
+    # Legacy preset subscriptions keep their historical verification path.
+    # Priority publications have an explicit order for every menu selection.
+    order = target.get("TARGET_PROFILE_ORDER", "legacy")
+    if target["TARGET_PROFILE_SET"] != "custom" and order != "priority":
         return None
     catalog = Path(__file__).resolve().parents[1] / "portfolio/portfolio_catalog.py"
     spec = importlib.util.spec_from_file_location("vpn_ip_catalog", catalog)
     selector = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(selector)
-    return selector.select_profiles("custom", target["TARGET_EGRESS_MODE"],
-                                    target["TARGET_LABEL"], target["TARGET_PROFILE_IDS"])
+    return selector.select_profiles(target["TARGET_PROFILE_SET"], target["TARGET_EGRESS_MODE"],
+                                    target["TARGET_LABEL"], target.get("TARGET_PROFILE_IDS", ""),
+                                    profile_order=order)
 
 
 def managed_json(path):
@@ -224,9 +228,10 @@ def check_custom_publication(target, rows):
     publication = managed_json(STATE / "portfolio-publication.json")
     if (publication.get("status") != "committed" or
             publication.get("target") != target["TARGET_IPV4"] or
-            publication.get("profile_set") != "custom" or
+            publication.get("profile_set") != target["TARGET_PROFILE_SET"] or
             publication.get("egress") != target["TARGET_EGRESS_MODE"] or
-            publication.get("profile_ids") != target["TARGET_PROFILE_IDS"] or
+            publication.get("profile_ids", "") != target.get("TARGET_PROFILE_IDS", "") or
+            publication.get("profile_order", "legacy") != target.get("TARGET_PROFILE_ORDER", "legacy") or
             publication.get("names") != [row["name"] for row in rows]):
         raise RuntimeError("IP_PUBLICATION_SELECTION")
 
@@ -244,7 +249,8 @@ def managed_portfolio(target, rows):
             portfolio.get("target") != target["TARGET_IPV4"] or
             portfolio.get("profile_set") != target["TARGET_PROFILE_SET"] or
             portfolio.get("egress_mode") != target["TARGET_EGRESS_MODE"] or
-            portfolio.get("profile_ids", "") != target.get("TARGET_PROFILE_IDS", "")):
+            portfolio.get("profile_ids", "") != target.get("TARGET_PROFILE_IDS", "") or
+            portfolio.get("profile_order", "legacy") != target.get("TARGET_PROFILE_ORDER", "legacy")):
         raise RuntimeError("IP_PORTFOLIO_SELECTION")
     if extras is not None and portfolio["ports"] != {
             str(30000 + row["port_offset"]): row["network"] for row in extras}:
@@ -369,10 +375,15 @@ def activate(units, timers, panel=True):
     ctl("start", *timers)
 
 
-def verify_feeds(primary, aliases, path):
+def verify_feeds(primary, aliases, path, expected_names=None):
     happ_agent = "Happ/4.10.1/Android/37"
     for ua in (happ_agent, "INCY/3.9.9/android Dalvik/2.1.0", "v2RayTun", "Karing"):
         body, headers = fetch_feed(primary, path, ua)
+        if expected_names is not None:
+            names = [vmess(uri).get("ps") if uri.startswith("vmess://") else
+                     unquote(urlsplit(uri).fragment) for uri in uri_lines(body)]
+            if names != expected_names:
+                raise RuntimeError("IP_PUBLICATION_ORDER")
         if ua == happ_agent:
             primary_links = uri_lines(body)
         for address in aliases:
@@ -432,7 +443,11 @@ def verify_current():
         ctl("is-enabled", "--quiet", unit)
     run("nft", "-s", "list", "table", "ip", TABLE)
     path = urlsplit(env_file(ACCESS)["SUBSCRIPTION_URL"]).path
-    verify_feeds(primary, aliases, path)
+    rows = custom_profile_rows(target)
+    if rows is not None:
+        check_custom_publication(target, rows)
+    verify_feeds(primary, aliases, path,
+                 expected_names=None if rows is None else [row["name"] for row in rows])
 
 
 def render_bundle(journal, target):
@@ -614,7 +629,8 @@ def reconcile():
         activate(units, timers)
         for attempt in range(20):
             try:
-                uris = verify_feeds(primary, aliases, path)
+                uris = verify_feeds(primary, aliases, path,
+                                   expected_names=None if rows is None else [row["name"] for row in rows])
                 break
             except (OSError, ValueError):
                 if attempt == 19:

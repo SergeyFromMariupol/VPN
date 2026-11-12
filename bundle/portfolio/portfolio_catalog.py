@@ -19,6 +19,7 @@ import unicodedata
 CATALOG_PATH = Path(__file__).resolve().with_name("catalog.json")
 PROFILE_SETS = ("basic", "dpi", "all", "custom")
 EGRESS_MODES = ("warp", "direct", "both")
+PROFILE_ORDERS = ("legacy", "priority")
 EGRESS_LABELS = {"warp": "☁️ Cloudflare", "direct": "🖥️ IP сервера"}
 TIER_PRIORITY = {"A": 0, "B1": 1, "B2": 2, "C": 3, "D": 4, "E": 5}
 # A balanced subset of the historical mobile-tested recipes, not a measured
@@ -138,13 +139,50 @@ def is_public_native(row: dict, egress_mode: str) -> bool:
                  row["protocol"] == "hysteria2"))
 
 
+def priority_profiles(rows: list[dict]) -> list[dict]:
+    """Order selected recipes without adding profiles or changing their identity.
+
+    Each exit starts with its best available Hysteria and REALITY recipe. The
+    compact preset supplies the remaining recommendation; historical tiers and
+    encrypted transports break ties for recipes outside that preset.
+    """
+    stem_priority = {stem: index for index, stem in enumerate(TOP10_STEMS)}
+    original = {row["id"]: index for index, row in enumerate(load_catalog()["entries"])}
+
+    def key(row):
+        stem = row["id"].rsplit("-", 1)[0]
+        return (stem_priority.get(stem, len(stem_priority)),
+                TIER_PRIORITY[row["tier"]],
+                {"reality": 0, "tls": 1, "none": 2}[row["security"]],
+                original[row["id"]])
+
+    result = []
+    for role in ("warp", "direct"):
+        group = sorted((row for row in rows if row["egress"] == role), key=key)
+        hysteria = [row for row in group if row["protocol"] == "hysteria2"]
+        reality = [row for row in group if row["security"] == "reality"]
+        first = min(hysteria, key=key) if hysteria else None
+        # Basic REALITY keeps its familiar name as the second profile. Expanded
+        # sets prefer XHTTP AUTO before the baseline gRPC and XHTTP recipes.
+        second = min(reality, key=lambda row: (
+            0 if row["id"].startswith("vless-reality-xhttp-auto-") else
+            1 if row["id"].startswith("vless-reality-grpc-") else 2,
+            key(row))) if reality else None
+        leading = [row for row in (first, second) if row is not None]
+        leading_ids = {row["id"] for row in leading}
+        result.extend(leading + [row for row in group if row["id"] not in leading_ids])
+    return result
+
+
 def select_profiles(profile_set: str, egress_mode: str, target_label: str,
-                    profile_ids: str = "") -> list[dict]:
+                    profile_ids: str = "", profile_order: str = "legacy") -> list[dict]:
     """Return ordered recipes with unique names for the requested menu options.
 
     ``basic`` is the six original links. ``dpi`` includes tiers A–D and the
     original six (98 total). ``all`` includes all 146 accepted links. Egress
-    filtering preserves that order. A custom URI-only selection preserves its
+    filtering preserves that order in legacy mode. Priority mode groups each
+    exit and starts it with Hysteria then REALITY where selected. A legacy custom
+    URI-only selection preserves its
     explicit CSV order; native-containing selections retain the original order.
     The source observation was on Miranda;
     these selections do not claim future DPI resistance on other networks.
@@ -153,6 +191,8 @@ def select_profiles(profile_set: str, egress_mode: str, target_label: str,
         raise ValueError(f"Unknown profile set: {profile_set}")
     if egress_mode not in EGRESS_MODES:
         raise ValueError(f"Unknown egress mode: {egress_mode}")
+    if profile_order not in PROFILE_ORDERS:
+        raise ValueError(f"Unknown profile order: {profile_order}")
     _validate_label(target_label)
     requested = set()
     if profile_set == "custom":
@@ -182,23 +222,25 @@ def select_profiles(profile_set: str, egress_mode: str, target_label: str,
     if profile_set == "custom" and not any(is_public_native(row, egress_mode) for row in result):
         by_id = {row["id"]: row for row in result}
         result = [by_id[profile_id] for profile_id in ids]
+    if profile_order == "priority":
+        result = priority_profiles(result)
     if len({row["name"] for row in result}) != len(result):
         raise ValueError("Portfolio profile names are not unique")
     return result
 
 
-def select_top10(egress: str, label: str = "VPN") -> list[dict]:
+def select_top10(egress: str, label: str = "VPN", profile_order: str = "legacy") -> list[dict]:
     """Resolve the preset's explicit priority, grouped by WARP/direct exit."""
     if egress not in EGRESS_MODES:
         raise ValueError(f"Unknown egress mode: {egress}")
     roles = ("warp", "direct") if egress == "both" else (egress,)
     ids = ",".join(f"{stem}-{role}" for role in roles for stem in TOP10_STEMS)
-    return select_profiles("custom", egress, label, ids)
+    return select_profiles("custom", egress, label, ids, profile_order)
 
 
-def select_numbers(egress_mode: str, selection: str) -> list[dict]:
+def select_numbers(egress_mode: str, selection: str, profile_order: str = "legacy") -> list[dict]:
     """Resolve numbers and inclusive ranges against the displayed menu."""
-    rows = select_profiles("all", egress_mode, "VPN")
+    rows = select_profiles("all", egress_mode, "VPN", profile_order=profile_order)
     chosen = set()
     for token in re.split(r"\s*,\s*|\s+", selection.strip()):
         match = re.fullmatch(r"([1-9][0-9]{0,2})(?:-([1-9][0-9]{0,2}))?", token)
@@ -212,7 +254,8 @@ def select_numbers(egress_mode: str, selection: str) -> list[dict]:
         if chosen & indices:
             raise ValueError("A profile is selected more than once")
         chosen.update(indices)
-    return [row for number, row in enumerate(rows, 1) if number in chosen]
+    result = [row for number, row in enumerate(rows, 1) if number in chosen]
+    return priority_profiles(result) if profile_order == "priority" else result
 
 
 def write_selection(rows: list[dict], output) -> None:
@@ -221,7 +264,7 @@ def write_selection(rows: list[dict], output) -> None:
     print(mode, ",".join(row["id"] for row in rows), len(rows), file=output)
 
 
-def checklist(egress_mode: str) -> int:
+def checklist(egress_mode: str, profile_order: str = "legacy") -> int:
     """Draw on the terminal and return the saved selection through fd 3."""
     try:
         import curses
@@ -238,7 +281,7 @@ def checklist(egress_mode: str) -> int:
     except (curses.error, locale.Error):
         return 69
 
-    rows = select_profiles("all", egress_mode, "VPN")
+    rows = select_profiles("all", egress_mode, "VPN", profile_order=profile_order)
 
     def choose(screen):
         try:
@@ -308,6 +351,8 @@ def checklist(egress_mode: str) -> int:
         return 1
     if selected is None:
         return 1
+    if profile_order == "priority":
+        selected = priority_profiles(selected)
     with os.fdopen(3, "w", encoding="utf-8") as output:
         write_selection(selected, output)
     return 0
@@ -324,25 +369,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--egress", choices=EGRESS_MODES, required=True)
     parser.add_argument("--label", default=os.environ.get("TARGET_LABEL"))
     parser.add_argument("--ids", default=os.environ.get("TARGET_PROFILE_IDS", ""))
+    parser.add_argument("--order", choices=PROFILE_ORDERS,
+                        default=os.environ.get("TARGET_PROFILE_ORDER", "legacy"))
     parser.add_argument("--counts", action="store_true")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     try:
         if args.menu:
-            for number, row in enumerate(select_profiles("all", args.egress, "VPN"), 1):
+            for number, row in enumerate(select_profiles("all", args.egress, "VPN",
+                                                        profile_order=args.order), 1):
                 print(f"  {number:3}. {row['name'].removeprefix('VPN · ')}")
         elif args.choose is not None:
-            write_selection(select_numbers(args.egress, args.choose), sys.stdout)
+            write_selection(select_numbers(args.egress, args.choose, args.order), sys.stdout)
         elif args.preset == "top10":
             label = args.label if args.label is not None else "VPN"
-            write_selection(select_top10(args.egress, label), sys.stdout)
+            write_selection(select_top10(args.egress, label, args.order), sys.stdout)
         elif args.checklist:
-            return checklist(args.egress)
+            return checklist(args.egress, args.order)
         else:
             if args.label is None:
                 parser.error("--label or TARGET_LABEL is required")
-            rows = select_profiles(args.profile_set, args.egress, args.label, args.ids)
+            rows = select_profiles(args.profile_set, args.egress, args.label, args.ids, args.order)
             if args.counts:
                 print(len(rows), sum(not row["baseline_reuse"] for row in rows))
             else:
