@@ -11,7 +11,8 @@ fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
   bash "$bundle/base/install-menu.sh" --check-only
 fi
-[[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]] || exit 1
+[[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ||
+   ${TARGET_PROFILE_ORDER:-legacy} == priority ]] || exit 1
 
 units=(x-ui nginx germanyvpn-xhttp-test.service)
 if [[ $TARGET_EGRESS_MODE != direct ]]; then

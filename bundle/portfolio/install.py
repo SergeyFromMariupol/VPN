@@ -165,10 +165,13 @@ def target():
         result[key] = values[0]
     result.setdefault("TARGET_EGRESS_MODE", "both")
     result.setdefault("TARGET_PROFILE_SET", "basic")
+    result.setdefault("TARGET_PROFILE_ORDER", "legacy")
     need(result.get("TARGET_TLS_MODE", "letsencrypt") == "letsencrypt" and
          result["TARGET_PROFILE_SET"] in ("dpi", "all", "custom") and
          result["TARGET_EGRESS_MODE"] in ("warp", "direct", "both"),
          "PORTFOLIO_TARGET_MODE")
+    need(result["TARGET_PROFILE_ORDER"] in ("legacy", "priority"),
+         "PORTFOLIO_TARGET_ORDER")
     need(result.get("TARGET_IPV4") and result.get("TARGET_FQDN") and
          result.get("TARGET_REALITY_SNI") and result.get("TARGET_LABEL") and
          result.get("TARGET_INTERFACE"), "PORTFOLIO_TARGET_FIELDS")
@@ -183,7 +186,8 @@ def rows_for(target_info):
     rows = select_profiles(target_info["TARGET_PROFILE_SET"],
                            target_info["TARGET_EGRESS_MODE"],
                            target_info["TARGET_LABEL"],
-                           target_info.get("TARGET_PROFILE_IDS", ""))
+                           target_info.get("TARGET_PROFILE_IDS", ""),
+                           target_info.get("TARGET_PROFILE_ORDER", "legacy"))
     rows = [row for row in rows if not row["baseline_reuse"]]
     profile_set = target_info["TARGET_PROFILE_SET"]
     if profile_set != "custom":
@@ -200,7 +204,8 @@ def same_target(info, state):
             state["interface"] == info["TARGET_INTERFACE"] and
             state["profile_set"] == info["TARGET_PROFILE_SET"] and
             state["egress_mode"] == info["TARGET_EGRESS_MODE"] and
-            state.get("profile_ids", "") == info.get("TARGET_PROFILE_IDS", ""))
+            state.get("profile_ids", "") == info.get("TARGET_PROFILE_IDS", "") and
+            state.get("profile_order", "legacy") == info.get("TARGET_PROFILE_ORDER", "legacy"))
 
 
 def keypair():
@@ -739,6 +744,8 @@ def apply(info):
              "unit_sha256": sha(unit_raw), "hook_sha256": sha(hook_raw),
              "tls_initial_sha256": tls_initial_sha256,
              "ufw_before": before_ufw, "routes_before": before_routes}
+    if info.get("TARGET_PROFILE_ORDER", "legacy") != "legacy":
+        state["profile_order"] = info["TARGET_PROFILE_ORDER"]
     try:
         ROOT.mkdir(mode=0o700)
         safe_directory(ROOT)

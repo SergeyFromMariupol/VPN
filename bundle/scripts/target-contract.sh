@@ -16,6 +16,7 @@ if [[ -f /etc/germanyvpn-target.env ]]; then
   TARGET_EGRESS_MODE=both
   TARGET_PROFILE_SET=basic
   TARGET_PROFILE_IDS=''
+  TARGET_PROFILE_ORDER=legacy
   TARGET_CERT_NAME=''
   TARGET_ADDITIONAL_IPV4=''
   TARGET_HAPP_PROVIDER_ID=''
@@ -30,6 +31,11 @@ TARGET_TLS_MODE=${TARGET_TLS_MODE:-letsencrypt}
 TARGET_EGRESS_MODE=${TARGET_EGRESS_MODE:-both}
 TARGET_PROFILE_SET=${TARGET_PROFILE_SET:-basic}
 TARGET_PROFILE_IDS=${TARGET_PROFILE_IDS:-}
+TARGET_PROFILE_ORDER=${TARGET_PROFILE_ORDER:-legacy}
+case $TARGET_PROFILE_ORDER in
+  legacy|priority) ;;
+  *) printf 'ERROR: invalid TARGET_PROFILE_ORDER\n' >&2; return 1;;
+esac
 TARGET_REALITY_MODE=${TARGET_REALITY_MODE:-external}
 case $TARGET_EGRESS_MODE in
   warp|direct|both) ;;
@@ -55,7 +61,7 @@ case $TARGET_PROFILE_SET in
     [[ $TARGET_TLS_MODE == letsencrypt ]] || { printf 'ERROR: custom requires a trusted certificate\n' >&2; return 1; }
     _vpn_profile_counts=$(TARGET_PROFILE_IDS="$TARGET_PROFILE_IDS" python3 -I -B \
       "${BASH_SOURCE[0]%/*}/../portfolio/portfolio_catalog.py" --set custom \
-      --egress "$TARGET_EGRESS_MODE" --label selection --counts) || return 1
+      --egress "$TARGET_EGRESS_MODE" --order "$TARGET_PROFILE_ORDER" --label selection --counts) || return 1
     read -r TARGET_SELECTED_PROFILE_COUNT TARGET_EXTRA_PROFILE_COUNT <<<"$_vpn_profile_counts"
     unset _vpn_profile_counts
     ;;
@@ -67,7 +73,7 @@ if [[ $TARGET_PROFILE_SET != custom ]]; then
     TARGET_EXTRA_PROFILE_COUNT=$((TARGET_EXTRA_PROFILE_COUNT * 2))
   fi
 fi
-export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT TARGET_SELECTED_PROFILE_COUNT TARGET_EXTRA_PROFILE_COUNT
+export TARGET_TLS_MODE TARGET_EGRESS_MODE TARGET_PROFILE_SET TARGET_PROFILE_IDS TARGET_PROFILE_ORDER TARGET_PUBLIC_SCHEME TARGET_PROTOCOL_COUNT TARGET_PROFILE_COUNT TARGET_SELECTED_PROFILE_COUNT TARGET_EXTRA_PROFILE_COUNT
 [[ $TARGET_FQDN =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && $TARGET_FQDN == *.* && $TARGET_FQDN != *..* ]] || {
   printf 'ERROR: TARGET_FQDN must be a lowercase DNS name or public IPv4\n' >&2; return 1;
 }

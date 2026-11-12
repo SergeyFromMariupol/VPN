@@ -18,7 +18,8 @@ bash "$bundle/tests/verify-happ-routing.sh"
 if [[ $TARGET_ADDRESS_MODE == ip && -f /var/lib/vpn-installer/ip-address.done ]]; then
   python3 -E -s -B /opt/vpn-installer/bundle/base/ip_reconcile.py --check
 fi
-if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ]]; then
+if [[ $TARGET_PROFILE_SET != basic || $TARGET_EGRESS_MODE != both ||
+      ${TARGET_PROFILE_ORDER:-legacy} == priority ]]; then
   exec bash /opt/vpn-installer/tools/verify-portfolio.sh
 fi
 if [[ $TARGET_TLS_MODE == letsencrypt ]]; then
