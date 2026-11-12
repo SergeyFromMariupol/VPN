@@ -508,6 +508,7 @@ class QuestionnaireFlow(unittest.TestCase):
         result = self.fixture(ssh_connection=SSH_CONNECTION, address_choice='1', resume=True)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertEqual(result['persisted']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['persisted']['TARGET_PROFILE_ORDER'], 'priority')
         self.assertEqual(result['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
         self.assertEqual(result['phase_inputs']['TARGET_PROFILE_COUNT'], '6')
         self.assertEqual(result['phase_inputs']['TARGET_SELECTED_PROFILE_COUNT'], '6')
@@ -515,10 +516,12 @@ class QuestionnaireFlow(unittest.TestCase):
         phases = [event for event in result['events'] if event.startswith('PHASE:')]
         self.assertEqual(phases, ['PHASE:' + name for name in
                          ('base', 'certbot', 'tls', 'direct', 'panel', 'nginx-restart',
-                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'renewal', 'menu', 'verify', 'ip-address')])
+                          'cert-reconcile', 'warp', 'dual', 'xhttp', 'baseline-verify',
+                          'portfolio-publish', 'renewal', 'menu', 'verify', 'ip-address')])
         self.assertEqual(result['resume']['exit'], 0, result['resume']['output'])
         self.assertTrue(result['resume']['target_unchanged'])
         self.assertEqual(result['resume']['phase_inputs']['TARGET_TLS_MODE'], 'letsencrypt')
+        self.assertEqual(result['resume']['phase_inputs']['TARGET_PROFILE_ORDER'], 'priority')
         self.assertEqual(result['resume']['events'], ['PHASE:verify'])
         self.assertNotIn('Выберите режим сертификата', result['resume']['output'])
 
